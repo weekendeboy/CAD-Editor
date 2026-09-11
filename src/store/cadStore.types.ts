@@ -35,7 +35,8 @@ export type CADTool =
   | 'SCALE'
   | 'ROTATE'
   | 'CIRCULAR_ARRAY'
-  | 'RECT_ARRAY';
+  | 'RECT_ARRAY'
+  | 'POLYGON';
 
 export interface CADState {
   document: CADDocument;
@@ -85,6 +86,12 @@ export interface CADState {
   // 倒角 (Chamfer) 距離設定（預設為 10）
   chamferDistance: number;
   setChamferDistance: (distance: number) => void;
+
+  // 正多邊形 (Polygon) 設定
+  polygonSides: number; // 邊數 (預設 5，範圍 3 ~ 1024)
+  polygonMethod: 'inscribed' | 'circumscribed'; // 內接於圓 / 外切於圓
+  setPolygonSides: (sides: number) => void;
+  setPolygonMethod: (method: 'inscribed' | 'circumscribed') => void;
 
   undoStack: CADDocument[];
   redoStack: CADDocument[];

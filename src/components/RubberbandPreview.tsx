@@ -1,7 +1,8 @@
 import React from 'react';
 import { Point2D, CircleEntity, ArcEntity, CADEntity2D } from '../types/cad';
 import { DrawSession } from '../types/sketchInteraction';
-import { calculate3PointArc } from '../core/2d/GeometryMath';
+import { calculate3PointArc, calculatePolygonVertices } from '../core/2d/GeometryMath';
+import { useCADStore } from '../store/cadStore';
 import { calculateTangentArcSegment } from '../core/2d/PolylineMath';
 import { calculateLinearDimensionLayout, calculateRadialDimensionLayout, calculateAngularDimensionLayout, determineLinearDimType } from '../core/2d/DimensionEngine';
 import { LineEntity } from '../types/cad';
@@ -697,6 +698,26 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
                 strokeWidth="1.2"
                 className="pointer-events-none"
               />
+              {layout.leaderPoints && layout.leaderPoints.length >= 2 && (
+                <polyline
+                  points={layout.leaderPoints.map((p) => `${p.x},${p.y}`).join(' ')}
+                  fill="none"
+                  stroke="#eab308"
+                  strokeWidth="1.2"
+                  className="pointer-events-none"
+                />
+              )}
+              {layout.landingLine && (
+                <line
+                  x1={layout.landingLine.start.x}
+                  y1={layout.landingLine.start.y}
+                  x2={layout.landingLine.end.x}
+                  y2={layout.landingLine.end.y}
+                  stroke="#eab308"
+                  strokeWidth="1.2"
+                  className="pointer-events-none"
+                />
+              )}
               <polygon
                 points={`${layout.arrow1.tip.x},${layout.arrow1.tip.y} ${layout.arrow1.wing1.x},${layout.arrow1.wing1.y} ${layout.arrow1.wing2.x},${layout.arrow1.wing2.y}`}
                 fill="#eab308"
@@ -1195,6 +1216,67 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
             }
             return null;
           })}
+      </g>
+    );
+  }
+
+  if (tool === 'POLYGON') {
+    const sides = useCADStore.getState().polygonSides || 5;
+    const method = useCADStore.getState().polygonMethod || 'inscribed';
+    const vertices = calculatePolygonVertices(session.startPoint, session.currentCursor, sides, method);
+    const screenVertices = vertices.map((pt) => worldToScreen(pt));
+    const polyPointsStr = screenVertices.map((pt) => `${pt.x},${pt.y}`).join(' ');
+
+    const centerDist = Math.hypot(
+      session.currentCursor.x - session.startPoint.x,
+      session.currentCursor.y - session.startPoint.y
+    );
+    const screenCenterDist = centerDist * scale;
+
+    return (
+      <g className="pointer-events-none select-none">
+        {/* 中心圓/外接圓/內切圓參考虛線 */}
+        {screenCenterDist > 2 && (
+          <circle
+            cx={startScreen.x}
+            cy={startScreen.y}
+            r={screenCenterDist}
+            stroke={strokeColor}
+            strokeWidth={1}
+            strokeDasharray="3,3"
+            opacity={0.35}
+            fill="none"
+          />
+        )}
+
+        {/* 中心點至游標導引虛線 */}
+        <line
+          x1={startScreen.x}
+          y1={startScreen.y}
+          x2={cursorScreen.x}
+          y2={cursorScreen.y}
+          stroke={strokeColor}
+          strokeWidth={strokeWidth}
+          strokeDasharray={strokeDasharray}
+          fill="none"
+        />
+
+        {/* 正多邊形動態虛線輪廓 */}
+        <polygon
+          points={polyPointsStr}
+          stroke={strokeColor}
+          strokeWidth={strokeWidth}
+          strokeDasharray={strokeDasharray}
+          fill="rgba(245, 158, 11, 0.08)"
+        />
+
+        {/* 各頂點端點指示標記 */}
+        {screenVertices.map((pt, idx) => (
+          <circle key={idx} cx={pt.x} cy={pt.y} r={2.5} fill={strokeColor} opacity={0.8} />
+        ))}
+
+        {/* 中心點標記 */}
+        <circle cx={startScreen.x} cy={startScreen.y} r={3.5} fill={strokeColor} />
       </g>
     );
   }

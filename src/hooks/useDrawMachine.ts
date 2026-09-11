@@ -3,15 +3,16 @@ import { useCADStore } from '../store/cadStore';
 import { Point2D, LineEntity, CircleEntity, ArcEntity, PolylineEntity, SketchFeature, CADEntity2D } from '../types/cad';
 import { DrawSession, createInitialDrawSession } from '../types/sketchInteraction';
 import { findSnapPoint, SnapResult } from '../core/2d/SnapManager';
-import { calculate3PointArc } from '../core/2d/GeometryMath';
+import { calculate3PointArc, calculatePolygonVertices } from '../core/2d/GeometryMath';
 import { isAngleOnArc, normalizeAngle, findAllIntersections } from '../core/2d/IntersectionEngine';
 import { calculateExtend } from '../core/2d/ExtendManager';
 import { calculateOffsetEntity } from '../core/2d/OffsetEngine';
 import { calculateTangentArcSegment, getSegmentEndTangent } from '../core/2d/PolylineMath';
 import { calculateMirror } from '../core/2d/MirrorEngine';
-import { PolarTrackingResult, calculatePolarTracking, PolarExtensionIntersection, findPolarExtensionIntersection } from '../core/2d/PolarTracking';
+import { PolarTrackingResult, calculatePolarTracking, PolarExtensionIntersection, findPolarExtensionIntersection, getNormalizedPolarAngles } from '../core/2d/PolarTracking';
 import { OTrackManager, TrackAnchor, TrackGuideLine } from '../core/2d/ObjectTracking';
 import { determineLinearDimType } from '../core/2d/DimensionEngine';
+import { getBestTangentPoint } from '../core/2d/TangentEngine';
 
 function getDistanceToLineSegment(p: Point2D, sStart: Point2D, sEnd: Point2D): number {
   const vx = sEnd.x - sStart.x;
@@ -291,6 +292,17 @@ export function useDrawMachine() {
   const [snapP1, setSnapP1] = useState<SnapResult | null>(null);
   const [snapP2, setSnapP2] = useState<SnapResult | null>(null);
 
+  // Deferred tangent state for LINE tool
+  const [deferredTangent, setDeferredTangent] = useState<{
+    entityId: string;
+    center: Point2D;
+    radius: number;
+    initialPick: Point2D;
+    isArc: boolean;
+    startAngle?: number;
+    endAngle?: number;
+  } | null>(null);
+
   // Dimension tool state
   const [dimSnap1, setDimSnap1] = useState<SnapResult | null>(null);
   const [dimSnap2, setDimSnap2] = useState<SnapResult | null>(null);
@@ -421,6 +433,7 @@ export function useDrawMachine() {
   const cancelDrawing = useCallback(() => {
     setDrawSession(createInitialDrawSession());
     setCurrentSnap(null);
+    setDeferredTangent(null);
     setFirstEntityId(null);
     setLastEntityId(null);
     setSnapCenter(null);
@@ -787,13 +800,40 @@ export function useDrawMachine() {
           // 3. 檢查 OTrack 十字追蹤線：若 activeGuideLines.length > 0，則 resolvedPt = trackingPt
           let trackingPt = worldPt;
           if (otrackManagerRef.current) {
-            const trackingRes = otrackManagerRef.current.evaluateTracking(worldPt, 15 / scale);
+            const targetPolarAngles = polarTrackingEnabled
+              ? getNormalizedPolarAngles(polarAngleStep, customPolarAngles)
+              : undefined;
+            const trackingRes = otrackManagerRef.current.evaluateTracking(
+              worldPt,
+              15 / scale,
+              targetPolarAngles,
+              drawSession.isDrawing && drawSession.startPoint ? drawSession.startPoint : undefined
+            );
             trackingPt = trackingRes.point;
             activeGuideLines = trackingRes.guideLines;
           }
 
           if (activeGuideLines.length > 0) {
             resolvedPt = trackingPt;
+            if (drawSession.isDrawing && drawSession.startPoint) {
+              const baseGuideline = activeGuideLines.find(
+                (gl) =>
+                  Math.abs(gl.anchor.x - drawSession.startPoint!.x) < 1e-4 &&
+                  Math.abs(gl.anchor.y - drawSession.startPoint!.y) < 1e-4
+              );
+              if (baseGuideline) {
+                const rad = (baseGuideline.angleDeg * Math.PI) / 180;
+                activePolar = {
+                  snappedPoint: trackingPt,
+                  rayStart: drawSession.startPoint,
+                  rayEnd: {
+                    x: drawSession.startPoint.x + 50000 * Math.cos(rad),
+                    y: drawSession.startPoint.y + 50000 * Math.sin(rad),
+                  },
+                  angleDeg: baseGuideline.angleDeg,
+                };
+              }
+            }
           } else if (orthoEnabled && drawSession.isDrawing && drawSession.startPoint) {
             // 4. 若上述皆未命中，才檢查 orthoEnabled（執行強制的正交 X/Y 鎖定）
             const dx = worldPt.x - drawSession.startPoint.x;
@@ -915,8 +955,21 @@ export function useDrawMachine() {
 
       setDrawSession((prev) => {
         if (!prev.isDrawing) return prev;
+        let updatedStartPoint = prev.startPoint;
+        if (deferredTangent && currentTool === 'LINE') {
+          const tangentPt = getBestTangentPoint(
+            worldPt,
+            deferredTangent.center,
+            deferredTangent.radius,
+            deferredTangent.initialPick,
+            deferredTangent.startAngle,
+            deferredTangent.endAngle
+          );
+          updatedStartPoint = tangentPt;
+        }
         return {
           ...prev,
+          startPoint: updatedStartPoint,
           currentCursor: res.point,
           inferredConstraint: res.inferredConstraint,
         };
@@ -1293,6 +1346,7 @@ export function useDrawMachine() {
       arrayStep,
       arraySourceIds,
       drawSession.isDrawing,
+      deferredTangent,
     ]
   );
 
@@ -1305,6 +1359,21 @@ export function useDrawMachine() {
 
       if (currentTool === 'LINE') {
         if (!drawSession.isDrawing) {
+          if (res.snap && res.snap.type === 'tangent') {
+            const targetEntity = currentEntities.find((e) => e.id === res.snap!.entityId);
+            if (targetEntity && (targetEntity.type === 'circle' || targetEntity.type === 'arc')) {
+              const isArc = targetEntity.type === 'arc';
+              setDeferredTangent({
+                entityId: targetEntity.id,
+                center: targetEntity.center,
+                radius: targetEntity.radius,
+                initialPick: res.snap.point,
+                isArc,
+                startAngle: isArc ? targetEntity.startAngle : undefined,
+                endAngle: isArc ? targetEntity.endAngle : undefined,
+              });
+            }
+          }
           setDrawSession({
             isDrawing: true,
             startPoint: clickPt,
@@ -1326,6 +1395,16 @@ export function useDrawMachine() {
           };
 
           addEntity(newLine);
+
+          if (deferredTangent) {
+            addConstraint({
+              id: crypto.randomUUID(),
+              type: 'tangent',
+              entityIds: [newLine.id, deferredTangent.entityId],
+              pointIndices: [0],
+            });
+            setDeferredTangent(null);
+          }
 
           if (startSnap && startSnap.entityId !== newLine.id && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
             addConstraint({
@@ -1709,6 +1788,37 @@ export function useDrawMachine() {
               type: 'vertical',
               entityIds: [rightLine.id],
             });
+          }
+
+          cancelDrawing();
+        }
+      } else if (currentTool === 'POLYGON') {
+        if (!drawSession.isDrawing) {
+          setDrawSession({
+            isDrawing: true,
+            startPoint: clickPt,
+            currentCursor: clickPt,
+            step: 1,
+            inferredConstraint: null,
+          });
+          setStartSnap(res.snap);
+        } else if (drawSession.startPoint) {
+          const sides = useCADStore.getState().polygonSides || 5;
+          const method = useCADStore.getState().polygonMethod || 'inscribed';
+          const vertices = calculatePolygonVertices(drawSession.startPoint, clickPt, sides, method);
+          const dist = Math.hypot(clickPt.x - drawSession.startPoint.x, clickPt.y - drawSession.startPoint.y);
+
+          if (dist > 0.01) {
+            const newPolygon: PolylineEntity = {
+              id: crypto.randomUUID(),
+              layerId: 'layer-0',
+              visible: true,
+              locked: false,
+              type: 'polyline',
+              points: vertices,
+              closed: true,
+            };
+            addEntity(newPolygon);
           }
 
           cancelDrawing();
@@ -2503,6 +2613,7 @@ export function useDrawMachine() {
       rectArraySourceIds,
       polarTracking,
       otrackGuideLines,
+      deferredTangent,
     ]
   );
 
@@ -2514,6 +2625,7 @@ export function useDrawMachine() {
         currentTool !== 'LINE' &&
         currentTool !== 'POLYLINE' &&
         currentTool !== 'CIRCLE' &&
+        currentTool !== 'POLYGON' &&
         currentTool !== 'MOVE' &&
         currentTool !== 'COPY' &&
         currentTool !== 'SCALE' &&
@@ -2588,6 +2700,24 @@ export function useDrawMachine() {
         x: startPoint.x + u.x * length,
         y: startPoint.y + u.y * length,
       };
+
+      if (currentTool === 'POLYGON') {
+        const sides = useCADStore.getState().polygonSides || 5;
+        const method = useCADStore.getState().polygonMethod || 'inscribed';
+        const vertices = calculatePolygonVertices(startPoint, exactEndPt, sides, method);
+        const newPolygon: PolylineEntity = {
+          id: crypto.randomUUID(),
+          layerId: 'layer-0',
+          visible: true,
+          locked: false,
+          type: 'polyline',
+          points: vertices,
+          closed: true,
+        };
+        addEntity(newPolygon);
+        cancelDrawing();
+        return true;
+      }
 
       if (currentTool === 'MOVE' || currentTool === 'COPY') {
         if (moveBasePoint && moveSourceIds.length > 0) {
@@ -2917,6 +3047,7 @@ export function useDrawMachine() {
     // OTrack exports
     otrackAnchors,
     otrackGuideLines,
+    deferredTangent,
     submitExactLength,
     // Dimension text drag exports
     isDraggingDimText: !!draggingDimInfo,

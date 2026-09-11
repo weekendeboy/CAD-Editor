@@ -10,6 +10,7 @@ import { CADSketchCanvas } from './components/CADSketchCanvas';
 import { SketchFeature } from './types/cad';
 import { OsnapSettingsModal } from './components/OsnapSettingsModal';
 import { PolarSettingsModal } from './components/PolarSettingsModal';
+import { exportSketchToDxf, downloadDxfFile } from './core/dxf/DxfWriter';
 import {
   MousePointer2,
   Pencil,
@@ -40,6 +41,8 @@ import {
   Orbit,
   LayoutGrid,
   SquareSlash,
+  Hexagon,
+  FileDown,
 } from 'lucide-react';
 
 export default function App() {
@@ -64,6 +67,10 @@ export default function App() {
     selectedEntityIds,
     addConstraint,
     toggleConstruction,
+    polygonSides,
+    setPolygonSides,
+    polygonMethod,
+    setPolygonMethod,
   } = useCADStore();
 
   // 取得當前草圖與求解器狀態
@@ -171,6 +178,35 @@ export default function App() {
     });
   };
 
+  const handleExportDxf = () => {
+    const filename = `${activeSketch?.name || 'sketch'}.dxf`;
+    const sketchToExport: SketchFeature = activeSketch || {
+      id: activeSketchId || 'sketch-1',
+      name: 'sketch',
+      type: 'SKETCH',
+      plane: {
+        id: 'datum-front',
+        name: 'Front Plane (XY)',
+        origin: { x: 0, y: 0, z: 0 },
+        normal: { x: 0, y: 0, z: 1 },
+        xAxis: { x: 1, y: 0, z: 0 },
+        yAxis: { x: 0, y: 1, z: 0 },
+      },
+      entities: [],
+      constraints: [],
+      dimensions: [],
+      profiles: [],
+      solverState: 'UnderDefined',
+      dependencies: [],
+      suppressed: false,
+    };
+    const dxfContent = exportSketchToDxf(sketchToExport, {
+      units: document.units || 'mm',
+      layers: document.layers || {},
+    });
+    downloadDxfFile(dxfContent, filename);
+  };
+
   return (
     <div className="w-full h-screen flex flex-col bg-neutral-900 text-white overflow-hidden">
       {/* Top Toolbar */}
@@ -223,6 +259,18 @@ export default function App() {
               title="Rectangle (R)"
             >
               <Square size={18} />
+            </button>
+            <button
+              id="btn-tool-polygon"
+              onClick={() => setTool('POLYGON')}
+              className={`p-1.5 rounded transition-colors ${
+                currentTool === 'POLYGON'
+                  ? 'bg-neutral-800 text-blue-400'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+              title="Polygon (正多邊形)"
+            >
+              <Hexagon size={18} />
             </button>
             <button
               onClick={() => setTool('CIRCLE')}
@@ -403,6 +451,43 @@ export default function App() {
               <LayoutGrid size={18} />
             </button>
 
+            {currentTool === 'POLYGON' && (
+              <div className="flex items-center gap-1.5 bg-neutral-900 border border-amber-500/40 px-2.5 py-0.5 rounded text-xs select-none shadow-lg">
+                <span className="text-amber-400 font-semibold">邊數:</span>
+                <input
+                  type="number"
+                  min={3}
+                  max={1024}
+                  value={polygonSides}
+                  onChange={(e) => setPolygonSides(Number(e.target.value))}
+                  className="w-14 px-1 py-0.5 bg-neutral-950 border border-neutral-700 rounded text-center text-amber-400 font-mono font-bold focus:outline-none focus:border-amber-500"
+                />
+                <div className="w-px h-4 bg-neutral-800 mx-1" />
+                <button
+                  onClick={() => setPolygonMethod('inscribed')}
+                  className={`px-2 py-0.5 rounded text-xs font-semibold transition-colors ${
+                    polygonMethod === 'inscribed'
+                      ? 'bg-amber-500 text-neutral-950 font-bold shadow-sm'
+                      : 'bg-neutral-800 text-neutral-400 hover:text-white'
+                  }`}
+                  title="內接於圓 (Inscribed)"
+                >
+                  內接於圓
+                </button>
+                <button
+                  onClick={() => setPolygonMethod('circumscribed')}
+                  className={`px-2 py-0.5 rounded text-xs font-semibold transition-colors ${
+                    polygonMethod === 'circumscribed'
+                      ? 'bg-amber-500 text-neutral-950 font-bold shadow-sm'
+                      : 'bg-neutral-800 text-neutral-400 hover:text-white'
+                  }`}
+                  title="外切於圓 (Circumscribed)"
+                >
+                  外切於圓
+                </button>
+              </div>
+            )}
+
             <div className="w-px h-5 bg-neutral-800 mx-1" />
 
             <div className="flex items-center gap-0.5">
@@ -569,6 +654,16 @@ export default function App() {
             [{solverState}]
           </div>
 
+          {/* Export DXF Button */}
+          <button
+            onClick={handleExportDxf}
+            className="bg-neutral-800 hover:bg-neutral-700 text-neutral-200 hover:text-white px-3 py-1 rounded text-xs font-semibold border border-neutral-700 transition-colors shadow-sm flex items-center gap-1.5"
+            title="Export DXF Drawing"
+          >
+            <FileDown size={15} className="text-blue-400" />
+            <span>Export DXF</span>
+          </button>
+
           <div className="flex items-center bg-neutral-900 px-3 py-1 rounded text-sm font-mono border border-neutral-800 text-neutral-300">
             <Maximize size={14} className="mr-2" />
             {viewMode} Mode
@@ -594,3 +689,4 @@ export default function App() {
     </div>
   );
 }
+

@@ -189,6 +189,7 @@ export function findSnapPoint(
 
       // Tangent snap
       if (basePoint) {
+        // 情況 A：已有 basePoint，維持現有的連心線反算精確切點
         const C = entity.center;
         const R = entity.radius;
         const dx = basePoint.x - C.x;
@@ -212,6 +213,20 @@ export function findSnapPoint(
           checkSnap(t1, 'tangent', entity.id);
           checkSnap(t2, 'tangent', entity.id);
         }
+      } else {
+        // 情況 B：basePoint 為空（繪製第一個點），遞延切點捕捉（Deferred Tangent Snap）
+        const C = entity.center;
+        const R = entity.radius;
+        const d = Math.hypot(mouseWorld.x - C.x, mouseWorld.y - C.y);
+        const distToCircumference = Math.abs(d - R);
+        if (distToCircumference <= worldThreshold) {
+          const angle = Math.atan2(mouseWorld.y - C.y, mouseWorld.x - C.x);
+          const projPt = {
+            x: C.x + R * Math.cos(angle),
+            y: C.y + R * Math.sin(angle),
+          };
+          checkSnap(projPt, 'tangent', entity.id);
+        }
       }
     } else if (entity.type === 'arc') {
       const arcStart = {
@@ -225,6 +240,19 @@ export function findSnapPoint(
       checkSnap(arcStart, 'endpoint', entity.id, 0);
       checkSnap(arcEnd, 'endpoint', entity.id, 1);
       checkSnap(entity.center, 'center', entity.id, 2);
+
+      // Arc midpoint snap calculation
+      const startAngle = entity.startAngle;
+      const endAngle = entity.endAngle;
+      const sweep = endAngle < startAngle
+        ? (endAngle + 2 * Math.PI) - startAngle
+        : endAngle - startAngle;
+      const midAngle = (startAngle + sweep / 2) % (2 * Math.PI);
+      const arcMid = {
+        x: entity.center.x + entity.radius * Math.cos(midAngle),
+        y: entity.center.y + entity.radius * Math.sin(midAngle),
+      };
+      checkSnap(arcMid, 'midpoint', entity.id);
 
       // Quadrants: 0, pi/2, pi, 3pi/2 (check if angle lies on arc)
       const angles = [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2];
@@ -240,6 +268,7 @@ export function findSnapPoint(
 
       // Tangent snap
       if (basePoint) {
+        // 情況 A：已有 basePoint，維持現有的連心線反算精確切點
         const C = entity.center;
         const R = entity.radius;
         const dx = basePoint.x - C.x;
@@ -265,6 +294,22 @@ export function findSnapPoint(
               y: C.y + R * Math.sin(theta2),
             };
             checkSnap(t2, 'tangent', entity.id);
+          }
+        }
+      } else {
+        // 情況 B：basePoint 為空（繪製第一個點），遞延切點捕捉（Deferred Tangent Snap）
+        const C = entity.center;
+        const R = entity.radius;
+        const d = Math.hypot(mouseWorld.x - C.x, mouseWorld.y - C.y);
+        const distToCircumference = Math.abs(d - R);
+        if (distToCircumference <= worldThreshold) {
+          const angle = Math.atan2(mouseWorld.y - C.y, mouseWorld.x - C.x);
+          if (isAngleOnArc(angle, entity.startAngle, entity.endAngle)) {
+            const projPt = {
+              x: C.x + R * Math.cos(angle),
+              y: C.y + R * Math.sin(angle),
+            };
+            checkSnap(projPt, 'tangent', entity.id);
           }
         }
       }
@@ -392,3 +437,4 @@ export function findSnapPoint(
 
   return closestSnap;
 }
+

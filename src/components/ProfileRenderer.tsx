@@ -10,7 +10,7 @@ export interface ProfileRendererProps {
  * Converts a polygon loop (list of world points) into an SVG path subpath string ('M x y L x y ... Z').
  */
 function loopToSvgPath(points: Point2D[], worldToScreen: (pt: Point2D) => Point2D): string {
-  if (points.length === 0) return '';
+  if (!points || points.length === 0) return '';
   const first = worldToScreen(points[0]);
   let pathStr = `M ${first.x} ${first.y}`;
 
@@ -68,7 +68,7 @@ export const ProfileRenderer: React.FC<ProfileRendererProps> = ({
   return (
     <g id="sketch-profiles-layer" className="sketch-profiles">
       {profiles.map((profile) => {
-        // Build the combined path (outer loop + inner loops)
+        // 構建包含外環與所有內環孔洞的單一複合 SVG 路徑
         let d = '';
         if (profile.segments && profile.segments.length > 0) {
           d = segmentsToSvgPath(profile.segments, worldToScreen);
@@ -79,11 +79,13 @@ export const ProfileRenderer: React.FC<ProfileRendererProps> = ({
         if (profile.innerLoops && profile.innerLoops.length > 0) {
           for (let i = 0; i < profile.innerLoops.length; i++) {
             const innerLoop = profile.innerLoops[i];
-            const innerSegs = (profile as any).innerSegments?.[i];
+            const innerSegs = profile.innerSegments?.[i];
             if (innerSegs && innerSegs.length > 0) {
-              d += ' ' + segmentsToSvgPath(innerSegs, worldToScreen);
-            } else {
-              d += ' ' + loopToSvgPath(innerLoop, worldToScreen);
+              const subPath = segmentsToSvgPath(innerSegs, worldToScreen);
+              if (subPath) d += ' ' + subPath;
+            } else if (innerLoop && innerLoop.length > 0) {
+              const subPath = loopToSvgPath(innerLoop, worldToScreen);
+              if (subPath) d += ' ' + subPath;
             }
           }
         }
@@ -108,3 +110,4 @@ export const ProfileRenderer: React.FC<ProfileRendererProps> = ({
     </g>
   );
 };
+

@@ -104,6 +104,8 @@ export const CADSketchCanvas: React.FC = () => {
     setPolarModalOpen,
     arrayItems,
     arrayFillAngle,
+    polygonSides,
+    polygonMethod,
   } = useCADStore();
 
   const handleSelectEntity = useCallback(
@@ -215,7 +217,7 @@ export const CADSketchCanvas: React.FC = () => {
       }
 
       if (
-        (currentTool === 'LINE' || currentTool === 'POLYLINE' || currentTool === 'CIRCLE' || currentTool === 'MOVE' || currentTool === 'COPY' || currentTool === 'SCALE' || currentTool === 'ROTATE') &&
+        (currentTool === 'LINE' || currentTool === 'POLYLINE' || currentTool === 'CIRCLE' || currentTool === 'POLYGON' || currentTool === 'MOVE' || currentTool === 'COPY' || currentTool === 'SCALE' || currentTool === 'ROTATE') &&
         drawSession.isDrawing
       ) {
         // Intercept digit keys 0-9, period '.', and minus '-'
@@ -656,6 +658,7 @@ export const CADSketchCanvas: React.FC = () => {
               scale={scale}
               solverState={currentSolverState}
               onSelectEntity={handleSelectEntity}
+              currentTool={currentTool}
             />
           </g>
           {/* 約束視覺標記渲染層 (置於圖元渲染層上方) */}
@@ -2487,6 +2490,10 @@ export const CADSketchCanvas: React.FC = () => {
             ? (rectArraySourceIds.length > 0
                 ? `Rectangular Array: ${rectArraySourceIds.length} selected, adjust parameters in panel and press Enter or Confirm`
                 : 'Rectangular Array: Select objects to array, then adjust settings in panel')
+            : currentTool === 'POLYGON'
+            ? (!drawSession.isDrawing
+                ? `Polygon: Pick center point (Sides=${polygonSides}, Mode=${polygonMethod === 'inscribed' ? 'Inscribed' : 'Circumscribed'})`
+                : 'Polygon: Pick radius/rotation or type distance in HUD')
             : currentTool === 'POLYLINE' && drawSession.isDrawing
             ? 'Polyline: Pick next point [A for Arc, L for Line, ESC to exit, Click start to close]'
             : drawSession.isDrawing

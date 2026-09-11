@@ -9,7 +9,8 @@ export interface TrackAnchor {
 export interface TrackGuideLine {
   anchor: Point2D;
   targetPoint: Point2D;
-  type: 'horizontal' | 'vertical';
+  angleDeg: number;
+  type: 'horizontal' | 'vertical' | 'polar';
 }
 
 export interface OTrackResult {
@@ -21,6 +22,30 @@ function getDistance(p1: Point2D, p2: Point2D): number {
   const dx = p1.x - p2.x;
   const dy = p1.y - p2.y;
   return Math.sqrt(dx * dx + dy * dy);
+}
+
+/**
+ * Normalizes an angle in degrees to [0, 360)
+ */
+function normalizeAngle(deg: number): number {
+  let a = deg % 360;
+  if (a < 0) a += 360;
+  if (Math.abs(a - 360) < 1e-6) a = 0;
+  return a;
+}
+
+/**
+ * Categorizes an angle as horizontal, vertical, or general polar angle.
+ */
+function getGuideLineType(angleDeg: number): 'horizontal' | 'vertical' | 'polar' {
+  const norm = normalizeAngle(angleDeg);
+  if (Math.abs(norm - 0) < 1e-4 || Math.abs(norm - 180) < 1e-4) {
+    return 'horizontal';
+  }
+  if (Math.abs(norm - 90) < 1e-4 || Math.abs(norm - 270) < 1e-4) {
+    return 'vertical';
+  }
+  return 'polar';
 }
 
 export class OTrackManager {
@@ -94,89 +119,229 @@ export class OTrackManager {
   }
 
   /**
-   * Evaluates horizontal and vertical alignments with existing tracking anchors.
-   * If mouse is aligned, snaps the point to the alignment axis and provides the tracking guidelines.
+   * Evaluates object tracking alignments (orthogonal or polar) with existing tracking anchors.
+   * If mouse is aligned with rays from anchors (or basePoint), snaps the point to the alignment ray or intersection.
+   *
+   * @param mouseWorld Current mouse position in world coordinates
+   * @param tolerance Alignment snap tolerance in world units
+   * @param polarAngles Optional array of target polar angles (e.g. [0, 45, 90, 135, ...]).
+   * @param basePoint Optional current drawing start point to allow 2-ray intersections with drawing origin.
    */
-  public evaluateTracking(mouseWorld: Point2D, tolerance: number): OTrackResult {
+  public evaluateTracking(
+    mouseWorld: Point2D,
+    tolerance: number,
+    polarAngles?: number[],
+    basePoint?: Point2D
+  ): OTrackResult {
     const result: OTrackResult = {
       point: { ...mouseWorld },
       guideLines: [],
     };
 
-    if (this.anchors.length === 0) {
+    interface TrackingOrigin {
+      point: Point2D;
+      isBasePoint: boolean;
+    }
+
+    const origins: TrackingOrigin[] = this.anchors.map((a) => ({
+      point: a.point,
+      isBasePoint: false,
+    }));
+
+    if (basePoint) {
+      const alreadyInAnchors = origins.some(
+        (o) => getDistance(o.point, basePoint) < 1e-4
+      );
+      if (!alreadyInAnchors) {
+        origins.push({ point: basePoint, isBasePoint: true });
+      }
+    }
+
+    if (origins.length === 0) {
       return result;
     }
 
-    // Find horizontal and vertical alignment candidates
-    const horizontalAlphas: { anchor: Point2D; dist: number }[] = [];
-    const verticalAlphas: { anchor: Point2D; dist: number }[] = [];
+    // Determine target tracking angles
+    const rawAngles =
+      polarAngles && polarAngles.length > 0
+        ? polarAngles
+        : [0, 90, 180, 270];
 
-    for (const anchor of this.anchors) {
-      const dy = Math.abs(mouseWorld.y - anchor.point.y);
-      const dx = Math.abs(mouseWorld.x - anchor.point.x);
+    const targetAngles: number[] = [];
+    const seen = new Set<string>();
+    for (const a of rawAngles) {
+      const norm = normalizeAngle(a);
+      const key = norm.toFixed(4);
+      if (!seen.has(key)) {
+        seen.add(key);
+        targetAngles.push(norm);
+      }
+    }
 
-      // We do not want to snap if mouse is extremely close to the anchor itself (usually handled by OSNAP)
-      if (getDistance(mouseWorld, anchor.point) < 1e-3) {
+    // 1. Collect single ray candidates
+    interface RayCandidate {
+      anchor: Point2D;
+      isBasePoint: boolean;
+      angleDeg: number;
+      rad: number;
+      perpDist: number;
+      projDist: number;
+      targetPoint: Point2D;
+    }
+
+    const rayCandidates: RayCandidate[] = [];
+
+    for (const origin of origins) {
+      const dx = mouseWorld.x - origin.point.x;
+      const dy = mouseWorld.y - origin.point.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (dist < 1e-3) {
         continue;
       }
 
-      if (dy < tolerance) {
-        horizontalAlphas.push({ anchor: anchor.point, dist: dy });
-      }
-      if (dx < tolerance) {
-        verticalAlphas.push({ anchor: anchor.point, dist: dx });
+      const cursorAngleDeg = normalizeAngle((Math.atan2(dy, dx) * 180) / Math.PI);
+
+      for (const angleDeg of targetAngles) {
+        const rad = (angleDeg * Math.PI) / 180;
+        const cosAngle = Math.cos(rad);
+        const sinAngle = Math.sin(rad);
+
+        const projDist = dx * cosAngle + dy * sinAngle;
+        if (projDist <= 0) {
+          continue;
+        }
+
+        const perpDist = Math.abs(dx * sinAngle - dy * cosAngle);
+
+        let angleDiff = Math.abs(cursorAngleDeg - angleDeg);
+        if (angleDiff > 180) angleDiff = 360 - angleDiff;
+
+        if (perpDist <= tolerance && angleDiff <= 5.0) {
+          const targetPoint: Point2D = {
+            x: origin.point.x + projDist * cosAngle,
+            y: origin.point.y + projDist * sinAngle,
+          };
+
+          rayCandidates.push({
+            anchor: origin.point,
+            isBasePoint: origin.isBasePoint,
+            angleDeg,
+            rad,
+            perpDist,
+            projDist,
+            targetPoint,
+          });
+        }
       }
     }
 
-    // Sort by proximity
-    horizontalAlphas.sort((a, b) => a.dist - b.dist);
-    verticalAlphas.sort((a, b) => a.dist - b.dist);
+    // 2. Check for 2-Ray Intersection candidates between distinct origins
+    interface IntersectionCandidate {
+      anchor1: Point2D;
+      isBase1: boolean;
+      angle1: number;
+      anchor2: Point2D;
+      isBase2: boolean;
+      angle2: number;
+      intersectionPoint: Point2D;
+      distToMouse: number;
+    }
 
-    // 1. Check for Intersection alignment (one horizontal anchor alignment AND one vertical anchor alignment)
-    if (horizontalAlphas.length > 0 && verticalAlphas.length > 0) {
-      const horizAnchor = horizontalAlphas[0].anchor;
-      const vertAnchor = verticalAlphas[0].anchor;
+    const intersectionCandidates: IntersectionCandidate[] = [];
 
-      // The intersection point is X from vertical anchor, Y from horizontal anchor
-      const intersectionPt = { x: vertAnchor.x, y: horizAnchor.y };
+    if (origins.length >= 2) {
+      for (let i = 0; i < origins.length; i++) {
+        for (let j = i + 1; j < origins.length; j++) {
+          const o1 = origins[i];
+          const o2 = origins[j];
 
-      // Snap the cursor directly to the intersection point
-      result.point = intersectionPt;
+          for (const angle1 of targetAngles) {
+            const rad1 = (angle1 * Math.PI) / 180;
+            const cos1 = Math.cos(rad1);
+            const sin1 = Math.sin(rad1);
+
+            for (const angle2 of targetAngles) {
+              const rad2 = (angle2 * Math.PI) / 180;
+              const cos2 = Math.cos(rad2);
+              const sin2 = Math.sin(rad2);
+
+              const det = cos1 * sin2 - sin1 * cos2;
+              if (Math.abs(det) < 1e-4) {
+                continue; // Parallel
+              }
+
+              const Dx = o2.point.x - o1.point.x;
+              const Dy = o2.point.y - o1.point.y;
+
+              const t1 = (Dy * cos2 - Dx * sin2) / det;
+              const t2 = (Dy * cos1 - Dx * sin1) / det;
+
+              if (t1 <= 1e-4 || t2 <= 1e-4) {
+                continue; // Must project forward
+              }
+
+              const interPt: Point2D = {
+                x: o1.point.x + t1 * cos1,
+                y: o1.point.y + t1 * sin1,
+              };
+
+              const distToMouse = getDistance(mouseWorld, interPt);
+
+              if (distToMouse <= tolerance * 1.8) {
+                intersectionCandidates.push({
+                  anchor1: o1.point,
+                  isBase1: o1.isBasePoint,
+                  angle1,
+                  anchor2: o2.point,
+                  isBase2: o2.isBasePoint,
+                  angle2,
+                  intersectionPoint: interPt,
+                  distToMouse,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Priority 1: Best 2-ray intersection
+    if (intersectionCandidates.length > 0) {
+      intersectionCandidates.sort((a, b) => a.distToMouse - b.distToMouse);
+      const bestInter = intersectionCandidates[0];
+
+      result.point = bestInter.intersectionPoint;
       result.guideLines.push({
-        anchor: horizAnchor,
-        targetPoint: intersectionPt,
-        type: 'horizontal',
+        anchor: bestInter.anchor1,
+        targetPoint: bestInter.intersectionPoint,
+        angleDeg: bestInter.angle1,
+        type: getGuideLineType(bestInter.angle1),
       });
       result.guideLines.push({
-        anchor: vertAnchor,
-        targetPoint: intersectionPt,
-        type: 'vertical',
+        anchor: bestInter.anchor2,
+        targetPoint: bestInter.intersectionPoint,
+        angleDeg: bestInter.angle2,
+        type: getGuideLineType(bestInter.angle2),
       });
 
       return result;
     }
 
-    // 2. Check for single horizontal alignment
-    if (horizontalAlphas.length > 0) {
-      const best = horizontalAlphas[0].anchor;
-      result.point.y = best.y;
-      result.guideLines.push({
-        anchor: best,
-        targetPoint: { ...result.point },
-        type: 'horizontal',
-      });
-      return result;
-    }
+    // Priority 2: Best single-ray tracking candidate from OTrack anchors
+    const otrackRayCandidates = rayCandidates.filter((r) => !r.isBasePoint);
+    if (otrackRayCandidates.length > 0) {
+      otrackRayCandidates.sort((a, b) => a.perpDist - b.perpDist);
+      const bestRay = otrackRayCandidates[0];
 
-    // 3. Check for single vertical alignment
-    if (verticalAlphas.length > 0) {
-      const best = verticalAlphas[0].anchor;
-      result.point.x = best.x;
+      result.point = bestRay.targetPoint;
       result.guideLines.push({
-        anchor: best,
-        targetPoint: { ...result.point },
-        type: 'vertical',
+        anchor: bestRay.anchor,
+        targetPoint: bestRay.targetPoint,
+        angleDeg: bestRay.angleDeg,
+        type: getGuideLineType(bestRay.angleDeg),
       });
+
       return result;
     }
 

@@ -110,6 +110,12 @@ export const useCADStore = create<CADState>((set, get) => ({
   chamferDistance: 10,
   setChamferDistance: (distance) => set({ chamferDistance: Math.max(0.1, distance) }),
 
+  // 正多邊形 (Polygon) 設定（預設 5 邊，內接於圓）
+  polygonSides: 5,
+  polygonMethod: 'inscribed',
+  setPolygonSides: (sides) => set({ polygonSides: Math.max(3, Math.min(1024, Math.round(sides))) }),
+  setPolygonMethod: (method) => set({ polygonMethod: method }),
+
   undoStack: [],
   redoStack: [],
 

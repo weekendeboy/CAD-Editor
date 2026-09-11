@@ -1,5 +1,6 @@
 import React from 'react';
 import { Point2D, CADEntity2D } from '../types/cad';
+import { getPolylineSvgPathData } from '../core/2d/PolylineUtils';
 
 export interface EntityRendererProps {
   entities: CADEntity2D[];
@@ -8,6 +9,7 @@ export interface EntityRendererProps {
   scale: number;
   solverState?: 'UnderDefined' | 'FullyDefined' | 'OverDefined';
   onSelectEntity?: (id: string, e: React.MouseEvent) => void;
+  currentTool: string;
 }
 
 export const EntityRenderer: React.FC<EntityRendererProps> = ({
@@ -17,6 +19,7 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
   scale,
   solverState = 'UnderDefined',
   onSelectEntity,
+  currentTool,
 }) => {
   const renderEntity = (entity: CADEntity2D) => {
     // 處理不可見的圖元
@@ -52,17 +55,25 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
       strokeColor = '#60a5fa';
     }
 
+    const isSelectMode = currentTool === 'SELECT';
+
     const commonProps = {
       stroke: strokeColor,
       strokeWidth,
       strokeDasharray,
       fill: 'none',
-      style: { cursor: 'pointer' },
+      pointerEvents: (isSelectMode ? 'all' : 'none') as React.CSSProperties['pointerEvents'],
+      style: {
+        cursor: isSelectMode ? 'pointer' : 'crosshair',
+        pointerEvents: (isSelectMode ? 'all' : 'none') as React.CSSProperties['pointerEvents'],
+      },
       className: `cad-entity cad-entity-${entity.type}`,
       onClick: (e: React.MouseEvent) => {
-        e.stopPropagation(); // 阻止事件冒泡到底層畫布避免觸發繪圖取點
-        if (onSelectEntity) {
-          onSelectEntity(entity.id, e);
+        if (isSelectMode) {
+          e.stopPropagation(); // 阻止事件冒泡到底層畫布避免觸發繪圖取點
+          if (onSelectEntity) {
+            onSelectEntity(entity.id, e);
+          }
         }
       },
     };
@@ -128,17 +139,10 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
       }
 
       case 'polyline': {
-        if (entity.points.length === 0) return null;
+        const pathData = getPolylineSvgPathData(entity, worldToScreen, scale);
+        if (!pathData) return null;
 
-        const pointsStr = entity.points
-          .map((pt) => worldToScreen(pt))
-          .map((p) => `${p.x},${p.y}`)
-          .join(' ');
-
-        if (entity.closed) {
-          return <polygon key={entity.id} points={pointsStr} {...commonProps} />;
-        }
-        return <polyline key={entity.id} points={pointsStr} {...commonProps} />;
+        return <path key={entity.id} d={pathData} {...commonProps} />;
       }
 
       default:

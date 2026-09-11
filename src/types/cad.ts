@@ -18,6 +18,7 @@ export interface BaseCADEntity2D {
   color?: string;
   lineWidth?: number;
   isConstruction?: boolean;
+  state?: EntityState;
 }
 
 export interface LineEntity extends BaseCADEntity2D {
@@ -43,6 +44,7 @@ export interface ArcEntity extends BaseCADEntity2D {
 export interface PolylineEntity extends BaseCADEntity2D {
   type: 'polyline';
   points: Point2D[];
+  bulges?: number[]; // 對齊 AutoCAD Group Code 42 (凸度值)
   closed: boolean;
 }
 
@@ -125,6 +127,7 @@ export interface SketchProfile {
   outerLoop: Point2D[];
   segments: ProfileSegment[];
   innerLoops: Point2D[][];
+  innerSegments?: ProfileSegment[][]; // 支援內環孔洞具備精確圓弧邊界
   area: number;
   isClockwise: boolean;
 }
