@@ -8,6 +8,8 @@ import { useCADStore } from './store/cadStore';
 import { useCadShortcuts } from './hooks/useCadShortcuts';
 import { CADSketchCanvas } from './components/CADSketchCanvas';
 import { SketchFeature } from './types/cad';
+import { OsnapSettingsModal } from './components/OsnapSettingsModal';
+import { PolarSettingsModal } from './components/PolarSettingsModal';
 import {
   MousePointer2,
   Pencil,
@@ -26,7 +28,18 @@ import {
   Scissors,
   Ruler,
   CornerDownRight,
+  MoveRight,
   AlertTriangle,
+  Copy,
+  CopyPlus,
+  Share2,
+  FlipHorizontal,
+  Move,
+  Scaling,
+  RotateCw,
+  Orbit,
+  LayoutGrid,
+  SquareSlash,
 } from 'lucide-react';
 
 export default function App() {
@@ -43,6 +56,9 @@ export default function App() {
     canRedo,
     osnapEnabled,
     toggleOsnap,
+    orthoEnabled,
+    toggleOrtho,
+    setOsnapModalOpen,
     document,
     activeSketchId,
     selectedEntityIds,
@@ -187,6 +203,17 @@ export default function App() {
               <Pencil size={18} />
             </button>
             <button
+              onClick={() => setTool('POLYLINE')}
+              className={`p-1.5 rounded ${
+                currentTool === 'POLYLINE'
+                  ? 'bg-neutral-800 text-blue-400'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+              title="Polyline (P)"
+            >
+              <Share2 size={18} />
+            </button>
+            <button
               onClick={() => setTool('RECTANGLE')}
               className={`p-1.5 rounded ${
                 currentTool === 'RECTANGLE'
@@ -242,6 +269,17 @@ export default function App() {
               <Scissors size={18} />
             </button>
             <button
+              onClick={() => setTool('EXTEND')}
+              className={`p-1.5 rounded ${
+                currentTool === 'EXTEND'
+                  ? 'bg-neutral-800 text-blue-400'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+              title="Extend (E)"
+            >
+              <MoveRight size={18} />
+            </button>
+            <button
               onClick={() => setTool('DIMENSION')}
               className={`p-1.5 rounded ${
                 currentTool === 'DIMENSION'
@@ -263,19 +301,141 @@ export default function App() {
             >
               <CornerDownRight size={18} />
             </button>
+            <button
+              onClick={() => setTool('CHAMFER')}
+              className={`p-1.5 rounded ${
+                currentTool === 'CHAMFER'
+                  ? 'bg-neutral-800 text-blue-400'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+              title="Chamfer"
+            >
+              <SquareSlash size={18} />
+            </button>
+            <button
+              onClick={() => setTool('OFFSET')}
+              className={`p-1.5 rounded ${
+                currentTool === 'OFFSET'
+                  ? 'bg-neutral-800 text-blue-400'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+              title="Offset (O)"
+            >
+              <Copy size={18} />
+            </button>
+            <button
+              onClick={() => setTool('MIRROR')}
+              className={`p-1.5 rounded ${
+                currentTool === 'MIRROR'
+                  ? 'bg-neutral-800 text-blue-400'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+              title="Mirror (M)"
+            >
+              <FlipHorizontal size={18} />
+            </button>
+            <button
+              onClick={() => setTool('MOVE')}
+              className={`p-1.5 rounded ${
+                currentTool === 'MOVE'
+                  ? 'bg-neutral-800 text-blue-400'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+              title="Move"
+            >
+              <Move size={18} />
+            </button>
+            <button
+              onClick={() => setTool('COPY')}
+              className={`p-1.5 rounded ${
+                currentTool === 'COPY'
+                  ? 'bg-neutral-800 text-blue-400'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+              title="Copy"
+            >
+              <CopyPlus size={18} />
+            </button>
+            <button
+              onClick={() => setTool('SCALE')}
+              className={`p-1.5 rounded ${
+                currentTool === 'SCALE'
+                  ? 'bg-neutral-800 text-blue-400'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+              title="Scale"
+            >
+              <Scaling size={18} />
+            </button>
+            <button
+              onClick={() => setTool('ROTATE')}
+              className={`p-1.5 rounded ${
+                currentTool === 'ROTATE'
+                  ? 'bg-neutral-800 text-blue-400'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+              title="Rotate"
+            >
+              <RotateCw size={18} />
+            </button>
+            <button
+              id="btn-tool-circular-array"
+              onClick={() => setTool('CIRCULAR_ARRAY')}
+              className={`p-1.5 rounded transition-colors ${
+                currentTool === 'CIRCULAR_ARRAY'
+                  ? 'bg-neutral-800 text-purple-400'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+              title="Circular Array (環形陣列)"
+            >
+              <Orbit size={18} />
+            </button>
+            <button
+              id="btn-tool-rectangular-array"
+              onClick={() => setTool('RECT_ARRAY')}
+              className={`p-1.5 rounded transition-colors ${
+                currentTool === 'RECT_ARRAY'
+                  ? 'bg-neutral-800 text-blue-400'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+              title="Rectangular Array (矩形陣列)"
+            >
+              <LayoutGrid size={18} />
+            </button>
 
             <div className="w-px h-5 bg-neutral-800 mx-1" />
 
+            <div className="flex items-center gap-0.5">
+              <button
+                onClick={toggleOsnap}
+                className={`p-1.5 rounded transition-colors ${
+                  osnapEnabled
+                    ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/50'
+                    : 'text-neutral-400 hover:text-white'
+                }`}
+                title="Object Snap [F3]"
+              >
+                <Magnet size={18} />
+              </button>
+              <button
+                onClick={() => setOsnapModalOpen(true)}
+                className="p-1 text-[10px] text-neutral-400 hover:text-white hover:bg-neutral-800 rounded transition-colors shrink-0"
+                title="Osnap Settings"
+              >
+                ▼
+              </button>
+            </div>
+
             <button
-              onClick={toggleOsnap}
+              onClick={toggleOrtho}
               className={`p-1.5 rounded transition-colors ${
-                osnapEnabled
-                  ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/50'
+                orthoEnabled
+                  ? 'bg-cyan-950/80 text-cyan-400 border border-cyan-800/50'
                   : 'text-neutral-400 hover:text-white'
               }`}
-              title="Object Snap [F3]"
+              title="Ortho Mode [F8]"
             >
-              <Magnet size={18} />
+              <Move size={18} />
             </button>
 
             {/* Constraints toolbar & Entity operations (appears when entity is selected) */}
@@ -429,6 +589,8 @@ export default function App() {
         )}
         <CADSketchCanvas />
       </main>
+      <OsnapSettingsModal />
+      <PolarSettingsModal />
     </div>
   );
 }

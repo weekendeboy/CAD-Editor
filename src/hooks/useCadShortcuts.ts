@@ -16,7 +16,7 @@ export function useCadShortcuts() {
 
       // Retrieve stable actions and current state from the store directly
       const store = useCADStore.getState();
-      const { setTool, clearSelection, toggleOsnap, undo, redo, removeEntity, toggleConstruction, selectedEntityIds } = store;
+      const { setTool, clearSelection, toggleOsnap, toggleOrtho, undo, redo, removeEntity, toggleConstruction, selectedEntityIds } = store;
 
       const isMac = navigator.userAgent.toLowerCase().includes('mac');
       const isCmdOrCtrl = isMac ? event.metaKey : event.ctrlKey;
@@ -39,9 +39,26 @@ export function useCadShortcuts() {
 
       // We only want to trigger single-key shortcuts if NO modifier keys are pressed
       if (!event.altKey && !event.shiftKey) {
-        switch (event.key.toLowerCase()) {
+        const keyLower = event.key.toLowerCase();
+
+        if (store.currentTool === 'POLYLINE') {
+          const polyEvent = new CustomEvent('cad-polyline-keypress', {
+            detail: { key: keyLower },
+            cancelable: true,
+          });
+          window.dispatchEvent(polyEvent);
+          if (polyEvent.defaultPrevented) {
+            event.preventDefault();
+            return;
+          }
+        }
+
+        switch (keyLower) {
           case 'l':
             setTool('LINE');
+            break;
+          case 'p':
+            setTool('POLYLINE');
             break;
           case 'd':
             setTool('DIMENSION');
@@ -49,8 +66,17 @@ export function useCadShortcuts() {
           case 't':
             setTool('TRIM');
             break;
+          case 'e':
+            setTool('EXTEND');
+            break;
           case 'f':
             setTool('FILLET');
+            break;
+          case 'o':
+            setTool('OFFSET');
+            break;
+          case 'm':
+            setTool('MIRROR');
             break;
           case 's':
             setTool('SELECT');
@@ -89,6 +115,11 @@ export function useCadShortcuts() {
         if (event.key === 'F3') {
           event.preventDefault();
           toggleOsnap();
+        }
+
+        if (event.key === 'F8') {
+          event.preventDefault();
+          toggleOrtho();
         }
       }
     };

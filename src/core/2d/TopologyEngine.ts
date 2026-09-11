@@ -1,4 +1,4 @@
-import { CADEntity2D, Constraint, Point2D, SketchProfile, ProfileSegment } from '../../types/cad';
+import { CADEntity2D, CircleEntity, Constraint, Point2D, SketchProfile, ProfileSegment } from '../../types/cad';
 import { PlanarGraph, GraphEdge } from './TopologyGraph';
 
 /**
@@ -61,6 +61,49 @@ export function findClosedProfiles(
   const visitedEdgeIds = new Set<string>();
   const profiles: SketchProfile[] = [];
   let profileCounter = 1;
+
+  // Extract independent CircleEntity closed profiles
+  const circles = entities.filter(
+    (e): e is CircleEntity => e.type === 'circle' && e.visible !== false && !e.isConstruction
+  );
+
+  for (const circle of circles) {
+    const p0 = { x: circle.center.x + circle.radius, y: circle.center.y };
+    const p1 = { x: circle.center.x - circle.radius, y: circle.center.y };
+    const circleSegments: ProfileSegment[] = [
+      {
+        type: 'arc',
+        start: p0,
+        end: p1,
+        center: { ...circle.center },
+        radius: circle.radius,
+        startAngle: 0,
+        endAngle: Math.PI,
+        isLargeArc: false,
+        sweepFlag: 0,
+      },
+      {
+        type: 'arc',
+        start: p1,
+        end: p0,
+        center: { ...circle.center },
+        radius: circle.radius,
+        startAngle: Math.PI,
+        endAngle: 2 * Math.PI,
+        isLargeArc: false,
+        sweepFlag: 0,
+      },
+    ];
+
+    profiles.push({
+      id: `profile_${profileCounter++}`,
+      area: Math.PI * circle.radius * circle.radius,
+      isClockwise: false,
+      outerLoop: [p0, p1],
+      segments: circleSegments,
+      innerLoops: [],
+    });
+  }
 
   // 3. Traverse all directed edges to find closed faces
   for (const [startEdgeId, startEdge] of graph.edges) {

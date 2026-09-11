@@ -2,7 +2,8 @@ import React from 'react';
 import { Point2D, Dimension, CADEntity2D } from '../types/cad';
 import {
   calculateLinearDimensionLayout,
-  calculateRadialDimensionLayout
+  calculateRadialDimensionLayout,
+  calculateAngularDimensionLayout
 } from '../core/2d/DimensionEngine';
 
 interface DimensionRendererProps {
@@ -10,6 +11,7 @@ interface DimensionRendererProps {
   entities: CADEntity2D[];
   worldToScreen: (pt: Point2D) => Point2D;
   onEditDimension: (dim: Dimension) => void;
+  onStartDragDimensionText?: (dim: Dimension, e: React.PointerEvent) => void;
 }
 
 function getEntityPoints(entity: CADEntity2D): Point2D[] {
@@ -55,13 +57,23 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
   entities,
   worldToScreen,
   onEditDimension,
+  onStartDragDimensionText,
 }) => {
   if (!dimensions || dimensions.length === 0) return null;
+
+  const occupiedCircles: { x: number; y: number; r: number }[] = [];
+  function checkOverlap(c1: { x: number, y: number, r: number }) {
+    return occupiedCircles.some(c2 => Math.hypot(c1.x - c2.x, c1.y - c2.y) < (c1.r + c2.r - 2));
+  }
 
   return (
     <g id="cad-dimensions-layer" className="select-none">
       {dimensions.map((dim) => {
         if (!dim.points || dim.points.length === 0) return null;
+        
+        const isReference = !!(dim as any).isReference;
+        const strokeColor = isReference ? '#67e8f9' : '#10b981';
+        const textColor = isReference ? '#cffafe' : '#34d399';
 
         try {
           if (dim.type === 'linear') {
@@ -100,16 +112,13 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
               };
             }
             
-            // 將世界座標轉換為螢幕座標，使標註在縮放時維持一致的像素外觀尺寸
             const sP1 = worldToScreen(p1);
             const sP2 = worldToScreen(p2);
-            const sText = worldToScreen(textPosition);
+            let sText = worldToScreen(textPosition);
 
-            // 判斷是否為對齊標註（若 dim 屬性中有指定，否則自動分析）
-            const isAligned = (dim as any).isAligned !== false;
+            const isAligned = dim.dimType ? dim.dimType : ((dim as any).isAligned !== false);
 
-            // 計算標註幾何佈局 (使用預設的箭頭與間距像素值)
-            const layout = calculateLinearDimensionLayout(
+            let layout = calculateLinearDimensionLayout(
               sP1,
               sP2,
               sText,
@@ -120,27 +129,40 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
               4.0              // extend 伸出量
             );
 
-            const displayValue = layout.value / (dim as any).scaleFactor || layout.value;
-            // 實體長度計算 (世界座標距離)
-            const physicalLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-            const textStr = `${physicalLen.toFixed(1)} mm`;
+            const physicalLen = dim.dimType === 'horizontal'
+              ? Math.abs(p2.x - p1.x)
+              : dim.dimType === 'vertical'
+              ? Math.abs(p2.y - p1.y)
+              : Math.hypot(p2.x - p1.x, p2.y - p1.y);
+            let textStr = `${physicalLen.toFixed(1)} mm`;
+            if (isReference) textStr = `(${textStr})`;
 
-            // 計算膠囊背景尺寸
             const charCount = textStr.length;
             const rectWidth = charCount * 7.5 + 12;
             const rectHeight = 18;
-            const rx = layout.textCenter.x - rectWidth / 2;
-            const ry = layout.textCenter.y - rectHeight / 2;
+            const collisionRadius = Math.hypot(rectWidth / 2, rectHeight / 2) * 0.8;
+
+            let attempts = 0;
+            while (attempts < 8 && layout) {
+              if (!checkOverlap({ x: layout.textCenter.x, y: layout.textCenter.y, r: collisionRadius })) break;
+              // shift perpendicular to textRotation
+              sText.x -= Math.sin(layout.textRotation) * 22;
+              sText.y += Math.cos(layout.textRotation) * 22;
+              layout = calculateLinearDimensionLayout(sP1, sP2, sText, isAligned, 7.0, Math.PI / 6, 3.0, 4.0);
+              attempts++;
+            }
+            
+            if (!layout) return null;
+            occupiedCircles.push({ x: layout.textCenter.x, y: layout.textCenter.y, r: collisionRadius });
 
             return (
               <g key={dim.id} id={`dimension-linear-${dim.id}`}>
-                {/* 1. 尺寸界線 (Extension Lines) */}
                 <line
                   x1={layout.extension1.start.x}
                   y1={layout.extension1.start.y}
                   x2={layout.extension1.end.x}
                   y2={layout.extension1.end.y}
-                  stroke="#10b981"
+                  stroke={strokeColor}
                   strokeWidth="1"
                   className="pointer-events-none"
                 />
@@ -149,43 +171,64 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                   y1={layout.extension2.start.y}
                   x2={layout.extension2.end.x}
                   y2={layout.extension2.end.y}
-                  stroke="#10b981"
+                  stroke={strokeColor}
                   strokeWidth="1"
                   className="pointer-events-none"
                 />
-
-                {/* 2. 尺寸線 (Dimension Line) */}
                 <line
                   x1={layout.dimensionLine.start.x}
                   y1={layout.dimensionLine.start.y}
                   x2={layout.dimensionLine.end.x}
                   y2={layout.dimensionLine.end.y}
-                  stroke="#10b981"
+                  stroke={strokeColor}
                   strokeWidth="1"
                   className="pointer-events-none"
                 />
-
-                {/* 3. 箭頭 (Arrowheads) - 實心三角 */}
+                {layout.leaderPoints && layout.leaderPoints.length >= 2 && (
+                  <polyline
+                    points={layout.leaderPoints.map((p) => `${p.x},${p.y}`).join(' ')}
+                    fill="none"
+                    stroke={strokeColor}
+                    strokeWidth="1"
+                    className="pointer-events-none"
+                  />
+                )}
+                {layout.landingLine && (
+                  <line
+                    x1={layout.landingLine.start.x}
+                    y1={layout.landingLine.start.y}
+                    x2={layout.landingLine.end.x}
+                    y2={layout.landingLine.end.y}
+                    stroke={strokeColor}
+                    strokeWidth="1"
+                    className="pointer-events-none"
+                  />
+                )}
                 <polygon
                   points={`${layout.arrow1.tip.x},${layout.arrow1.tip.y} ${layout.arrow1.wing1.x},${layout.arrow1.wing1.y} ${layout.arrow1.wing2.x},${layout.arrow1.wing2.y}`}
-                  fill="#10b981"
+                  fill={strokeColor}
                   className="pointer-events-none"
                 />
                 <polygon
                   points={`${layout.arrow2.tip.x},${layout.arrow2.tip.y} ${layout.arrow2.wing1.x},${layout.arrow2.wing1.y} ${layout.arrow2.wing2.x},${layout.arrow2.wing2.y}`}
-                  fill="#10b981"
+                  fill={strokeColor}
                   className="pointer-events-none"
                 />
-
-                {/* 4. 文字標籤 (帶有暗色膠囊背景，避免線條穿透) */}
                 <g
                   transform={`translate(${layout.textCenter.x}, ${layout.textCenter.y}) rotate(${(layout.textRotation * 180) / Math.PI})`}
+                  onPointerDown={(e) => {
+                    if (e.button === 0) {
+                      e.stopPropagation();
+                      onStartDragDimensionText?.(dim, e);
+                    }
+                  }}
                   onClick={(e) => e.stopPropagation()}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
                     onEditDimension(dim);
                   }}
-                  className="cursor-pointer"
+                  style={{ cursor: 'move', pointerEvents: 'all' }}
+                  className="cad-dim-text group"
                 >
                   <rect
                     x={-rectWidth / 2}
@@ -194,14 +237,15 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                     height={rectHeight}
                     rx="4"
                     fill="#1e293b"
-                    stroke="#10b981"
+                    stroke={strokeColor}
                     strokeWidth="1"
                     opacity="0.95"
+                    className="hover:stroke-cyan-400 transition-colors"
                   />
                   <text
                     x={0}
                     y={0}
-                    fill="#34d399"
+                    fill={textColor}
                     fontSize="11"
                     fontFamily="monospace"
                     fontWeight="bold"
@@ -216,19 +260,22 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
           } else if (dim.type === 'radial') {
             const center = dim.points[0];
             const edge = dim.points[1] || { x: center.x + 10, y: center.y };
-            const radius = Math.hypot(edge.x - center.x, edge.y - center.y);
+            const physicalRadius = Math.hypot(edge.x - center.x, edge.y - center.y);
 
-            // 世界座標與半徑
             const sCenter = worldToScreen(center);
-            const sRadius = radius * Math.hypot(worldToScreen({ x: 1, y: 0 }).x - worldToScreen({ x: 0, y: 0 }).x, worldToScreen({ x: 1, y: 0 }).y - worldToScreen({ x: 0, y: 0 }).y);
-            const sText = worldToScreen(dim.textPosition);
+            const sRadius = physicalRadius * Math.hypot(worldToScreen({ x: 1, y: 0 }).x - worldToScreen({ x: 0, y: 0 }).x, worldToScreen({ x: 1, y: 0 }).y - worldToScreen({ x: 0, y: 0 }).y);
+            let sText = worldToScreen(dim.textPosition);
 
-            // 判斷是直徑標註還是半徑標註
             const isDiameter = !!(dim as any).isDiameter;
 
-            const layout = calculateRadialDimensionLayout(
+            let textStr = isDiameter
+              ? `Ø ${(physicalRadius * 2).toFixed(1)} mm`
+              : `R ${physicalRadius.toFixed(1)} mm`;
+            if (isReference) textStr = `(${textStr})`;
+
+            let layout = calculateRadialDimensionLayout(
               sCenter,
-              radius * (sRadius / radius), // 使用計算後的螢幕半徑
+              physicalRadius * (sRadius / physicalRadius),
               sText,
               isDiameter,
               7.0, // 箭頭長度
@@ -236,74 +283,75 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
               10.0 // 折線長度
             );
 
-            // 文字內容
-            const textStr = isDiameter
-              ? `Ø ${(radius * 2).toFixed(1)} mm`
-              : `R ${radius.toFixed(1)} mm`;
-
-            // 計算膠囊背景尺寸
             const charCount = textStr.length;
             const rectWidth = charCount * 7.5 + 12;
             const rectHeight = 18;
-            const rx = layout.textCenter.x - rectWidth / 2;
-            const ry = layout.textCenter.y - rectHeight / 2;
+            const collisionRadius = Math.hypot(rectWidth / 2, rectHeight / 2) * 0.8;
 
-            // 組合引線頂點為 SVG points 字串
+            let attempts = 0;
+            while (attempts < 8 && layout) {
+              if (!checkOverlap({ x: layout.textCenter.x, y: layout.textCenter.y, r: collisionRadius })) break;
+              sText.y -= 22; // shift vertically
+              layout = calculateRadialDimensionLayout(sCenter, physicalRadius * (sRadius / physicalRadius), sText, isDiameter, 7.0, Math.PI / 6, 10.0);
+              attempts++;
+            }
+
+            if (!layout) return null;
+            occupiedCircles.push({ x: layout.textCenter.x, y: layout.textCenter.y, r: collisionRadius });
+
             const polylinePoints = layout.leaderPoints
               .map((p) => `${p.x},${p.y}`)
               .join(' ');
 
             return (
               <g key={dim.id} id={`dimension-radial-${dim.id}`}>
-                {/* 1. 徑向引線 */}
                 <polyline
                   points={polylinePoints}
                   fill="none"
-                  stroke="#10b981"
+                  stroke={strokeColor}
                   strokeWidth="1"
                   className="pointer-events-none"
                 />
-
-                {/* 2. 水平折線 (Landing Line) */}
                 {layout.landingLine && (
                   <line
                     x1={layout.landingLine.start.x}
                     y1={layout.landingLine.start.y}
                     x2={layout.landingLine.end.x}
                     y2={layout.landingLine.end.y}
-                    stroke="#10b981"
+                    stroke={strokeColor}
                     strokeWidth="1"
                     className="pointer-events-none"
                   />
                 )}
-
-                {/* 3. 箭頭 1 */}
                 {layout.arrow1 && (
                   <polygon
                     points={`${layout.arrow1.tip.x},${layout.arrow1.tip.y} ${layout.arrow1.wing1.x},${layout.arrow1.wing1.y} ${layout.arrow1.wing2.x},${layout.arrow1.wing2.y}`}
-                    fill="#10b981"
+                    fill={strokeColor}
                     className="pointer-events-none"
                   />
                 )}
-
-                {/* 4. 箭頭 2 (僅在直徑時存在) */}
                 {layout.arrow2 && (
                   <polygon
                     points={`${layout.arrow2.tip.x},${layout.arrow2.tip.y} ${layout.arrow2.wing1.x},${layout.arrow2.wing1.y} ${layout.arrow2.wing2.x},${layout.arrow2.wing2.y}`}
-                    fill="#10b981"
+                    fill={strokeColor}
                     className="pointer-events-none"
                   />
                 )}
-
-                {/* 5. 文字標籤 (帶有暗色膠囊背景，避免線條穿透) */}
                 <g
                   transform={`translate(${layout.textCenter.x}, ${layout.textCenter.y}) rotate(${(layout.textRotation * 180) / Math.PI})`}
+                  onPointerDown={(e) => {
+                    if (e.button === 0) {
+                      e.stopPropagation();
+                      onStartDragDimensionText?.(dim, e);
+                    }
+                  }}
                   onClick={(e) => e.stopPropagation()}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
                     onEditDimension(dim);
                   }}
-                  className="cursor-pointer"
+                  style={{ cursor: 'move', pointerEvents: 'all' }}
+                  className="cad-dim-text group"
                 >
                   <rect
                     x={-rectWidth / 2}
@@ -312,14 +360,15 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                     height={rectHeight}
                     rx="4"
                     fill="#1e293b"
-                    stroke="#10b981"
+                    stroke={strokeColor}
                     strokeWidth="1"
                     opacity="0.95"
+                    className="hover:stroke-cyan-400 transition-colors"
                   />
                   <text
                     x={0}
                     y={0}
-                    fill="#34d399"
+                    fill={textColor}
                     fontSize="11"
                     fontFamily="monospace"
                     fontWeight="bold"
@@ -331,6 +380,75 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                 </g>
               </g>
             );
+          } else if (dim.type === 'angular') {
+            if (dim.points.length < 4) return null;
+            let line1 = { start: dim.points[0], end: dim.points[1], type: 'line' as const, id: '', layerId: '', visible: true, locked: false };
+            let line2 = { start: dim.points[2], end: dim.points[3], type: 'line' as const, id: '', layerId: '', visible: true, locked: false };
+            
+            if (dim.entityIds && dim.entityIds.length === 2) {
+               const ent1 = entities.find(e => e.id === dim.entityIds![0]);
+               const ent2 = entities.find(e => e.id === dim.entityIds![1]);
+               if (ent1 && ent1.type === 'line') line1 = ent1;
+               if (ent2 && ent2.type === 'line') line2 = ent2;
+            }
+
+            const sLine1 = { ...line1, start: worldToScreen(line1.start), end: worldToScreen(line1.end) };
+            const sLine2 = { ...line2, start: worldToScreen(line2.start), end: worldToScreen(line2.end) };
+            let sText = worldToScreen(dim.textPosition);
+
+            let layout = calculateAngularDimensionLayout(sLine1, sLine2, sText);
+            
+            if (layout) {
+              let textStr = `${layout.angleDeg.toFixed(1)}°`;
+              if (isReference) textStr = `(${textStr})`;
+
+              const charCount = textStr.length;
+              const rectWidth = charCount * 7.5 + 12;
+              const rectHeight = 18;
+              const collisionRadius = Math.hypot(rectWidth / 2, rectHeight / 2) * 0.8;
+
+              let attempts = 0;
+              while (attempts < 8 && layout) {
+                if (!checkOverlap({ x: layout.textCenter.x, y: layout.textCenter.y, r: collisionRadius })) break;
+                // shift radially
+                sText.x += Math.sin(layout.textRotation) * 22;
+                sText.y -= Math.cos(layout.textRotation) * 22;
+                layout = calculateAngularDimensionLayout(sLine1, sLine2, sText);
+                attempts++;
+              }
+
+              if (!layout) return null;
+              occupiedCircles.push({ x: layout.textCenter.x, y: layout.textCenter.y, r: collisionRadius });
+
+              return (
+                <g key={dim.id} id={`dimension-angular-${dim.id}`}>
+                  <path d={layout.arcPath} fill="none" stroke={strokeColor} strokeWidth="1" className="pointer-events-none" />
+                  <polygon points={`${layout.arrow1.tip.x},${layout.arrow1.tip.y} ${layout.arrow1.wing1.x},${layout.arrow1.wing1.y} ${layout.arrow1.wing2.x},${layout.arrow1.wing2.y}`} fill={strokeColor} className="pointer-events-none" />
+                  <polygon points={`${layout.arrow2.tip.x},${layout.arrow2.tip.y} ${layout.arrow2.wing1.x},${layout.arrow2.wing1.y} ${layout.arrow2.wing2.x},${layout.arrow2.wing2.y}`} fill={strokeColor} className="pointer-events-none" />
+                  <g
+                    transform={`translate(${layout.textCenter.x}, ${layout.textCenter.y}) rotate(${(layout.textRotation * 180) / Math.PI})`}
+                    onPointerDown={(e) => {
+                      if (e.button === 0) {
+                        e.stopPropagation();
+                        onStartDragDimensionText?.(dim, e);
+                      }
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      onEditDimension(dim);
+                    }}
+                    style={{ cursor: 'move', pointerEvents: 'all' }}
+                    className="cad-dim-text group"
+                  >
+                    <rect x={-rectWidth / 2} y={-rectHeight / 2} width={rectWidth} height={rectHeight} rx="4" fill="#1e293b" stroke={strokeColor} strokeWidth="1" opacity="0.95" className="hover:stroke-cyan-400 transition-colors" />
+                    <text x={0} y={0} fill={textColor} fontSize="11" fontFamily="monospace" fontWeight="bold" textAnchor="middle" dominantBaseline="central">
+                      {textStr}
+                    </text>
+                  </g>
+                </g>
+              );
+            }
           }
         } catch (err) {
           console.error(`Error rendering dimension ${dim.id}:`, err);

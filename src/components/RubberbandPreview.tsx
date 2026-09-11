@@ -1,11 +1,10 @@
 import React from 'react';
-import { Point2D, CircleEntity, ArcEntity } from '../types/cad';
+import { Point2D, CircleEntity, ArcEntity, CADEntity2D } from '../types/cad';
 import { DrawSession } from '../types/sketchInteraction';
 import { calculate3PointArc } from '../core/2d/GeometryMath';
-import {
-  calculateLinearDimensionLayout,
-  calculateRadialDimensionLayout
-} from '../core/2d/DimensionEngine';
+import { calculateTangentArcSegment } from '../core/2d/PolylineMath';
+import { calculateLinearDimensionLayout, calculateRadialDimensionLayout, calculateAngularDimensionLayout, determineLinearDimType } from '../core/2d/DimensionEngine';
+import { LineEntity } from '../types/cad';
 
 export interface RubberbandPreviewProps {
   session: DrawSession;
@@ -13,6 +12,13 @@ export interface RubberbandPreviewProps {
   worldToScreen: (pt: Point2D) => Point2D;
   scale: number;
   dimSelectedCircleOrArc?: CircleEntity | ArcEntity | null;
+  dimLine1?: LineEntity | null;
+  dimLine2?: LineEntity | null;
+  polylineMode?: 'LINE' | 'ARC';
+  lastTangentDir?: Point2D | null;
+  movePreviewEntities?: CADEntity2D[] | null;
+  scalePreviewEntities?: CADEntity2D[] | null;
+  rotatePreviewEntities?: CADEntity2D[] | null;
 }
 
 export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
@@ -21,6 +27,13 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
   worldToScreen,
   scale,
   dimSelectedCircleOrArc,
+  dimLine1,
+  dimLine2,
+  polylineMode,
+  lastTangentDir,
+  movePreviewEntities,
+  scalePreviewEntities,
+  rotatePreviewEntities,
 }) => {
   if (!session.isDrawing || !session.startPoint || !session.currentCursor) {
     return null;
@@ -330,25 +343,118 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
   }
 
   if (tool === 'POLYLINE') {
-    const basePoints =
-      session.polylinePoints && session.polylinePoints.length > 0
-        ? session.polylinePoints
-        : [session.startPoint];
+    // 當處於 ARC 模式且有上一段的相切方向時，繪製相切弧預覽
+    if (polylineMode === 'ARC' && lastTangentDir) {
+      const arcData = calculateTangentArcSegment(session.startPoint, lastTangentDir, session.currentCursor);
+      if (arcData) {
+        const screenRadius = arcData.radius * scale;
+        const worldStart = {
+          x: arcData.center.x + arcData.radius * Math.cos(arcData.startAngle),
+          y: arcData.center.y + arcData.radius * Math.sin(arcData.startAngle),
+        };
+        const worldEnd = {
+          x: arcData.center.x + arcData.radius * Math.cos(arcData.endAngle),
+          y: arcData.center.y + arcData.radius * Math.sin(arcData.endAngle),
+        };
+        const start = worldToScreen(worldStart);
+        const end = worldToScreen(worldEnd);
 
-    const allPoints = [...basePoints, session.currentCursor];
-    const pointsString = allPoints
-      .map(worldToScreen)
-      .map((p: Point2D) => `${p.x},${p.y}`)
-      .join(' ');
+        let diff = arcData.endAngle - arcData.startAngle;
+        while (diff < 0) diff += 2 * Math.PI;
+        while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
 
+        const largeArcFlag = diff > Math.PI ? 1 : 0;
+        const sweepFlag = 0;
+
+        const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
+
+        return (
+          <g>
+            <path
+              d={pathData}
+              stroke={strokeColor}
+              strokeWidth={strokeWidth}
+              strokeDasharray={strokeDasharray}
+              fill="none"
+            />
+            <circle cx={startScreen.x} cy={startScreen.y} r={3} fill={strokeColor} />
+            <circle cx={cursorScreen.x} cy={cursorScreen.y} r={2.5} fill={strokeColor} opacity={0.6} />
+          </g>
+        );
+      } else {
+        // 退化至相切射線輔助導引線，防止閃爍崩溃
+        const dx = session.currentCursor.x - session.startPoint.x;
+        const dy = session.currentCursor.y - session.startPoint.y;
+        const lenT = Math.hypot(lastTangentDir.x, lastTangentDir.y);
+        if (lenT > 1e-8) {
+          const tx = lastTangentDir.x / lenT;
+          const ty = lastTangentDir.y / lenT;
+          const dot = dx * tx + dy * ty;
+          const projWorld = {
+            x: session.startPoint.x + dot * tx,
+            y: session.startPoint.y + dot * ty,
+          };
+          const projScreen = worldToScreen(projWorld);
+          return (
+            <g>
+              <line
+                x1={startScreen.x}
+                y1={startScreen.y}
+                x2={projScreen.x}
+                y2={projScreen.y}
+                stroke={strokeColor}
+                strokeWidth={strokeWidth}
+                strokeDasharray={strokeDasharray}
+                fill="none"
+              />
+              <circle cx={startScreen.x} cy={startScreen.y} r={3} fill={strokeColor} />
+              <circle cx={projScreen.x} cy={projScreen.y} r={2.5} fill={strokeColor} opacity={0.6} />
+            </g>
+          );
+        }
+      }
+    }
+
+    // 預設或退化（無上一段/無相切方向時）繪製直線射線段
     return (
-      <polyline
-        points={pointsString}
-        stroke={strokeColor}
-        strokeWidth={strokeWidth}
-        strokeDasharray={strokeDasharray}
-        fill="none"
-      />
+      <g>
+        <line
+          x1={startScreen.x}
+          y1={startScreen.y}
+          x2={cursorScreen.x}
+          y2={cursorScreen.y}
+          stroke={strokeColor}
+          strokeWidth={strokeWidth}
+          strokeDasharray={strokeDasharray}
+          fill="none"
+        />
+        {session.inferredConstraint && (
+          <g transform={`translate(${cursorScreen.x + 16}, ${cursorScreen.y - 16})`}>
+            <rect
+              x={-8}
+              y={-8}
+              width={16}
+              height={16}
+              rx={3}
+              fill="#facc15"
+              stroke="#b57a00"
+              strokeWidth={1}
+            />
+            <text
+              x={0}
+              y={0}
+              fill="#1e293b"
+              fontSize="12"
+              fontWeight="bold"
+              textAnchor="middle"
+              dominantBaseline="central"
+              fontFamily="sans-serif"
+            >
+              {session.inferredConstraint === 'horizontal' ? '—' : '|'}
+            </text>
+          </g>
+        )}
+      </g>
     );
   }
 
@@ -370,6 +476,65 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
           <circle cx={cursorScreen.x} cy={cursorScreen.y} r={2.5} fill={strokeColor} opacity={0.7} />
         </g>
       );
+    } else if (session.step === 3 && dimLine1 && dimLine2) {
+      try {
+        const layout = calculateAngularDimensionLayout(dimLine1, dimLine2, session.currentCursor);
+        if (layout) {
+          const sText = worldToScreen(layout.textCenter);
+          const textStr = `${layout.angleDeg.toFixed(1)}°`;
+          const charCount = textStr.length;
+          const rectWidth = charCount * 7.5 + 12;
+          const rectHeight = 18;
+
+          // Convert arcPath from world to screen.
+          // Wait, calculateAngularDimensionLayout returns world coords for arcPath? Yes.
+          // It's easier to recreate the path using screen coordinates here.
+          const V = worldToScreen({
+             x: layout.textCenter.x - (Math.cos(layout.textRotation - Math.PI/2) * (Math.hypot(layout.textCenter.x - dimLine1.start.x, layout.textCenter.y - dimLine1.start.y) - 4.0)), // not exact
+             y: layout.textCenter.y // this is too complex.
+          });
+          // Wait, instead of recalculating, calculateAngularDimensionLayout should ideally take screen coords or we just scale its output.
+          // Let's just use the fact that SVG scale transform works!
+          // Actually, calculateAngularDimensionLayout has everything in world coords.
+          // We can map the points!
+          const sArrow1Tip = worldToScreen(layout.arrow1.tip);
+          const sArrow1W1 = worldToScreen(layout.arrow1.wing1);
+          const sArrow1W2 = worldToScreen(layout.arrow1.wing2);
+
+          const sArrow2Tip = worldToScreen(layout.arrow2.tip);
+          const sArrow2W1 = worldToScreen(layout.arrow2.wing1);
+          const sArrow2W2 = worldToScreen(layout.arrow2.wing2);
+
+          // For the arc, we can extract the world points and convert them, OR we can recalculate it using screen coords!
+          // Let's just call calculateAngularDimensionLayout with SCREEN coordinates!
+          
+          const sLine1 = { ...dimLine1, start: worldToScreen(dimLine1.start), end: worldToScreen(dimLine1.end) };
+          const sLine2 = { ...dimLine2, start: worldToScreen(dimLine2.start), end: worldToScreen(dimLine2.end) };
+          
+          const sLayout = calculateAngularDimensionLayout(sLine1, sLine2, cursorScreen);
+          
+          if (sLayout) {
+             const sText = sLayout.textCenter;
+             const rx = sText.x - rectWidth / 2;
+             const ry = sText.y - rectHeight / 2;
+             return (
+               <g id="dimension-angular-rubberband" opacity="0.8">
+                 <path d={sLayout.arcPath} fill="none" stroke="#eab308" strokeWidth="1.2" strokeDasharray={strokeDasharray} className="pointer-events-none" />
+                 <polygon points={`${sLayout.arrow1.tip.x},${sLayout.arrow1.tip.y} ${sLayout.arrow1.wing1.x},${sLayout.arrow1.wing1.y} ${sLayout.arrow1.wing2.x},${sLayout.arrow1.wing2.y}`} fill="#eab308" className="pointer-events-none" />
+                 <polygon points={`${sLayout.arrow2.tip.x},${sLayout.arrow2.tip.y} ${sLayout.arrow2.wing1.x},${sLayout.arrow2.wing1.y} ${sLayout.arrow2.wing2.x},${sLayout.arrow2.wing2.y}`} fill="#eab308" className="pointer-events-none" />
+                 <g transform={`rotate(${(sLayout.textRotation * 180) / Math.PI}, ${sLayout.textCenter.x}, ${sLayout.textCenter.y})`}>
+                   <rect x={rx} y={ry} width={rectWidth} height={rectHeight} rx="4" fill="#1e293b" stroke="#eab308" strokeWidth="1.2" strokeDasharray={strokeDasharray} opacity="0.95" />
+                   <text x={sLayout.textCenter.x} y={sLayout.textCenter.y} fill="#facc15" fontSize="11" fontFamily="monospace" fontWeight="bold" textAnchor="middle" dominantBaseline="central">
+                     {textStr}
+                   </text>
+                 </g>
+               </g>
+             );
+          }
+        }
+      } catch (err) {
+        console.error("Error rendering angular dimension preview:", err);
+      }
     } else if (session.step === 2 && session.secondPoint) {
       if (dimSelectedCircleOrArc) {
         try {
@@ -481,11 +646,13 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
         const sText = cursorScreen;
 
         try {
+          const dimType = determineLinearDimType(session.startPoint, session.secondPoint, session.currentCursor);
+
           const layout = calculateLinearDimensionLayout(
             sP1,
             sP2,
             sText,
-            true,
+            dimType,
             7.0,
             Math.PI / 6,
             3.0,
@@ -572,6 +739,464 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
         }
       }
     }
+  }
+
+  if (tool === 'MOVE' || tool === 'COPY') {
+    const isCopy = tool === 'COPY';
+    const accentColor = isCopy ? '#38bdf8' : '#f59e0b';
+
+    return (
+      <g className="pointer-events-none select-none">
+        {/* 移動/複製向量引導虛線 (Base Point to Target Point) */}
+        <line
+          x1={startScreen.x}
+          y1={startScreen.y}
+          x2={cursorScreen.x}
+          y2={cursorScreen.y}
+          stroke={accentColor}
+          strokeWidth={1.5}
+          strokeDasharray="4,4"
+          fill="none"
+        />
+        {/* 基準點指示十字與微圈標記 */}
+        <circle
+          cx={startScreen.x}
+          cy={startScreen.y}
+          r={5}
+          fill="none"
+          stroke={accentColor}
+          strokeWidth={1.5}
+        />
+        <line
+          x1={startScreen.x - 7}
+          y1={startScreen.y}
+          x2={startScreen.x + 7}
+          y2={startScreen.y}
+          stroke={accentColor}
+          strokeWidth={1}
+        />
+        <line
+          x1={startScreen.x}
+          y1={startScreen.y - 7}
+          x2={startScreen.x}
+          y2={startScreen.y + 7}
+          stroke={accentColor}
+          strokeWidth={1}
+        />
+
+        {/* 目標點十字指示 */}
+        <circle
+          cx={cursorScreen.x}
+          cy={cursorScreen.y}
+          r={3}
+          fill={accentColor}
+        />
+
+        {/* 預覽幾何圖元動態渲染 */}
+        {movePreviewEntities &&
+          movePreviewEntities.map((entity) => {
+            const previewProps = {
+              stroke: accentColor,
+              strokeWidth: 2,
+              strokeDasharray: '6,4',
+              fill: 'none',
+              opacity: 0.85,
+            };
+
+            if (entity.type === 'line') {
+              const start = worldToScreen(entity.start);
+              const end = worldToScreen(entity.end);
+              return (
+                <line
+                  key={entity.id}
+                  x1={start.x}
+                  y1={start.y}
+                  x2={end.x}
+                  y2={end.y}
+                  {...previewProps}
+                />
+              );
+            } else if (entity.type === 'circle') {
+              const center = worldToScreen(entity.center);
+              return (
+                <circle
+                  key={entity.id}
+                  cx={center.x}
+                  cy={center.y}
+                  r={entity.radius * scale}
+                  {...previewProps}
+                />
+              );
+            } else if (entity.type === 'arc') {
+              const worldStart = {
+                x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
+                y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
+              };
+              const worldEnd = {
+                x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
+                y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
+              };
+
+              const start = worldToScreen(worldStart);
+              const end = worldToScreen(worldEnd);
+              const screenRadius = entity.radius * scale;
+
+              let diff = entity.endAngle - entity.startAngle;
+              while (diff < 0) diff += 2 * Math.PI;
+              while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
+
+              const largeArcFlag = diff > Math.PI ? 1 : 0;
+              const sweepFlag = 0;
+
+              const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
+
+              return (
+                <path
+                  key={entity.id}
+                  d={pathData}
+                  {...previewProps}
+                />
+              );
+            } else if (entity.type === 'polyline') {
+              const points = entity.points.map((pt) => worldToScreen(pt));
+              const pathData =
+                points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ') +
+                (entity.closed ? ' Z' : '');
+              return (
+                <path
+                  key={entity.id}
+                  d={pathData}
+                  {...previewProps}
+                />
+              );
+            }
+            return null;
+          })}
+      </g>
+    );
+  }
+
+  if (tool === 'SCALE') {
+    const accentColor = '#38bdf8';
+
+    return (
+      <g className="pointer-events-none select-none">
+        {/* 縮放引導虛線 (Base Point to Cursor) */}
+        <line
+          x1={startScreen.x}
+          y1={startScreen.y}
+          x2={cursorScreen.x}
+          y2={cursorScreen.y}
+          stroke={accentColor}
+          strokeWidth={1.5}
+          strokeDasharray="4,4"
+          fill="none"
+        />
+        {/* 基準點指示十字與雙圈標記 */}
+        <circle
+          cx={startScreen.x}
+          cy={startScreen.y}
+          r={6}
+          fill="none"
+          stroke={accentColor}
+          strokeWidth={1.5}
+        />
+        <circle
+          cx={startScreen.x}
+          cy={startScreen.y}
+          r={2}
+          fill={accentColor}
+        />
+        <line
+          x1={startScreen.x - 9}
+          y1={startScreen.y}
+          x2={startScreen.x + 9}
+          y2={startScreen.y}
+          stroke={accentColor}
+          strokeWidth={1.2}
+        />
+        <line
+          x1={startScreen.x}
+          y1={startScreen.y - 9}
+          x2={startScreen.x}
+          y2={startScreen.y + 9}
+          stroke={accentColor}
+          strokeWidth={1.2}
+        />
+
+        {/* 游標目標點指示 */}
+        <circle
+          cx={cursorScreen.x}
+          cy={cursorScreen.y}
+          r={3.5}
+          fill={accentColor}
+        />
+
+        {/* 縮放動態虛線圖元預覽渲染 */}
+        {(scalePreviewEntities || movePreviewEntities) &&
+          (scalePreviewEntities || movePreviewEntities)!.map((entity) => {
+            const previewProps = {
+              stroke: accentColor,
+              strokeWidth: 2,
+              strokeDasharray: '6,4',
+              fill: 'none',
+              opacity: 0.9,
+            };
+
+            if (entity.type === 'line') {
+              const start = worldToScreen(entity.start);
+              const end = worldToScreen(entity.end);
+              return (
+                <line
+                  key={entity.id}
+                  x1={start.x}
+                  y1={start.y}
+                  x2={end.x}
+                  y2={end.y}
+                  {...previewProps}
+                />
+              );
+            } else if (entity.type === 'circle') {
+              const center = worldToScreen(entity.center);
+              return (
+                <circle
+                  key={entity.id}
+                  cx={center.x}
+                  cy={center.y}
+                  r={entity.radius * scale}
+                  {...previewProps}
+                />
+              );
+            } else if (entity.type === 'arc') {
+              const worldStart = {
+                x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
+                y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
+              };
+              const worldEnd = {
+                x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
+                y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
+              };
+
+              const start = worldToScreen(worldStart);
+              const end = worldToScreen(worldEnd);
+              const screenRadius = entity.radius * scale;
+
+              let diff = entity.endAngle - entity.startAngle;
+              while (diff < 0) diff += 2 * Math.PI;
+              while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
+
+              const largeArcFlag = diff > Math.PI ? 1 : 0;
+              const sweepFlag = 0;
+
+              const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
+
+              return (
+                <path
+                  key={entity.id}
+                  d={pathData}
+                  {...previewProps}
+                />
+              );
+            } else if (entity.type === 'polyline') {
+              const points = entity.points.map((pt) => worldToScreen(pt));
+              const pathData =
+                points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ') +
+                (entity.closed ? ' Z' : '');
+              return (
+                <path
+                  key={entity.id}
+                  d={pathData}
+                  {...previewProps}
+                />
+              );
+            }
+            return null;
+          })}
+      </g>
+    );
+  }
+
+  if (tool === 'ROTATE') {
+    const accentColor = '#38bdf8';
+    const angleRad = Math.atan2(
+      session.currentCursor.y - session.startPoint.y,
+      session.currentCursor.x - session.startPoint.x
+    );
+    const angleDeg = (angleRad * 180) / Math.PI;
+
+    // Angle indicator arc radius
+    const cursorDist = Math.hypot(cursorScreen.x - startScreen.x, cursorScreen.y - startScreen.y);
+    const arcRadius = Math.min(Math.max(cursorDist * 0.4, 25), 60);
+
+    return (
+      <g className="pointer-events-none select-none">
+        {/* 基準點水平參考線 (Angle 0 reference) */}
+        <line
+          x1={startScreen.x}
+          y1={startScreen.y}
+          x2={startScreen.x + arcRadius + 15}
+          y2={startScreen.y}
+          stroke="#94a3b8"
+          strokeWidth={1}
+          strokeDasharray="3,3"
+          opacity={0.6}
+        />
+
+        {/* 旋轉引導虛線 (Base Point to Cursor) */}
+        <line
+          x1={startScreen.x}
+          y1={startScreen.y}
+          x2={cursorScreen.x}
+          y2={cursorScreen.y}
+          stroke={accentColor}
+          strokeWidth={1.5}
+          strokeDasharray="4,4"
+          fill="none"
+        />
+
+        {/* 角度動態圓弧指示 (Arc showing rotated angle) */}
+        {cursorDist > 20 && Math.abs(angleRad) > 0.05 && (() => {
+          // In screen coordinates, positive CAD angle goes upward (y is inverted)
+          const startPt = { x: startScreen.x + arcRadius, y: startScreen.y };
+          const endPt = {
+            x: startScreen.x + arcRadius * Math.cos(angleRad),
+            y: startScreen.y - arcRadius * Math.sin(angleRad),
+          };
+          let sweep = angleRad > 0 ? 0 : 1;
+          let largeArc = Math.abs(angleRad) > Math.PI ? 1 : 0;
+          return (
+            <path
+              d={`M ${startPt.x} ${startPt.y} A ${arcRadius} ${arcRadius} 0 ${largeArc} ${sweep} ${endPt.x} ${endPt.y}`}
+              fill="none"
+              stroke="#f59e0b"
+              strokeWidth={1.5}
+              strokeDasharray="2,2"
+            />
+          );
+        })()}
+
+        {/* 旋轉基準點指示標記 (圓環與旋轉樞紐) */}
+        <circle
+          cx={startScreen.x}
+          cy={startScreen.y}
+          r={7}
+          fill="none"
+          stroke={accentColor}
+          strokeWidth={1.8}
+        />
+        <circle
+          cx={startScreen.x}
+          cy={startScreen.y}
+          r={2.5}
+          fill={accentColor}
+        />
+        <line
+          x1={startScreen.x - 10}
+          y1={startScreen.y}
+          x2={startScreen.x + 10}
+          y2={startScreen.y}
+          stroke={accentColor}
+          strokeWidth={1.2}
+        />
+        <line
+          x1={startScreen.x}
+          y1={startScreen.y - 10}
+          x2={startScreen.x}
+          y2={startScreen.y + 10}
+          stroke={accentColor}
+          strokeWidth={1.2}
+        />
+
+        {/* 游標目標點指示 */}
+        <circle
+          cx={cursorScreen.x}
+          cy={cursorScreen.y}
+          r={3.5}
+          fill={accentColor}
+        />
+
+        {/* 旋轉動態虛線圖元預覽渲染 */}
+        {rotatePreviewEntities &&
+          rotatePreviewEntities.map((entity) => {
+            const previewProps = {
+              stroke: accentColor,
+              strokeWidth: 2,
+              strokeDasharray: '6,4',
+              fill: 'none',
+              opacity: 0.9,
+            };
+
+            if (entity.type === 'line') {
+              const start = worldToScreen(entity.start);
+              const end = worldToScreen(entity.end);
+              return (
+                <line
+                  key={entity.id}
+                  x1={start.x}
+                  y1={start.y}
+                  x2={end.x}
+                  y2={end.y}
+                  {...previewProps}
+                />
+              );
+            } else if (entity.type === 'circle') {
+              const center = worldToScreen(entity.center);
+              return (
+                <circle
+                  key={entity.id}
+                  cx={center.x}
+                  cy={center.y}
+                  r={entity.radius * scale}
+                  {...previewProps}
+                />
+              );
+            } else if (entity.type === 'arc') {
+              const worldStart = {
+                x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
+                y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
+              };
+              const worldEnd = {
+                x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
+                y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
+              };
+
+              const start = worldToScreen(worldStart);
+              const end = worldToScreen(worldEnd);
+              const screenRadius = entity.radius * scale;
+
+              let diff = entity.endAngle - entity.startAngle;
+              while (diff < 0) diff += 2 * Math.PI;
+              while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
+
+              const largeArcFlag = diff > Math.PI ? 1 : 0;
+              const sweepFlag = 0;
+
+              const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
+
+              return (
+                <path
+                  key={entity.id}
+                  d={pathData}
+                  {...previewProps}
+                />
+              );
+            } else if (entity.type === 'polyline') {
+              const points = entity.points.map((pt) => worldToScreen(pt));
+              const pathData =
+                points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ') +
+                (entity.closed ? ' Z' : '');
+              return (
+                <path
+                  key={entity.id}
+                  d={pathData}
+                  {...previewProps}
+                />
+              );
+            }
+            return null;
+          })}
+      </g>
+    );
   }
 
   return null;

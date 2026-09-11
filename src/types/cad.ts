@@ -62,10 +62,13 @@ export type ConstraintType =
   | 'perpendicular'
   | 'tangent'
   | 'distance'
+  | 'distance_x'
+  | 'distance_y'
   | 'length'
   | 'fix'
   | 'equal_length'
-  | 'equal_radius';
+  | 'equal_radius'
+  | 'angle';
 
 export interface Constraint {
   id: string;
@@ -77,12 +80,19 @@ export interface Constraint {
 
 export interface Dimension {
   id: string;
-  type: 'linear' | 'radial';
+  type: 'linear' | 'radial' | 'angular';
+  dimType?: 'aligned' | 'horizontal' | 'vertical' | 'angular';
+  isReference?: boolean;
   points: Point2D[];
   textPosition: Point2D;
   constraintId?: string;
   isDiameter?: boolean;
   entityIds?: string[]; // 記錄標註所依附的實體 ID 清單
+  pointIndices?: number[]; // 記錄標註所依附的實體的點索引
+  arcCenter?: Point2D;
+  startAngle?: number;
+  endAngle?: number;
+  arcRadius?: number;
 }
 
 export interface TopologyNode {

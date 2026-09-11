@@ -10,8 +10,19 @@ import {
   removeConstraintFromSketch,
   applyConstraintsToSketch,
   applyFilletToSketch,
+  applyChamferToSketch,
+  applyExtendToSketch,
+  applyOffsetToSketch,
+  applyMirrorToSketch,
+  applyMoveToSketch,
+  applyCopyToSketch,
+  applyScaleToSketch,
+  applyRotateToSketch,
+  applyCircularArrayToSketch,
+  applyRectArrayToSketch,
 } from './sketchMutators';
 import { executeTrim } from '../core/2d/TrimManager';
+import { solveConstraints, analyzeSketchDOF } from '../core/solver/ConstraintSolver';
 
 function createInitialDocument() {
   const doc = createEmptyCADDocument();
@@ -57,6 +68,48 @@ export const useCADStore = create<CADState>((set, get) => ({
   selectedEntityIds: [],
   selectedFeatureId: null,
   osnapEnabled: true,
+  orthoEnabled: false,
+
+  // 鎖點開關與各模式勾選狀態（預設全開啟）
+  osnapSettings: {
+    endpoint: true,
+    midpoint: true,
+    center: true,
+    quadrant: true,
+    intersection: true,
+    extension: true,
+    perpendicular: true,
+    tangent: true,
+    parallel: true,
+  },
+  isOsnapModalOpen: false,
+
+  // 極座標追蹤角度設定（預設 45 度，候選角度包含 15, 30, 45, 90 等）
+  polarTrackingEnabled: true,
+  polarAngleStep: 45,
+  customPolarAngles: [],
+  isPolarModalOpen: false,
+
+  // 環形陣列 (Circular Array) 參數設定（預設 4 個項目，360 度填滿）
+  arrayItems: 4,
+  arrayFillAngle: 360,
+  setArrayItems: (items) => set({ arrayItems: Math.max(2, Math.round(items)) }),
+  setArrayFillAngle: (angle) => set({ arrayFillAngle: angle }),
+
+  // 矩形陣列 (Rectangular Array) 參數設定（預設 4 行 3 列，間距各 30）
+  rectArrayCols: 4,
+  rectArrayRows: 3,
+  rectArrayColSpacing: 30,
+  rectArrayRowSpacing: 30,
+  setRectArrayCols: (cols) => set({ rectArrayCols: Math.max(1, Math.min(100, Math.round(cols))) }),
+  setRectArrayRows: (rows) => set({ rectArrayRows: Math.max(1, Math.min(100, Math.round(rows))) }),
+  setRectArrayColSpacing: (spacing) => set({ rectArrayColSpacing: spacing }),
+  setRectArrayRowSpacing: (spacing) => set({ rectArrayRowSpacing: spacing }),
+
+  // 倒角 (Chamfer) 距離設定（預設為 10）
+  chamferDistance: 10,
+  setChamferDistance: (distance) => set({ chamferDistance: Math.max(0.1, distance) }),
+
   undoStack: [],
   redoStack: [],
 
@@ -145,9 +198,139 @@ export const useCADStore = create<CADState>((set, get) => ({
 
   addDimension: (dimension, constraint) => set((state) => {
     if (!state.activeSketchId) return state;
+
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!sketch) return state;
+
+    // Dynamically adjust constraint type and value based on dimension.dimType
+    let actualConstraint = { ...constraint };
+    if (dimension.type === 'linear') {
+      const p1 = dimension.points[0];
+      const p2 = dimension.points[1];
+      if (p1 && p2) {
+        if (dimension.dimType === 'horizontal') {
+          actualConstraint.type = 'distance_x';
+          actualConstraint.value = Math.abs(p2.x - p1.x);
+        } else if (dimension.dimType === 'vertical') {
+          actualConstraint.type = 'distance_y';
+          actualConstraint.value = Math.abs(p2.y - p1.y);
+        } else if (dimension.dimType === 'aligned') {
+          if (actualConstraint.type !== 'length' && actualConstraint.type !== 'distance') {
+            actualConstraint.type = actualConstraint.entityIds.length === 1 ? 'length' : 'distance';
+          }
+          actualConstraint.value = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+        }
+      }
+    }
+
+    // Test solver with new constraint
+    const testConstraints = [...sketch.constraints, actualConstraint];
+    const solverResult = solveConstraints(sketch.entities, testConstraints);
+    const dofState = analyzeSketchDOF(solverResult.entities, testConstraints);
+
+    let finalDimension = dimension;
+    let newDocument = state.document;
+
+    if (dofState.state === 'OverDefined') {
+      finalDimension = { 
+        ...dimension, 
+        isReference: true,
+        constraintId: undefined,
+        entityIds: actualConstraint.entityIds,
+        pointIndices: actualConstraint.pointIndices
+      };
+      
+      // Add dimension only, without constraint, marked as reference
+      newDocument = {
+        ...state.document,
+        featureTree: state.document.featureTree.map((f) => {
+          if (f.id === state.activeSketchId && f.type === 'SKETCH') {
+            return {
+              ...f,
+              dimensions: [...((f as SketchFeature).dimensions || []), finalDimension],
+            };
+          }
+          return f;
+        }),
+      };
+    } else {
+      finalDimension = {
+        ...dimension,
+        entityIds: actualConstraint.entityIds,
+        pointIndices: actualConstraint.pointIndices
+      };
+      newDocument = addDimensionToSketch(state.document, state.activeSketchId, finalDimension, actualConstraint);
+    }
+
     return {
       ...pushUndoState(state),
-      document: addDimensionToSketch(state.document, state.activeSketchId, dimension, constraint),
+      document: newDocument,
+    };
+  }),
+
+  updateDimensionPosition: (dimensionId, newPosition) => set((state) => {
+    if (!state.activeSketchId) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) => {
+        if (f.id === state.activeSketchId && f.type === 'SKETCH') {
+          const sketch = f as SketchFeature;
+          const updatedDimensions = (sketch.dimensions || []).map((dim) => {
+            if (dim.id === dimensionId) {
+              return {
+                ...dim,
+                textPosition: newPosition,
+              };
+            }
+            return dim;
+          });
+          return {
+            ...sketch,
+            dimensions: updatedDimensions,
+          };
+        }
+        return f;
+      }),
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+    };
+  }),
+
+  updateDimensionPositionLive: (dimensionId, newPosition) => set((state) => {
+    if (!state.activeSketchId) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) => {
+        if (f.id === state.activeSketchId && f.type === 'SKETCH') {
+          const sketch = f as SketchFeature;
+          const updatedDimensions = (sketch.dimensions || []).map((dim) => {
+            if (dim.id === dimensionId) {
+              return {
+                ...dim,
+                textPosition: newPosition,
+              };
+            }
+            return dim;
+          });
+          return {
+            ...sketch,
+            dimensions: updatedDimensions,
+          };
+        }
+        return f;
+      }),
+    };
+
+    return {
+      document: updatedDocument,
     };
   }),
 
@@ -217,7 +400,7 @@ export const useCADStore = create<CADState>((set, get) => ({
                         };
                       }
                     }
-                  } else {
+                  } else if (dim.type === 'linear') {
                     if (constraint.entityIds.length === 1) {
                       const entity = updatedSketch.entities.find((e) => e.id === constraint.entityIds[0]);
                       if (entity && entity.type === 'line') {
@@ -254,14 +437,30 @@ export const useCADStore = create<CADState>((set, get) => ({
                         }
                       }
                     }
+                  } else if (dim.type === 'angular') {
+                    if (constraint.entityIds.length >= 2) {
+                      const id1 = constraint.entityIds[0];
+                      const id2 = constraint.entityIds[1];
+                      const e1 = updatedSketch.entities.find((e) => e.id === id1);
+                      const e2 = updatedSketch.entities.find((e) => e.id === id2);
+                      if (e1 && e2 && e1.type === 'line' && e2.type === 'line') {
+                        return {
+                          ...dim,
+                          points: [{ ...e1.start }, { ...e1.end }, { ...e2.start }, { ...e2.end }],
+                        };
+                      }
+                    }
                   }
                 }
               } else {
                 // 對於其他非當前編輯的標註，幾何縮放時同步其點位
+                const linkedConstraint = updatedConstraints.find((c) => c.id === dim.constraintId);
+                const eIds = linkedConstraint?.entityIds || dim.entityIds;
+                const pIndices = linkedConstraint?.pointIndices || dim.pointIndices;
+
                 if (dim.type === 'radial') {
-                  const linkedConstraint = updatedConstraints.find((c) => c.id === dim.constraintId);
-                  if (linkedConstraint && linkedConstraint.entityIds.length === 1) {
-                    const entity = updatedSketch.entities.find((e) => e.id === linkedConstraint.entityIds[0]);
+                  if (eIds && eIds.length === 1) {
+                    const entity = updatedSketch.entities.find((e) => e.id === eIds[0]);
                     if (entity && (entity.type === 'circle' || entity.type === 'arc')) {
                       const center = { ...entity.center };
                       const origP0 = dim.points[0];
@@ -281,21 +480,20 @@ export const useCADStore = create<CADState>((set, get) => ({
                     }
                   }
                 } else if (dim.type === 'linear') {
-                  const linkedConstraint = updatedConstraints.find((c) => c.id === dim.constraintId);
-                  if (linkedConstraint) {
-                    if (linkedConstraint.entityIds.length === 1) {
-                      const entity = updatedSketch.entities.find((e) => e.id === linkedConstraint.entityIds[0]);
+                  if (eIds) {
+                    if (eIds.length === 1) {
+                      const entity = updatedSketch.entities.find((e) => e.id === eIds[0]);
                       if (entity && entity.type === 'line') {
                         return {
                           ...dim,
                           points: [{ ...entity.start }, { ...entity.end }],
                         };
                       }
-                    } else if (linkedConstraint.entityIds.length >= 2) {
-                      const id1 = linkedConstraint.entityIds[0];
-                      const id2 = linkedConstraint.entityIds[1];
-                      const idx1 = linkedConstraint.pointIndices?.[0] ?? 0;
-                      const idx2 = linkedConstraint.pointIndices?.[1] ?? 0;
+                    } else if (eIds.length >= 2) {
+                      const id1 = eIds[0];
+                      const id2 = eIds[1];
+                      const idx1 = pIndices?.[0] ?? 0;
+                      const idx2 = pIndices?.[1] ?? 0;
                       const e1 = updatedSketch.entities.find((e) => e.id === id1);
                       const e2 = updatedSketch.entities.find((e) => e.id === id2);
                       if (e1 && e2) {
@@ -318,6 +516,19 @@ export const useCADStore = create<CADState>((set, get) => ({
                           };
                         }
                       }
+                    }
+                  }
+                } else if (dim.type === 'angular') {
+                  if (eIds && eIds.length >= 2) {
+                    const id1 = eIds[0];
+                    const id2 = eIds[1];
+                    const e1 = updatedSketch.entities.find((e) => e.id === id1);
+                    const e2 = updatedSketch.entities.find((e) => e.id === id2);
+                    if (e1 && e2 && e1.type === 'line' && e2.type === 'line') {
+                      return {
+                        ...dim,
+                        points: [{ ...e1.start }, { ...e1.end }, { ...e2.start }, { ...e2.end }],
+                      };
                     }
                   }
                 }
@@ -396,7 +607,7 @@ export const useCADStore = create<CADState>((set, get) => ({
     };
   }),
 
-  applyFillet: (lineId1, lineId2, radius) => set((state) => {
+  extendEntity: (entityId, clickPoint) => set((state) => {
     if (!state.activeSketchId) return state;
 
     const sketch = state.document.featureTree.find(
@@ -405,7 +616,7 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!sketch) return state;
 
-    const updatedSketch = applyFilletToSketch(sketch, lineId1, lineId2, radius);
+    const updatedSketch = applyExtendToSketch(sketch, entityId, clickPoint);
     if (updatedSketch === sketch) return state;
 
     const updatedDocument: CADDocument = {
@@ -418,11 +629,314 @@ export const useCADStore = create<CADState>((set, get) => ({
     return {
       ...pushUndoState(state),
       document: updatedDocument,
-      selectedEntityIds: state.selectedEntityIds.filter((id) => id !== lineId1 && id !== lineId2),
+    };
+  }),
+
+  applyFillet: (entityId1, entityId2, radius) => set((state) => {
+    if (!state.activeSketchId) return state;
+
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!sketch) return state;
+
+    const updatedSketch = applyFilletToSketch(sketch, entityId1, entityId2, radius);
+    if (updatedSketch === sketch) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) =>
+        f.id === state.activeSketchId ? updatedSketch : f
+      ),
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+      selectedEntityIds: state.selectedEntityIds.filter((id) => id !== entityId1 && id !== entityId2),
+    };
+  }),
+
+  applyChamfer: (entityId1, entityId2, distance) => set((state) => {
+    if (!state.activeSketchId) return state;
+
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!sketch) return state;
+
+    const updatedSketch = applyChamferToSketch(sketch, entityId1, entityId2, distance);
+    if (updatedSketch === sketch) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) =>
+        f.id === state.activeSketchId ? updatedSketch : f
+      ),
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+      selectedEntityIds: state.selectedEntityIds.filter((id) => id !== entityId1 && id !== entityId2),
+    };
+  }),
+
+  offsetEntity: (entityId, distance, sidePoint) => set((state) => {
+    if (!state.activeSketchId) return state;
+
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!sketch) return state;
+
+    const updatedSketch = applyOffsetToSketch(sketch, entityId, distance, sidePoint);
+    if (updatedSketch === sketch) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) =>
+        f.id === state.activeSketchId ? updatedSketch : f
+      ),
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+    };
+  }),
+
+  mirrorEntities: (sourceEntityIds, axisLineId) => set((state) => {
+    if (!state.activeSketchId) return state;
+
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!sketch) return state;
+
+    const updatedSketch = applyMirrorToSketch(sketch, sourceEntityIds, axisLineId);
+    if (updatedSketch === sketch) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) =>
+        f.id === state.activeSketchId ? updatedSketch : f
+      ),
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+    };
+  }),
+
+  moveEntities: (entityIds, basePoint, targetPoint) => set((state) => {
+    if (!state.activeSketchId || !entityIds || entityIds.length === 0) return state;
+
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!sketch) return state;
+
+    const updatedSketch = applyMoveToSketch(sketch, entityIds, basePoint, targetPoint);
+    if (updatedSketch === sketch) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) =>
+        f.id === state.activeSketchId ? updatedSketch : f
+      ),
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+      selectedEntityIds: entityIds,
+    };
+  }),
+
+  copyEntities: (entityIds, basePoint, targetPoint) => set((state) => {
+    if (!state.activeSketchId || !entityIds || entityIds.length === 0) return state;
+
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!sketch) return state;
+
+    const prevEntityCount = sketch.entities.length;
+    const updatedSketch = applyCopyToSketch(sketch, entityIds, basePoint, targetPoint);
+    if (updatedSketch === sketch) return state;
+
+    // 複製後的新圖元位於陣列後方
+    const newEntities = updatedSketch.entities.slice(prevEntityCount);
+    const newEntityIds = newEntities.map((e) => e.id);
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) =>
+        f.id === state.activeSketchId ? updatedSketch : f
+      ),
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+      selectedEntityIds: newEntityIds.length > 0 ? newEntityIds : state.selectedEntityIds,
+    };
+  }),
+
+  scaleEntities: (entityIds, basePoint, factor) => set((state) => {
+    if (!state.activeSketchId || !entityIds || entityIds.length === 0 || factor <= 0) return state;
+
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!sketch) return state;
+
+    const updatedSketch = applyScaleToSketch(sketch, entityIds, basePoint, factor);
+    if (updatedSketch === sketch) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) =>
+        f.id === state.activeSketchId ? updatedSketch : f
+      ),
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+      selectedEntityIds: entityIds,
+    };
+  }),
+
+  rotateEntities: (entityIds, basePoint, angleRad) => set((state) => {
+    if (!state.activeSketchId || !entityIds || entityIds.length === 0) return state;
+
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!sketch) return state;
+
+    const updatedSketch = applyRotateToSketch(sketch, entityIds, basePoint, angleRad);
+    if (updatedSketch === sketch) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) =>
+        f.id === state.activeSketchId ? updatedSketch : f
+      ),
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+      selectedEntityIds: entityIds,
+    };
+  }),
+
+  circularArrayEntities: (entityIds, centerPoint, items, fillAngleDeg) => set((state) => {
+    if (!state.activeSketchId || !entityIds || entityIds.length === 0 || items <= 1) return state;
+
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!sketch) return state;
+
+    const updatedSketch = applyCircularArrayToSketch(sketch, entityIds, centerPoint, items, fillAngleDeg);
+    if (updatedSketch === sketch) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) =>
+        f.id === state.activeSketchId ? updatedSketch : f
+      ),
+    };
+
+    // 選取包含所有新陣列圖元，便於視覺回饋與接續操作
+    const newEntityIds = updatedSketch.entities.map((e) => e.id);
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+      selectedEntityIds: newEntityIds,
+    };
+  }),
+
+  rectArrayEntities: (entityIds, cols, rows, colSpacing, rowSpacing) => set((state) => {
+    if (!state.activeSketchId || !entityIds || entityIds.length === 0 || cols < 1 || rows < 1 || (cols === 1 && rows === 1)) return state;
+
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!sketch) return state;
+
+    const updatedSketch = applyRectArrayToSketch(sketch, entityIds, cols, rows, colSpacing, rowSpacing);
+    if (updatedSketch === sketch) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) =>
+        f.id === state.activeSketchId ? updatedSketch : f
+      ),
+    };
+
+    // 選取包含所有新陣列圖元，便於視覺回饋與接續操作
+    const newEntityIds = updatedSketch.entities.map((e) => e.id);
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+      selectedEntityIds: newEntityIds,
     };
   }),
 
   toggleOsnap: () => set((state) => ({ osnapEnabled: !state.osnapEnabled })),
+  toggleOrtho: () => set((state) => ({ orthoEnabled: !state.orthoEnabled })),
+
+  setOsnapModalOpen: (open) => set({ isOsnapModalOpen: open }),
+  toggleOsnapMode: (mode) => set((state) => ({
+    osnapSettings: {
+      ...state.osnapSettings,
+      [mode]: !state.osnapSettings[mode]
+    }
+  })),
+  setAllOsnapModes: (enabled) => set((state) => ({
+    osnapSettings: {
+      endpoint: enabled,
+      midpoint: enabled,
+      center: enabled,
+      quadrant: enabled,
+      intersection: enabled,
+      extension: enabled,
+      perpendicular: enabled,
+      tangent: enabled,
+      parallel: enabled,
+    }
+  })),
+
+  setPolarModalOpen: (open) => set({ isPolarModalOpen: open }),
+  togglePolarTracking: () => set((state) => ({ polarTrackingEnabled: !state.polarTrackingEnabled })),
+  setPolarAngleStep: (step) => set({ polarAngleStep: step }),
+  addCustomPolarAngle: (angle) => set((state) => {
+    if (state.customPolarAngles.includes(angle)) {
+      return state;
+    }
+    return { customPolarAngles: [...state.customPolarAngles, angle].sort((a, b) => a - b) };
+  }),
+  removeCustomPolarAngle: (angle) => set((state) => ({
+    customPolarAngles: state.customPolarAngles.filter((a) => a !== angle)
+  })),
   
   undo: () => set((state) => {
     if (state.undoStack.length === 0) return state;
@@ -466,6 +980,24 @@ export const useCADStore = create<CADState>((set, get) => ({
       viewMode: '2D',
       undoStack: [],
       redoStack: [],
+      osnapSettings: {
+        endpoint: true,
+        midpoint: true,
+        center: true,
+        quadrant: true,
+        intersection: true,
+        extension: true,
+        perpendicular: true,
+        tangent: true,
+        parallel: true,
+      },
+      polarTrackingEnabled: true,
+      polarAngleStep: 45,
+      customPolarAngles: [],
+      arrayItems: 4,
+      arrayFillAngle: 360,
+      isOsnapModalOpen: false,
+      isPolarModalOpen: false,
     });
   }
 }));
