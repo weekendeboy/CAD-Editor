@@ -102,6 +102,7 @@ export interface CADState {
   selectEntity: (id: string) => void;
   clearSelection: () => void;
   addEntity: (entity: CADEntity2D) => void;
+  importEntities: (entities: CADEntity2D[]) => void;
   removeEntity: (id: string) => void;
   updateEntity: (id: string, updates: Partial<CADEntity2D>) => void;
   toggleConstruction: (entityId: string) => void;

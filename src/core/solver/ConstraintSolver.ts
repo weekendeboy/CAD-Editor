@@ -8,14 +8,23 @@ import {
   Constraint,
   EntityState,
 } from '../../types/cad';
-import {
-  SolverResult,
-  SketchDofState,
-  SOLVER_MAX_ITERATIONS,
-  SOLVER_TOLERANCE,
-} from './solverTypes';
 
-// --- Point Helper Interfaces & Utility Functions ---
+export const SOLVER_MAX_ITERATIONS = 80;
+export const SOLVER_TOLERANCE = 1e-4;
+
+export interface SolverResult {
+  entities: CADEntity2D[];
+  iterations: number;
+  maxDisp: number;
+  converged: boolean;
+  conflictEntityIds: string[];
+}
+
+export interface SketchDofState {
+  totalDof: number;
+  state: EntityState;
+  entityStates: Record<string, EntityState>;
+}
 
 interface PointRef {
   get: () => Point2D;
@@ -119,37 +128,33 @@ function getPointRef(entity: CADEntity2D, pointIndex: number = 0): PointRef | nu
 }
 
 /**
- * Deep clones an array of 2D CAD entities.
+ * Shallow/selective clone for single entity (Zero GC for unconstrained entities).
  */
-function cloneEntities(entities: CADEntity2D[]): CADEntity2D[] {
-  return entities.map((e) => {
-    if (e.type === 'line') {
-      return {
-        ...e,
-        start: { ...e.start },
-        end: { ...e.end },
-      };
-    }
-    if (e.type === 'circle') {
-      return {
-        ...e,
-        center: { ...e.center },
-      };
-    }
-    if (e.type === 'arc') {
-      return {
-        ...e,
-        center: { ...e.center },
-      };
-    }
-    if (e.type === 'polyline') {
-      return {
-        ...e,
-        points: e.points.map((p) => ({ ...p })),
-      };
-    }
-    return e;
-  });
+function cloneEntity(entity: CADEntity2D): CADEntity2D {
+  if (entity.type === 'line') {
+    return {
+      ...entity,
+      start: { ...entity.start },
+      end: { ...entity.end },
+    };
+  }
+  if (entity.type === 'circle') {
+    return {
+      ...entity,
+      center: { ...entity.center },
+    };
+  }
+  if (entity.type === 'arc') {
+    return {
+      ...entity,
+      center: { ...entity.center },
+    };
+  }
+  return {
+    ...entity,
+    points: entity.points.map((p) => ({ ...p })),
+    bulges: entity.bulges ? [...entity.bulges] : undefined,
+  };
 }
 
 /**
@@ -170,15 +175,52 @@ function getFixedPointKeys(constraints: Constraint[]): Set<string> {
 }
 
 /**
- * Main solver function using Position-Based Relaxation (Jacobi/Gauss iteration).
+ * Main solver function using Position-Based Relaxation with Subgraph Partitioning.
  */
 export function solveConstraints(
   entities: CADEntity2D[],
   constraints: Constraint[]
 ): SolverResult {
-  const workingEntities = cloneEntities(entities);
-  const entityMap = new Map<string, CADEntity2D>();
-  workingEntities.forEach((e) => entityMap.set(e.id, e));
+  // Fast path for zero constraints
+  if (!constraints || constraints.length === 0) {
+    return {
+      entities,
+      iterations: 0,
+      maxDisp: 0,
+      converged: true,
+      conflictEntityIds: [],
+    };
+  }
+
+  // Subgraph filtering: collect only entity IDs involved in constraints
+  const constrainedIdSet = new Set<string>();
+  for (const c of constraints) {
+    if (c.entityIds) {
+      for (const id of c.entityIds) {
+        if (id) {
+          constrainedIdSet.add(id);
+        }
+      }
+    }
+  }
+
+  if (constrainedIdSet.size === 0) {
+    return {
+      entities,
+      iterations: 0,
+      maxDisp: 0,
+      converged: true,
+      conflictEntityIds: [],
+    };
+  }
+
+  // Work map: only clone constrained entities
+  const workingMap = new Map<string, CADEntity2D>();
+  for (const e of entities) {
+    if (constrainedIdSet.has(e.id)) {
+      workingMap.set(e.id, cloneEntity(e));
+    }
+  }
 
   const fixedPointKeys = getFixedPointKeys(constraints);
 
@@ -194,12 +236,11 @@ export function solveConstraints(
     maxDisp = 0;
 
     for (const constraint of constraints) {
-      const e1 = entityMap.get(constraint.entityIds[0] || '');
-      const e2 = entityMap.get(constraint.entityIds[1] || '');
+      const e1 = workingMap.get(constraint.entityIds[0] || '');
+      const e2 = workingMap.get(constraint.entityIds[1] || '');
 
       switch (constraint.type) {
         case 'fix': {
-          // Fixed points displacement is locked to 0
           break;
         }
 
@@ -258,7 +299,6 @@ export function solveConstraints(
               e1.end.y = midY;
             }
           } else if (e2) {
-            // Horizontal alignment between two points
             const idx1 = constraint.pointIndices?.[0] ?? 0;
             const idx2 = constraint.pointIndices?.[1] ?? 0;
             const ref1 = getPointRef(e1, idx1);
@@ -304,7 +344,6 @@ export function solveConstraints(
               e1.end.x = midX;
             }
           } else if (e2) {
-            // Vertical alignment between two points
             const idx1 = constraint.pointIndices?.[0] ?? 0;
             const idx2 = constraint.pointIndices?.[1] ?? 0;
             const ref1 = getPointRef(e1, idx1);
@@ -501,9 +540,6 @@ export function solveConstraints(
 
           maxDisp = Math.max(maxDisp, Math.abs(diffAngle) * ((len1 + len2) / 2));
 
-          const targetAngle1 = angle1 + diffAngle / 2;
-          const targetAngle2 = angle2 - diffAngle / 2;
-
           const f1_0 = isFixed(e1.id, 0);
           const f1_1 = isFixed(e1.id, 1);
           const f2_0 = isFixed(e2.id, 0);
@@ -567,7 +603,6 @@ export function solveConstraints(
         case 'tangent': {
           if (!e1 || !e2) break;
 
-          // Line - Circle / Arc
           if (e1.type === 'line' && (e2.type === 'circle' || e2.type === 'arc')) {
             const circle = e2;
             const dx = e1.end.x - e1.start.x;
@@ -593,14 +628,9 @@ export function solveConstraints(
               const cToY = closestY - circle.center.y;
               const cDist = Math.hypot(cToX, cToY);
 
-              if (cDist > 1e-9) {
-                const targetCenterX = closestX - (cToX / cDist) * circle.radius;
-                const targetCenterY = closestY - (cToY / cDist) * circle.radius;
-
-                if (!isFixed(circle.id, 0)) {
-                  circle.center.x = targetCenterX;
-                  circle.center.y = targetCenterY;
-                }
+              if (cDist > 1e-9 && !isFixed(circle.id, 0)) {
+                circle.center.x = closestX - (cToX / cDist) * circle.radius;
+                circle.center.y = closestY - (cToY / cDist) * circle.radius;
               }
             }
           } else if ((e1.type === 'circle' || e1.type === 'arc') && e2.type === 'line') {
@@ -638,7 +668,6 @@ export function solveConstraints(
             (e1.type === 'circle' || e1.type === 'arc') &&
             (e2.type === 'circle' || e2.type === 'arc')
           ) {
-            // Circle/Arc - Circle/Arc
             const c1 = e1;
             const c2 = e2;
             const dx = c2.center.x - c1.center.x;
@@ -785,13 +814,20 @@ export function solveConstraints(
   if (!converged) {
     const conflictSet = new Set<string>();
     constraints.forEach((c) => {
-      c.entityIds.forEach((id) => conflictSet.add(id));
+      c.entityIds.forEach((id) => {
+        if (id && workingMap.has(id)) {
+          conflictSet.add(id);
+        }
+      });
     });
     conflictEntityIds.push(...Array.from(conflictSet));
   }
 
+  // Result assembly: merge solved working entities with untouched entities in original order
+  const resultEntities = entities.map((e) => workingMap.get(e.id) || e);
+
   return {
-    entities: workingEntities,
+    entities: resultEntities,
     iterations: Math.min(iterations + 1, SOLVER_MAX_ITERATIONS),
     maxDisp,
     converged,
@@ -806,6 +842,19 @@ export function analyzeSketchDOF(
   entities: CADEntity2D[],
   constraints: Constraint[]
 ): SketchDofState {
+  const constrainedIdSet = new Set<string>();
+  if (constraints) {
+    for (const c of constraints) {
+      if (c.entityIds) {
+        for (const id of c.entityIds) {
+          if (id) {
+            constrainedIdSet.add(id);
+          }
+        }
+      }
+    }
+  }
+
   let totalDof = 0;
   const entityDofs: Record<string, number> = {};
   const entityConstraints: Record<string, number> = {};
@@ -813,54 +862,71 @@ export function analyzeSketchDOF(
   entities.forEach((entity) => {
     let dof = 0;
     if (entity.type === 'line') {
-      dof = 4; // Start(x,y) + End(x,y)
+      dof = 4;
     } else if (entity.type === 'circle') {
-      dof = 3; // Center(x,y) + Radius
+      dof = 3;
     } else if (entity.type === 'arc') {
-      dof = 5; // Center(x,y) + Radius + StartAngle + EndAngle
+      dof = 5;
     } else if (entity.type === 'polyline') {
       dof = entity.points.length * 2;
     }
     entityDofs[entity.id] = dof;
     entityConstraints[entity.id] = 0;
-    totalDof += dof;
   });
 
-  constraints.forEach((constraint) => {
-    let consumedDof = 1;
-    if (constraint.type === 'fix' || constraint.type === 'coincident') {
-      consumedDof = 2;
-    } else if (constraint.type === 'distance_x' || constraint.type === 'distance_y') {
-      consumedDof = 1;
-    } else {
-      consumedDof = 1;
+  let constrainedTotalDof = 0;
+  constrainedIdSet.forEach((id) => {
+    if (entityDofs[id] !== undefined) {
+      constrainedTotalDof += entityDofs[id];
     }
-
-    totalDof -= consumedDof;
-
-    constraint.entityIds.forEach((id) => {
-      if (entityConstraints[id] !== undefined) {
-        entityConstraints[id] += consumedDof;
-      }
-    });
   });
+
+  if (constraints) {
+    constraints.forEach((constraint) => {
+      let consumedDof = 1;
+      if (constraint.type === 'fix' || constraint.type === 'coincident') {
+        consumedDof = 2;
+      } else if (constraint.type === 'distance_x' || constraint.type === 'distance_y') {
+        consumedDof = 1;
+      } else {
+        consumedDof = 1;
+      }
+
+      constrainedTotalDof -= consumedDof;
+
+      constraint.entityIds.forEach((id) => {
+        if (entityConstraints[id] !== undefined) {
+          entityConstraints[id] += consumedDof;
+        }
+      });
+    });
+  }
+
+  totalDof = constrainedTotalDof;
 
   let overallState: EntityState = 'UnderDefined';
-  if (totalDof === 0) {
-    overallState = 'FullyDefined';
-  } else if (totalDof < 0) {
-    overallState = 'OverDefined';
+  if (constrainedIdSet.size > 0) {
+    if (totalDof === 0) {
+      overallState = 'FullyDefined';
+    } else if (totalDof < 0) {
+      overallState = 'OverDefined';
+    }
   }
 
   const entityStates: Record<string, EntityState> = {};
   entities.forEach((entity) => {
+    if (!constrainedIdSet.has(entity.id)) {
+      entityStates[entity.id] = 'UnderDefined';
+      return;
+    }
+
     const baseDof = entityDofs[entity.id] || 0;
     const removedDof = entityConstraints[entity.id] || 0;
     const remainingDof = baseDof - removedDof;
 
     if (overallState === 'OverDefined' || remainingDof < 0) {
       entityStates[entity.id] = 'OverDefined';
-    } else if (remainingDof === 0 || overallState === 'FullyDefined') {
+    } else if (remainingDof === 0) {
       entityStates[entity.id] = 'FullyDefined';
     } else {
       entityStates[entity.id] = 'UnderDefined';

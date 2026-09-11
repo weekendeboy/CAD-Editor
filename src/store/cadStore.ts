@@ -142,6 +142,47 @@ export const useCADStore = create<CADState>((set, get) => ({
     };
   }),
 
+  importEntities: (entities) => set((state) => {
+    if (!entities || entities.length === 0 || !state.activeSketchId) {
+      return state;
+    }
+
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!sketch) return state;
+
+    // 將所有傳入圖元的 state 統一標註為 'UnderDefined'，確保不觸發錯誤的約束衝突警報
+    const preparedEntities: CADEntity2D[] = entities.map((e) => ({
+      ...e,
+      state: 'UnderDefined',
+    }));
+
+    // 更新當前 activeSketch，將傳入的 entities 陣列直接與現有 sketch.entities 陣列合併
+    const mergedSketch: SketchFeature = {
+      ...sketch,
+      entities: [...sketch.entities, ...preparedEntities],
+    };
+
+    // 調用既有的 applyConstraintsToSketch(updatedSketch)，使拓撲引擎自動重新提取封閉面輪廓（profiles）與淨面積/DOF
+    const updatedSketch = applyConstraintsToSketch(mergedSketch);
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) =>
+        f.id === state.activeSketchId ? updatedSketch : f
+      ),
+    };
+
+    // 建立單一 Undo 快照，清空選取狀態，回傳更新後的 Store 狀態
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+      selectedEntityIds: [],
+    };
+  }),
+
   removeEntity: (id) => set((state) => {
     if (!state.activeSketchId) return state;
     return {

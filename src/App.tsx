@@ -3,14 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useCADStore } from './store/cadStore';
 import { useCadShortcuts } from './hooks/useCadShortcuts';
 import { CADSketchCanvas } from './components/CADSketchCanvas';
-import { SketchFeature } from './types/cad';
+import { SketchFeature, BoundingBox2D, CADEntity2D } from './types/cad';
 import { OsnapSettingsModal } from './components/OsnapSettingsModal';
 import { PolarSettingsModal } from './components/PolarSettingsModal';
 import { exportSketchToDxf, downloadDxfFile } from './core/dxf/DxfWriter';
+import { parseDxfContent } from './core/dxf/DxfParser';
 import {
   MousePointer2,
   Pencil,
@@ -43,11 +44,71 @@ import {
   SquareSlash,
   Hexagon,
   FileDown,
+  FileUp,
+  CheckCircle2,
 } from 'lucide-react';
+
+/**
+ * 輔助函式：計算匯入圖元的包圍盒 (BoundingBox2D)
+ * 若圖元清單為空，回傳預設包圍盒 { min: { x: -100, y: -100 }, max: { x: 100, y: 100 } }
+ */
+function computeEntitiesBoundingBox(entities: CADEntity2D[]): BoundingBox2D {
+  if (!entities || entities.length === 0) {
+    return { min: { x: -100, y: -100 }, max: { x: 100, y: 100 } };
+  }
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  const updateMinMax = (x: number, y: number) => {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  };
+
+  for (const entity of entities) {
+    if (entity.type === 'line') {
+      updateMinMax(entity.start.x, entity.start.y);
+      updateMinMax(entity.end.x, entity.end.y);
+    } else if (entity.type === 'circle') {
+      updateMinMax(entity.center.x - entity.radius, entity.center.y - entity.radius);
+      updateMinMax(entity.center.x + entity.radius, entity.center.y + entity.radius);
+    } else if (entity.type === 'arc') {
+      updateMinMax(entity.center.x - entity.radius, entity.center.y - entity.radius);
+      updateMinMax(entity.center.x + entity.radius, entity.center.y + entity.radius);
+    } else if (entity.type === 'polyline') {
+      for (const pt of entity.points) {
+        updateMinMax(pt.x, pt.y);
+      }
+    }
+  }
+
+  if (minX === Infinity || minY === Infinity || maxX === -Infinity || maxY === -Infinity) {
+    return { min: { x: -100, y: -100 }, max: { x: 100, y: 100 } };
+  }
+
+  return {
+    min: { x: minX, y: minY },
+    max: { x: maxX, y: maxY },
+  };
+}
 
 export default function App() {
   // 啟用全域快速鍵
   useCadShortcuts();
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const toastTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [importToast, setImportToast] = useState<{
+    entityCount: number;
+    units: string;
+    mergedPointsCount?: number;
+    removedEntitiesCount?: number;
+  } | null>(null);
 
   const {
     currentTool,
@@ -71,7 +132,17 @@ export default function App() {
     setPolygonSides,
     polygonMethod,
     setPolygonMethod,
+    importEntities,
   } = useCADStore();
+
+  // 清除彈窗 Timer 清理機制
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
 
   // 取得當前草圖與求解器狀態
   const activeSketch = document.featureTree.find(
@@ -207,8 +278,106 @@ export default function App() {
     downloadDxfFile(dxfContent, filename);
   };
 
+  /**
+   * 檔案處理核心函式：讀取並解析 DXF 檔案、匯入實體並發送自適應居中全景事件
+   */
+  const handleProcessDxfFile = async (file: File) => {
+    try {
+      const text = await file.text();
+      const result = parseDxfContent(text, {
+        targetUnits: document.units || 'mm',
+        decomposePolylines: false,
+        flattenBlocks: true,
+        autoStitch: true,
+        stitchTolerance: 1e-3,
+      });
+
+      if (result.warnings && result.warnings.length > 0) {
+        console.warn('DXF Import Warnings:', result.warnings);
+      }
+
+      if (result.entities && result.entities.length > 0) {
+        importEntities(result.entities);
+
+        const bbox = computeEntitiesBoundingBox(result.entities);
+
+        window.dispatchEvent(
+          new CustomEvent('cad-zoom-to-bbox', {
+            detail: { bbox, padding: 80 },
+          })
+        );
+
+        // 顯示匯入成功浮條，包含圖元數量、單位換算與端點縫合統計，於 4 秒後自動消失
+        setImportToast({
+          entityCount: result.entities.length,
+          units: result.units || document.units || 'mm',
+          mergedPointsCount: result.stitchStats?.mergedPointsCount,
+          removedEntitiesCount: result.stitchStats?.removedEntitiesCount,
+        });
+
+        if (toastTimerRef.current) {
+          clearTimeout(toastTimerRef.current);
+        }
+        toastTimerRef.current = setTimeout(() => {
+          setImportToast(null);
+        }, 4000);
+      }
+    } catch (error) {
+      console.error('Failed to process DXF file:', error);
+    }
+  };
+
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      handleProcessDxfFile(file);
+    }
+    e.target.value = '';
+  };
+
+  // 拖曳放置 handlers
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isDraggingOver) {
+      setIsDraggingOver(true);
+    }
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDraggingOver(false);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      handleProcessDxfFile(file);
+    }
+  };
+
   return (
     <div className="w-full h-screen flex flex-col bg-neutral-900 text-white overflow-hidden">
+      {/* 隱藏的檔案上傳輸入框 */}
+      <input
+        type="file"
+        accept=".dxf"
+        ref={fileInputRef}
+        onChange={handleFileInputChange}
+        className="hidden"
+      />
+
       {/* Top Toolbar */}
       <header className="h-14 border-b border-neutral-800 bg-neutral-950 flex items-center justify-between px-4 shrink-0">
         <div className="flex items-center gap-2">
@@ -654,6 +823,16 @@ export default function App() {
             [{solverState}]
           </div>
 
+          {/* Import DXF Button */}
+          <button
+            onClick={handleImportClick}
+            className="bg-neutral-800 hover:bg-neutral-700 text-neutral-200 hover:text-white px-3 py-1 rounded text-xs font-semibold border border-neutral-700 transition-colors shadow-sm flex items-center gap-1.5"
+            title="Import DXF Drawing"
+          >
+            <FileUp size={15} className="text-emerald-400" />
+            <span>Import DXF</span>
+          </button>
+
           {/* Export DXF Button */}
           <button
             onClick={handleExportDxf}
@@ -672,9 +851,14 @@ export default function App() {
       </header>
 
       {/* Main Workspace */}
-      <main className="flex-1 relative">
+      <main
+        className="flex-1 relative"
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
         {solverState === 'OverDefined' && (
-          <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-30 bg-red-950/95 border-2 border-red-500 text-red-100 px-5 py-3 rounded-md shadow-2xl flex items-center gap-3 animate-pulse">
+          <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-30 bg-red-950/95 border-2 border-red-500 text-red-100 px-5 py-3 rounded-md shadow-2xl flex items-center gap-3 animate-pulse pointer-events-none">
             <AlertTriangle className="text-red-500 shrink-0" size={20} />
             <div>
               <span className="font-bold block text-sm">草圖過度定義 (Over-defined)</span>
@@ -682,6 +866,41 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {/* 匯入 DXF 成功訊息浮條 */}
+        {importToast && (
+          <div className="absolute top-4 right-4 z-40 bg-emerald-950/95 border border-emerald-500/60 text-emerald-100 px-4 py-3 rounded-lg shadow-2xl flex items-center gap-3 animate-in fade-in slide-in-from-top-2 duration-200">
+            <CheckCircle2 className="text-emerald-400 shrink-0" size={22} />
+            <div>
+              <span className="font-bold block text-sm text-emerald-300">
+                DXF 匯入成功
+              </span>
+              <span className="text-xs text-emerald-200/90 block">
+                已載入 {importToast.entityCount} 個圖元 (單位: {importToast.units})
+                {importToast.mergedPointsCount !== undefined && importToast.mergedPointsCount > 0 ? (
+                  <span className="ml-1 text-emerald-400">
+                    • 縫合 {importToast.mergedPointsCount} 個端點
+                  </span>
+                ) : null}
+                {importToast.removedEntitiesCount !== undefined && importToast.removedEntitiesCount > 0 ? (
+                  <span className="ml-1 text-emerald-400">
+                    • 移除 {importToast.removedEntitiesCount} 個無效圖元
+                  </span>
+                ) : null}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* 拖曳放置半透明遮罩指示 */}
+        {isDraggingOver && (
+          <div className="absolute inset-0 z-50 bg-neutral-950/80 backdrop-blur-sm border-4 border-dashed border-emerald-500 rounded-lg flex flex-col items-center justify-center text-emerald-400 transition-all duration-200 pointer-events-none">
+            <FileUp size={64} className="mb-4 animate-bounce text-emerald-400" />
+            <span className="text-xl font-bold tracking-wide">放開滑鼠以匯入 DXF 圖面</span>
+            <span className="text-sm text-emerald-500/80 mt-1">支援標準 2D DXF 檔案拖放匯入</span>
+          </div>
+        )}
+
         <CADSketchCanvas />
       </main>
       <OsnapSettingsModal />
@@ -689,4 +908,3 @@ export default function App() {
     </div>
   );
 }
-
