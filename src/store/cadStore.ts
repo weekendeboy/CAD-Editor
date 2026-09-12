@@ -90,6 +90,8 @@ export const useCADStore = create<CADState>((set, get) => ({
   polarAngleStep: 45,
   customPolarAngles: [],
   isPolarModalOpen: false,
+  isLayerModalOpen: false,
+  setLayerModalOpen: (open) => set({ isLayerModalOpen: open }),
 
   // 環形陣列 (Circular Array) 參數設定（預設 4 個項目，360 度填滿）
   arrayItems: 4,
@@ -148,6 +150,80 @@ export const useCADStore = create<CADState>((set, get) => ({
         [layer.id]: layer,
       },
     };
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+    };
+  }),
+
+  removeLayer: (layerId: string) => set((state) => {
+    // 禁止刪除 '0' 與 'DEFPOINTS'
+    if (layerId === '0' || layerId.toUpperCase() === 'DEFPOINTS') {
+      return state;
+    }
+    if (!state.document.layers[layerId]) {
+      return state;
+    }
+
+    const { [layerId]: _removed, ...remainingLayers } = state.document.layers;
+    const newActiveLayerId = state.activeLayerId === layerId ? '0' : state.activeLayerId;
+
+    // 將現有特徵樹中該圖層的圖元重置為 '0' 圖層
+    const updatedFeatureTree = state.document.featureTree.map((feature) => {
+      if (feature.type === 'SKETCH') {
+        const sketch = feature as SketchFeature;
+        const hasEntitiesInLayer = sketch.entities.some((e) => e.layerId === layerId);
+        if (hasEntitiesInLayer) {
+          const updatedEntities = sketch.entities.map((e) =>
+            e.layerId === layerId ? { ...e, layerId: '0' } : e
+          );
+          return applyConstraintsToSketch({
+            ...sketch,
+            entities: updatedEntities,
+          });
+        }
+      }
+      return feature;
+    });
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      layers: remainingLayers,
+      featureTree: updatedFeatureTree,
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+      activeLayerId: newActiveLayerId,
+    };
+  }),
+
+  renameLayer: (layerId: string, newName: string) => set((state) => {
+    const trimmed = newName.trim();
+    if (!trimmed) return state;
+    if (layerId === '0' || layerId.toUpperCase() === 'DEFPOINTS') return state;
+    const existingLayer = state.document.layers[layerId];
+    if (!existingLayer) return state;
+    if (existingLayer.name === trimmed) return state;
+
+    // 檢查是否有同名圖層
+    const nameExists = Object.values(state.document.layers).some(
+      (l) => l.id !== layerId && l.name.toLowerCase() === trimmed.toLowerCase()
+    );
+    if (nameExists) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      layers: {
+        ...state.document.layers,
+        [layerId]: {
+          ...existingLayer,
+          name: trimmed,
+        },
+      },
+    };
+
     return {
       ...pushUndoState(state),
       document: updatedDocument,
@@ -1286,6 +1362,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       arrayFillAngle: 360,
       isOsnapModalOpen: false,
       isPolarModalOpen: false,
+      isLayerModalOpen: false,
     });
   }
 }));

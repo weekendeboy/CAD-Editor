@@ -95,9 +95,13 @@ export interface CADState {
 
   // 圖層狀態與管理
   activeLayerId: string;
+  isLayerModalOpen: boolean;
+  setLayerModalOpen: (open: boolean) => void;
   setActiveLayer: (layerId: string) => void;
   addLayer: (layer: CADLayer) => void;
   updateLayer: (layerId: string, updates: Partial<CADLayer>) => void;
+  removeLayer: (layerId: string) => void;
+  renameLayer: (layerId: string, newName: string) => void;
   toggleLayerVisibility: (layerId: string) => void;
   toggleLayerLock: (layerId: string) => void;
 

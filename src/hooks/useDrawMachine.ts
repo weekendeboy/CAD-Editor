@@ -285,6 +285,7 @@ export function useDrawMachine() {
   const polarTrackingEnabled = useCADStore((state) => state.polarTrackingEnabled);
   const polarAngleStep = useCADStore((state) => state.polarAngleStep);
   const customPolarAngles = useCADStore((state) => state.customPolarAngles);
+  const activeLayerId = useCADStore((state) => state.activeLayerId);
 
   const [drawSession, setDrawSession] = useState<DrawSession>(createInitialDrawSession());
   const [currentSnap, setCurrentSnap] = useState<SnapResult | null>(null);
@@ -622,7 +623,7 @@ export function useDrawMachine() {
       // 將 bulges 寫入 PolylineEntity
       const polylineEntity: PolylineEntity = {
         id: crypto.randomUUID(),
-        layerId: 'layer-0',
+        layerId: activeLayerId || '0',
         visible: true,
         locked: false,
         type: 'polyline',
@@ -1547,7 +1548,7 @@ export function useDrawMachine() {
 
           const newLine: LineEntity = {
             id: crypto.randomUUID(),
-            layerId: 'layer-0',
+            layerId: activeLayerId || '0',
             visible: true,
             locked: false,
             type: 'line',
@@ -1681,7 +1682,7 @@ export function useDrawMachine() {
           if (polylineMode === 'ARC' && arcData) {
             const newArc: ArcEntity = {
               id: crypto.randomUUID(),
-              layerId: 'layer-0',
+              layerId: activeLayerId || '0',
               visible: true,
               locked: false,
               type: 'arc',
@@ -1704,7 +1705,7 @@ export function useDrawMachine() {
             // Default to LINE
             const newLine: LineEntity = {
               id: crypto.randomUUID(),
-              layerId: 'layer-0',
+              layerId: activeLayerId || '0',
               visible: true,
               locked: false,
               type: 'line',
@@ -1848,7 +1849,7 @@ export function useDrawMachine() {
           if (radius > 0.5) {
             const newCircle: CircleEntity = {
               id: crypto.randomUUID(),
-              layerId: 'layer-0',
+              layerId: activeLayerId || '0',
               visible: true,
               locked: false,
               type: 'circle',
@@ -1882,7 +1883,7 @@ export function useDrawMachine() {
 
             const topLine: LineEntity = {
               id: crypto.randomUUID(),
-              layerId: 'layer-0',
+              layerId: activeLayerId || '0',
               visible: true,
               locked: false,
               type: 'line',
@@ -1892,7 +1893,7 @@ export function useDrawMachine() {
 
             const bottomLine: LineEntity = {
               id: crypto.randomUUID(),
-              layerId: 'layer-0',
+              layerId: activeLayerId || '0',
               visible: true,
               locked: false,
               type: 'line',
@@ -1902,7 +1903,7 @@ export function useDrawMachine() {
 
             const leftLine: LineEntity = {
               id: crypto.randomUUID(),
-              layerId: 'layer-0',
+              layerId: activeLayerId || '0',
               visible: true,
               locked: false,
               type: 'line',
@@ -1912,7 +1913,7 @@ export function useDrawMachine() {
 
             const rightLine: LineEntity = {
               id: crypto.randomUUID(),
-              layerId: 'layer-0',
+              layerId: activeLayerId || '0',
               visible: true,
               locked: false,
               type: 'line',
@@ -1994,7 +1995,7 @@ export function useDrawMachine() {
           if (dist > 0.01) {
             const newPolygon: PolylineEntity = {
               id: crypto.randomUUID(),
-              layerId: 'layer-0',
+              layerId: activeLayerId || '0',
               visible: true,
               locked: false,
               type: 'polyline',
@@ -2038,7 +2039,7 @@ export function useDrawMachine() {
           if (arcData && arcData.radius > 0.5) {
             const newArc: ArcEntity = {
               id: crypto.randomUUID(),
-              layerId: 'layer-0',
+              layerId: activeLayerId || '0',
               visible: true,
               locked: false,
               type: 'arc',
@@ -2120,7 +2121,7 @@ export function useDrawMachine() {
 
             const newArc: ArcEntity = {
               id: crypto.randomUUID(),
-              layerId: 'layer-0',
+              layerId: activeLayerId || '0',
               visible: true,
               locked: false,
               type: 'arc',
@@ -2841,7 +2842,7 @@ export function useDrawMachine() {
       if (currentTool === 'CIRCLE') {
         const newCircle: CircleEntity = {
           id: crypto.randomUUID(),
-          layerId: 'layer-0',
+          layerId: activeLayerId || '0',
           visible: true,
           locked: false,
           type: 'circle',
@@ -2890,7 +2891,7 @@ export function useDrawMachine() {
         const vertices = calculatePolygonVertices(startPoint, exactEndPt, sides, method);
         const newPolygon: PolylineEntity = {
           id: crypto.randomUUID(),
-          layerId: 'layer-0',
+          layerId: activeLayerId || '0',
           visible: true,
           locked: false,
           type: 'polyline',
@@ -2919,7 +2920,7 @@ export function useDrawMachine() {
       if (currentTool === 'LINE') {
         const newLine: LineEntity = {
           id: crypto.randomUUID(),
-          layerId: 'layer-0',
+          layerId: activeLayerId || '0',
           visible: true,
           locked: false,
           type: 'line',
@@ -2966,7 +2967,7 @@ export function useDrawMachine() {
 
         const newLine: LineEntity = {
           id: newEntityId,
-          layerId: 'layer-0',
+          layerId: activeLayerId || '0',
           visible: true,
           locked: false,
           type: 'line',

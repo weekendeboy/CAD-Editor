@@ -10,6 +10,8 @@ import { CADSketchCanvas } from './components/CADSketchCanvas';
 import { SketchFeature, BoundingBox2D, CADEntity2D } from './types/cad';
 import { OsnapSettingsModal } from './components/OsnapSettingsModal';
 import { PolarSettingsModal } from './components/PolarSettingsModal';
+import { LayerControlBar } from './components/LayerControlBar';
+import { LayerManagerModal } from './components/LayerManagerModal';
 import { exportSketchToDxf, downloadDxfFile } from './core/dxf/DxfWriter';
 import { parseDxfContent } from './core/dxf/DxfParser';
 import {
@@ -803,6 +805,11 @@ export default function App() {
               </>
             )}
           </div>
+
+          <div className="w-px h-6 bg-neutral-800 mx-1" />
+
+          {/* Layer Control Bar */}
+          <LayerControlBar />
         </div>
 
         <div className="flex items-center gap-4">
@@ -917,6 +924,7 @@ export default function App() {
       </main>
       <OsnapSettingsModal />
       <PolarSettingsModal />
+      <LayerManagerModal />
     </div>
   );
 }

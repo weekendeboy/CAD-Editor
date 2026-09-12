@@ -228,7 +228,7 @@ export interface CADLayer {
   name: string;
   color: string;
   aciColor: number;
-  lineType: 'CONTINUOUS' | 'DASHED' | 'CENTER';
+  lineType: 'CONTINUOUS' | 'DASHED' | 'CENTER' | 'HIDDEN';
   lineWidth: number;
   visible: boolean;
   locked: boolean;

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Point2D, CADEntity2D, EntityState } from '../types/cad';
 import { getPolylineSvgPathData } from '../core/2d/PolylineUtils';
+import { useCADStore } from '../store/cadStore';
 
 export interface EntityRendererProps {
   entities: CADEntity2D[];
@@ -27,58 +28,71 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
   onSelectEntity,
   currentTool,
 }) => {
+  const document = useCADStore((state) => state.document);
+  const layers = document.layers;
+
   const renderEntity = (entity: CADEntity2D) => {
-    // 隱藏設定為不可見的圖元
-    if (entity.visible === false) return null;
+    // 獲取圖層資料
+    const layer = layers[entity.layerId || '0'];
+    
+    // 隱藏設定為不可見的圖元：圖元自身設定或圖層設定
+    if (entity.visible === false || (layer && layer.visible === false)) return null;
 
     const isSelected = selectedIds.includes(entity.id);
     const entityState: EntityState = (entity.state || solverState || 'UnderDefined') as EntityState;
 
     // 依據規格判定圖元顏色、線寬與虛線樣式：
-    // 1. 選取高亮 (Selected)：亮藍色 (#38bdf8)
-    // 2. 建構線 (isConstruction === true)：顯示為紫色虛線 (#c084fc / 選取時 #38bdf8 虛線)
-    // 3. OverDefined：警示紅色 (#ef4444)
-    // 4. FullyDefined：綠色 (#10b981)
-    // 5. UnderDefined：藍色 (#60a5fa)
     let strokeColor = '#60a5fa';
-    let strokeWidth = entity.lineWidth || 1.5;
+    let strokeWidth = entity.lineWidth || (layer ? layer.lineWidth : 1.5) || 1.5;
     let strokeDasharray: string | undefined = undefined;
+
+    // ByLayer 顏色判定
+    const byLayerColor = entity.color || (layer ? layer.color : undefined) || '#60a5fa';
+    const byLayerLineType = entity.lineType || (layer ? layer.lineType : 'CONTINUOUS');
 
     if (isSelected) {
       strokeColor = '#38bdf8';
       strokeWidth = 3;
       if (entity.isConstruction) {
         strokeDasharray = '6,4';
+      } else if (byLayerLineType === 'DASHED' || byLayerLineType === 'HIDDEN') {
+        strokeDasharray = '8,4';
       }
     } else if (entity.isConstruction) {
       strokeColor = '#c084fc';
-      strokeWidth = entity.lineWidth || 1.5;
       strokeDasharray = '6,4';
     } else if (entityState === 'OverDefined') {
       strokeColor = '#ef4444';
       strokeWidth = 2.5;
     } else if (entityState === 'FullyDefined') {
       strokeColor = '#10b981';
-      strokeWidth = entity.lineWidth || 1.5;
     } else {
-      strokeColor = entity.color || '#60a5fa';
-      strokeWidth = entity.lineWidth || 1.5;
+      strokeColor = byLayerColor;
+      if (byLayerLineType === 'DASHED' || byLayerLineType === 'HIDDEN') {
+        strokeDasharray = '8,4';
+      }
     }
 
     const isSelectMode = currentTool === 'SELECT';
+    const isLocked = layer && layer.locked === true;
+    
+    // 若圖層被鎖定，SELECT 模式下不可被點擊選取（ pointerEvents: 'none'，且透明度降低至 0.6）
+    const pointerEvents = (isSelectMode && !isLocked) ? 'all' : 'none';
+    const opacity = (isSelectMode && isLocked) ? 0.6 : 1.0;
 
     const commonProps = {
       stroke: strokeColor,
       strokeWidth,
       strokeDasharray,
       fill: 'none',
+      opacity,
       style: {
-        cursor: isSelectMode ? 'pointer' : 'crosshair',
-        pointerEvents: (isSelectMode ? 'all' : 'none') as React.CSSProperties['pointerEvents'],
+        cursor: (isSelectMode && !isLocked) ? 'pointer' : 'crosshair',
+        pointerEvents: pointerEvents as React.CSSProperties['pointerEvents'],
       },
-      className: `cad-entity cad-entity-${entity.type} ${isSelected ? 'cad-entity-selected' : ''}`,
+      className: `cad-entity cad-entity-${entity.type} ${isSelected ? 'cad-entity-selected' : ''} ${isLocked ? 'cad-entity-locked' : ''}`,
       onClick: (e: React.MouseEvent) => {
-        if (isSelectMode) {
+        if (isSelectMode && !isLocked) {
           e.stopPropagation();
           if (onSelectEntity) {
             onSelectEntity(entity.id, e);
