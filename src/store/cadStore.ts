@@ -1,6 +1,20 @@
 import { create } from 'zustand';
 import { CADState } from './cadStore.types';
-import { CADDocument, CADEntity2D, CADLayer, createEmptyCADDocument, DatumFrontPlane, SketchFeature } from '../types/cad';
+import {
+  CADDocument,
+  CADEntity2D,
+  CADLayer,
+  createEmptyCADDocument,
+  DatumFrontPlane,
+  DatumTopPlane,
+  DatumRightPlane,
+  SketchFeature,
+  CADFeature,
+  ExtrudeFeature,
+  DatumPlaneFeature,
+  CustomPlane,
+} from '../types/cad';
+import { createOffsetPlane } from '../core/3d/DatumPlaneEngine';
 import {
   insertEntityIntoSketch,
   removeEntityFromSketch,
@@ -23,14 +37,97 @@ import {
 } from './sketchMutators';
 import { executeTrim } from '../core/2d/TrimManager';
 import { solveConstraints, analyzeSketchDOF } from '../core/solver/ConstraintSolver';
+import {
+  getRegenSequence,
+  markDownstreamDirty,
+  validateFeatureDependencies,
+  getDirectDependencies,
+} from '../core/3d/FeatureRegenEngine';
 
-function createInitialDocument() {
+/**
+ * 依據 ID 尋找對應的 CustomPlane (包含特徵樹上的 DatumPlaneFeature/SketchFeature、doc.planes 以及預設 3 大基準面)
+ */
+function findCustomPlane(doc: CADDocument, planeId: string): CustomPlane | null {
+  if (!doc) return null;
+
+  // 1. 於特徵樹搜尋 DatumPlaneFeature 或 SketchFeature
+  const feature = doc.featureTree.find((f) => f.id === planeId);
+  if (feature) {
+    if (feature.type === 'DATUM_PLANE') {
+      return (feature as DatumPlaneFeature).plane;
+    }
+    if (feature.type === 'SKETCH') {
+      return (feature as SketchFeature).plane;
+    }
+  }
+
+  // 2. 於 doc.planes 快照表搜尋
+  if (doc.planes && doc.planes[planeId]) {
+    return doc.planes[planeId];
+  }
+
+  // 3. 標準預設三大基準面降級保護
+  if (planeId === 'datum-front') return DatumFrontPlane;
+  if (planeId === 'datum-top') return DatumTopPlane;
+  if (planeId === 'datum-right') return DatumRightPlane;
+
+  return null;
+}
+
+/**
+ * 初始化建立標準 CAD Document，確保特徵樹頂部包含常駐的 3 個標準基準面 (Front, Top, Right) 與預設草圖 Sketch1
+ */
+function createInitialDocument(): CADDocument {
   const doc = createEmptyCADDocument();
+
+  const frontPlaneFeature: DatumPlaneFeature = {
+    id: 'datum-front',
+    name: 'Front Plane (XY)',
+    type: 'DATUM_PLANE',
+    planeType: 'offset',
+    referencePlaneId: '',
+    referenceFeatureId: '',
+    offsetDistance: 0,
+    plane: DatumFrontPlane,
+    dependencies: [],
+    suppressed: false,
+    visible: true,
+  };
+
+  const topPlaneFeature: DatumPlaneFeature = {
+    id: 'datum-top',
+    name: 'Top Plane (XZ)',
+    type: 'DATUM_PLANE',
+    planeType: 'offset',
+    referencePlaneId: '',
+    referenceFeatureId: '',
+    offsetDistance: 0,
+    plane: DatumTopPlane,
+    dependencies: [],
+    suppressed: false,
+    visible: true,
+  };
+
+  const rightPlaneFeature: DatumPlaneFeature = {
+    id: 'datum-right',
+    name: 'Right Plane (YZ)',
+    type: 'DATUM_PLANE',
+    planeType: 'offset',
+    referencePlaneId: '',
+    referenceFeatureId: '',
+    offsetDistance: 0,
+    plane: DatumRightPlane,
+    dependencies: [],
+    suppressed: false,
+    visible: true,
+  };
+
   const initialSketch: SketchFeature = {
     id: 'sketch-1',
     name: 'Sketch1',
     type: 'SKETCH',
-    dependencies: [],
+    planeFeatureId: 'datum-front',
+    dependencies: ['datum-front'],
     suppressed: false,
     plane: DatumFrontPlane,
     entities: [],
@@ -38,18 +135,17 @@ function createInitialDocument() {
     dimensions: [],
     profiles: [],
     solverState: 'UnderDefined',
+    visible: true,
   };
-  
-  // We cannot mutate doc.featureTree directly if we want strict immutability, 
-  // but since it's freshly created here, it's fine.
-  doc.featureTree.push(initialSketch);
+
+  doc.featureTree = [frontPlaneFeature, topPlaneFeature, rightPlaneFeature, initialSketch];
+  doc.rollbackIndex = doc.featureTree.length;
   doc.activeSketchId = 'sketch-1';
   return doc;
 }
 
 function pushUndoState(state: CADState): Partial<CADState> {
-  // Deep copy the document as requested
-  const clonedDoc = JSON.parse(JSON.stringify(state.document));
+  const clonedDoc: CADDocument = JSON.parse(JSON.stringify(state.document));
   const newUndoStack = [...state.undoStack, clonedDoc];
   if (newUndoStack.length > 20) {
     newUndoStack.shift();
@@ -58,6 +154,29 @@ function pushUndoState(state: CADState): Partial<CADState> {
     undoStack: newUndoStack,
     redoStack: [],
   };
+}
+
+/**
+  * Helper to check if a feature tree ordering satisfies DAG dependencies.
+  * In a feature tree, upstream features MUST precede downstream dependent features.
+  */
+function checkDAGOrderValid(features: CADFeature[]): boolean {
+  const posMap = new Map<string, number>();
+  features.forEach((f, idx) => posMap.set(f.id, idx));
+
+  for (let i = 0; i < features.length; i++) {
+    const feature = features[i];
+    const parentIds = getDirectDependencies(feature);
+    for (const pId of parentIds) {
+      if (posMap.has(pId)) {
+        const parentIndex = posMap.get(pId)!;
+        if (parentIndex >= i) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
 }
 
 export const useCADStore = create<CADState>((set, get) => ({
@@ -122,37 +241,446 @@ export const useCADStore = create<CADState>((set, get) => ({
   undoStack: [],
   redoStack: [],
 
+  // 特徵樹 Actions 實作
+  setSelectedFeatureId: (id) => set((state) => {
+    if (!id) {
+      return { selectedFeatureId: null };
+    }
+    const feature = state.document.featureTree.find((f) => f.id === id);
+    if (feature && feature.type === 'SKETCH') {
+      return {
+        selectedFeatureId: id,
+        activeSketchId: id,
+      };
+    }
+    return { selectedFeatureId: id };
+  }),
+
+  addFeature: (feature) => set((state) => {
+    const currentRollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
+    const tree = state.document.featureTree;
+    const newFeatureTree = [
+      ...tree.slice(0, currentRollback),
+      feature,
+      ...tree.slice(currentRollback),
+    ];
+    const newRollbackIndex = currentRollback + 1;
+    const nextActiveSketchId = feature.type === 'SKETCH' ? feature.id : state.activeSketchId;
+
+    return {
+      ...pushUndoState(state),
+      activeSketchId: nextActiveSketchId,
+      selectedFeatureId: feature.id,
+      document: {
+        ...state.document,
+        featureTree: newFeatureTree,
+        rollbackIndex: newRollbackIndex,
+      },
+    };
+  }),
+
+  removeFeature: (id) => set((state) => {
+    const featureIndex = state.document.featureTree.findIndex((f) => f.id === id);
+    if (featureIndex === -1) return state;
+
+    const filteredTree = state.document.featureTree.filter((f) => f.id !== id);
+    const validationMap = validateFeatureDependencies(filteredTree);
+
+    const updatedTree = filteredTree.map((f) => {
+      const errs = validationMap.get(f.id);
+      if (errs && errs.length > 0) {
+        return {
+          ...f,
+          error: errs.join('; '),
+          isDirty: true,
+        };
+      } else {
+        return {
+          ...f,
+          error: f.error && f.error.includes('Missing reference') ? null : f.error,
+        };
+      }
+    });
+
+    let newRollbackIndex = state.document.rollbackIndex;
+    if (featureIndex < state.document.rollbackIndex) {
+      newRollbackIndex = Math.max(0, state.document.rollbackIndex - 1);
+    } else {
+      newRollbackIndex = Math.min(newRollbackIndex, updatedTree.length);
+    }
+
+    return {
+      ...pushUndoState(state),
+      document: {
+        ...state.document,
+        featureTree: updatedTree,
+        rollbackIndex: newRollbackIndex,
+      },
+      selectedFeatureId: state.selectedFeatureId === id ? null : state.selectedFeatureId,
+      activeSketchId: state.activeSketchId === id ? null : state.activeSketchId,
+    };
+  }),
+
+  updateFeature: (id, updates) => set((state) => {
+    const exists = state.document.featureTree.some((f) => f.id === id);
+    if (!exists) return state;
+
+    const updatedTree = state.document.featureTree.map((f) =>
+      f.id === id ? ({ ...f, ...updates, isDirty: true } as CADFeature) : f
+    );
+
+    const dirtyTree = markDownstreamDirty(updatedTree, id);
+    const validationMap = validateFeatureDependencies(dirtyTree);
+
+    const finalTree = dirtyTree.map((f) => {
+      const errs = validationMap.get(f.id);
+      return {
+        ...f,
+        error: errs && errs.length > 0 ? errs.join('; ') : f.error,
+      };
+    });
+
+    return {
+      ...pushUndoState(state),
+      document: {
+        ...state.document,
+        featureTree: finalTree,
+      },
+    };
+  }),
+
+  toggleFeatureSuppression: (id) => set((state) => {
+    const feature = state.document.featureTree.find((f) => f.id === id);
+    if (!feature) return state;
+
+    const updatedTree = state.document.featureTree.map((f) =>
+      f.id === id ? { ...f, suppressed: !f.suppressed, isDirty: true } : f
+    );
+
+    const dirtyTree = markDownstreamDirty(updatedTree, id);
+
+    return {
+      ...pushUndoState(state),
+      document: {
+        ...state.document,
+        featureTree: dirtyTree,
+      },
+    };
+  }),
+
+  renameFeature: (id, newName) => set((state) => {
+    const trimmed = newName.trim();
+    if (!trimmed) return state;
+    const feature = state.document.featureTree.find((f) => f.id === id);
+    if (!feature || feature.name === trimmed) return state;
+
+    const updatedTree = state.document.featureTree.map((f) =>
+      f.id === id ? { ...f, name: trimmed } : f
+    );
+
+    return {
+      ...pushUndoState(state),
+      document: {
+        ...state.document,
+        featureTree: updatedTree,
+      },
+    };
+  }),
+
+  reorderFeature: (sourceIndex, targetIndex) => set((state) => {
+    const tree = [...state.document.featureTree];
+    if (
+      sourceIndex < 0 ||
+      sourceIndex >= tree.length ||
+      targetIndex < 0 ||
+      targetIndex >= tree.length ||
+      sourceIndex === targetIndex
+    ) {
+      return state;
+    }
+
+    const [moved] = tree.splice(sourceIndex, 1);
+    tree.splice(targetIndex, 0, moved);
+
+    if (!checkDAGOrderValid(tree)) {
+      console.warn('Reordering cancelled: Breaks feature dependency DAG hierarchy.');
+      return state;
+    }
+
+    return {
+      ...pushUndoState(state),
+      document: {
+        ...state.document,
+        featureTree: tree,
+      },
+    };
+  }),
+
+  setRollbackIndex: (index) => set((state) => {
+    const clamped = Math.max(0, Math.min(index, state.document.featureTree.length));
+    if (state.document.rollbackIndex === clamped) return state;
+    return {
+      document: {
+        ...state.document,
+        rollbackIndex: clamped,
+      },
+    };
+  }),
+
+  regenerateFeatureTree: () => set((state) => {
+    const regenResult = getRegenSequence(state.document);
+    const { validationErrors, hasCycle, cycleNodes } = regenResult;
+
+    const regeneratedTree = state.document.featureTree.map((f) => {
+      const errors = validationErrors.get(f.id);
+      if (errors && errors.length > 0) {
+        return {
+          ...f,
+          error: errors.join('; '),
+          isDirty: true,
+        };
+      }
+      if (hasCycle && cycleNodes.includes(f.id)) {
+        return {
+          ...f,
+          error: 'Cyclic dependency detected in feature tree',
+          isDirty: true,
+        };
+      }
+      return {
+        ...f,
+        error: null,
+        isDirty: false,
+      };
+    });
+
+    return {
+      ...pushUndoState(state),
+      document: {
+        ...state.document,
+        featureTree: regeneratedTree,
+      },
+    };
+  }),
+
+  // ============================================================================
+  // 基準面 (Datum Plane) 特徵、參數化連動與草圖建立 Actions 實作
+  // ============================================================================
+
+  addOffsetDatumPlane: (refPlaneId, distance, name) => {
+    const state = get();
+    const refPlane = findCustomPlane(state.document, refPlaneId) || DatumFrontPlane;
+
+    const newFeatureId = `datum-plane-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const planeName = name || `${refPlane.name || 'Plane'} Offset (${distance >= 0 ? '+' : ''}${distance}mm)`;
+
+    const computedPlane = createOffsetPlane(refPlane, distance, planeName, newFeatureId);
+
+    const newFeature: DatumPlaneFeature = {
+      id: newFeatureId,
+      name: planeName,
+      type: 'DATUM_PLANE',
+      planeType: 'offset',
+      referencePlaneId: refPlaneId,
+      referenceFeatureId: refPlaneId,
+      offsetDistance: distance,
+      plane: computedPlane,
+      dependencies: [refPlaneId],
+      suppressed: false,
+      visible: true,
+    };
+
+    const rollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
+    const newTree = [
+      ...state.document.featureTree.slice(0, rollback),
+      newFeature,
+      ...state.document.featureTree.slice(rollback),
+    ];
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: newTree,
+      rollbackIndex: rollback + 1,
+      planes: {
+        ...state.document.planes,
+        [newFeatureId]: computedPlane,
+      },
+    };
+
+    set({
+      ...pushUndoState(state),
+      selectedFeatureId: newFeatureId,
+      document: updatedDocument,
+    });
+
+    return newFeatureId;
+  },
+
+  updateDatumPlaneOffset: (planeFeatureId, distance) => set((state) => {
+    const tree = state.document.featureTree;
+    const featureIndex = tree.findIndex((f) => f.id === planeFeatureId && f.type === 'DATUM_PLANE');
+    if (featureIndex === -1) return state;
+
+    const datumFeature = tree[featureIndex] as DatumPlaneFeature;
+    const refPlaneId = datumFeature.referencePlaneId || datumFeature.referenceFeatureId || 'datum-front';
+    const refPlane = findCustomPlane(state.document, refPlaneId) || DatumFrontPlane;
+
+    // 重算偏移姿態
+    const recalculatedPlane = createOffsetPlane(refPlane, distance, datumFeature.name, planeFeatureId);
+
+    // 【參數化連動核心】：更新 DatumPlaneFeature 姿態，並連動所有依附該基準面的子草圖 (SketchFeature)
+    const updatedTree = tree.map((f) => {
+      if (f.id === planeFeatureId && f.type === 'DATUM_PLANE') {
+        return {
+          ...f,
+          offsetDistance: distance,
+          plane: recalculatedPlane,
+          isDirty: true,
+        } as DatumPlaneFeature;
+      }
+
+      if (f.type === 'SKETCH') {
+        const sketch = f as SketchFeature;
+        if (
+          sketch.planeFeatureId === planeFeatureId ||
+          sketch.plane?.id === planeFeatureId ||
+          sketch.plane?.parentFeatureId === planeFeatureId
+        ) {
+          return {
+            ...sketch,
+            planeFeatureId: planeFeatureId,
+            plane: recalculatedPlane,
+            isDirty: true,
+          } as SketchFeature;
+        }
+      }
+
+      return f;
+    });
+
+    const dirtyTree = markDownstreamDirty(updatedTree, planeFeatureId);
+    const validationMap = validateFeatureDependencies(dirtyTree);
+
+    const finalTree = dirtyTree.map((f) => {
+      const errs = validationMap.get(f.id);
+      return {
+        ...f,
+        error: errs && errs.length > 0 ? errs.join('; ') : f.error,
+      };
+    });
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: finalTree,
+      planes: {
+        ...state.document.planes,
+        [planeFeatureId]: recalculatedPlane,
+      },
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+    };
+  }),
+
+  toggleFeatureVisibility: (featureId) => set((state) => {
+    const feature = state.document.featureTree.find((f) => f.id === featureId);
+    if (!feature) return state;
+
+    const newVisible = feature.visible === false ? true : false;
+    const updatedTree = state.document.featureTree.map((f) =>
+      f.id === featureId ? { ...f, visible: newVisible } : f
+    );
+
+    return {
+      ...pushUndoState(state),
+      document: {
+        ...state.document,
+        featureTree: updatedTree,
+      },
+    };
+  }),
+
+  createSketchOnPlane: (planeId) => {
+    const state = get();
+    const targetPlane = findCustomPlane(state.document, planeId) || DatumFrontPlane;
+
+    const newSketchId = `sketch-${Date.now()}`;
+    const sketchCount = state.document.featureTree.filter((f) => f.type === 'SKETCH').length + 1;
+    const sketchName = `Sketch${sketchCount}`;
+
+    const newSketch: SketchFeature = {
+      id: newSketchId,
+      name: sketchName,
+      type: 'SKETCH',
+      planeFeatureId: planeId,
+      plane: targetPlane,
+      dependencies: [planeId],
+      entities: [],
+      constraints: [],
+      dimensions: [],
+      profiles: [],
+      solverState: 'UnderDefined',
+      suppressed: false,
+      visible: true,
+    };
+
+    const rollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
+    const newTree = [
+      ...state.document.featureTree.slice(0, rollback),
+      newSketch,
+      ...state.document.featureTree.slice(rollback),
+    ];
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: newTree,
+      rollbackIndex: rollback + 1,
+      activeSketchId: newSketchId,
+    };
+
+    set({
+      ...pushUndoState(state),
+      activeSketchId: newSketchId,
+      selectedFeatureId: newSketchId,
+      selectedEntityIds: [],
+      document: updatedDocument,
+    });
+
+    return newSketchId;
+  },
+
+  // 3D 特徵管理 Actions 實作
   addExtrudeFeature: (feature) => set((state) => {
-    const newFeature = {
+    const newFeature: ExtrudeFeature = {
       ...feature,
       id: 'extrude-' + Date.now().toString(),
       type: 'EXTRUDE' as const,
+      dependencies: feature.sketchId ? [feature.sketchId] : [],
+      suppressed: false,
     };
     
-    return {
-      ...pushUndoState(state),
-      document: {
-        ...state.document,
-        featureTree: [...state.document.featureTree, newFeature]
-      }
-    };
-  }),
-
-  updateExtrudeFeature: (id, updates) => set((state) => {
-    const featureIndex = state.document.featureTree.findIndex((f) => f.id === id && f.type === 'EXTRUDE');
-    if (featureIndex === -1) return state;
-
-    const newFeatureTree = [...state.document.featureTree];
-    newFeatureTree[featureIndex] = { ...newFeatureTree[featureIndex], ...updates } as any;
+    const currentRollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
+    const tree = state.document.featureTree;
+    const newFeatureTree = [
+      ...tree.slice(0, currentRollback),
+      newFeature,
+      ...tree.slice(currentRollback),
+    ];
 
     return {
       ...pushUndoState(state),
+      selectedFeatureId: newFeature.id,
       document: {
         ...state.document,
-        featureTree: newFeatureTree
-      }
+        featureTree: newFeatureTree,
+        rollbackIndex: currentRollback + 1,
+      },
     };
   }),
+
+  updateExtrudeFeature: (id, updates) => get().updateFeature(id, updates),
 
   setViewMode: (mode) => set({ viewMode: mode }),
   
@@ -189,7 +717,6 @@ export const useCADStore = create<CADState>((set, get) => ({
   }),
 
   removeLayer: (layerId: string) => set((state) => {
-    // 禁止刪除 '0' 與 'DEFPOINTS'
     if (layerId === '0' || layerId.toUpperCase() === 'DEFPOINTS') {
       return state;
     }
@@ -200,7 +727,6 @@ export const useCADStore = create<CADState>((set, get) => ({
     const { [layerId]: _removed, ...remainingLayers } = state.document.layers;
     const newActiveLayerId = state.activeLayerId === layerId ? '0' : state.activeLayerId;
 
-    // 將現有特徵樹中該圖層的圖元重置為 '0' 圖層
     const updatedFeatureTree = state.document.featureTree.map((feature) => {
       if (feature.type === 'SKETCH') {
         const sketch = feature as SketchFeature;
@@ -239,7 +765,6 @@ export const useCADStore = create<CADState>((set, get) => ({
     if (!existingLayer) return state;
     if (existingLayer.name === trimmed) return state;
 
-    // 檢查是否有同名圖層
     const nameExists = Object.values(state.document.layers).some(
       (l) => l.id !== layerId && l.name.toLowerCase() === trimmed.toLowerCase()
     );
@@ -356,22 +881,18 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!sketch) return state;
 
-    // 將所有傳入圖元的 state 統一標註為 'UnderDefined'，確保不觸發錯誤的約束衝突警報
     const preparedEntities: CADEntity2D[] = entities.map((e) => ({
       ...e,
       state: 'UnderDefined',
     }));
 
-    // 更新當前 activeSketch，將傳入的 entities 陣列直接與現有 sketch.entities 陣列合併
     const mergedSketch: SketchFeature = {
       ...sketch,
       entities: [...sketch.entities, ...preparedEntities],
     };
 
-    // 調用既有的 applyConstraintsToSketch(updatedSketch)，使拓撲引擎自動重新提取封閉面輪廓（profiles）與淨面積/DOF
     const updatedSketch = applyConstraintsToSketch(mergedSketch);
 
-    // 將傳入的 layers 附加至 state.document.layers 中（保留既有圖層，新增不存在的圖層）
     const mergedLayers = { ...state.document.layers };
     if (layers) {
       for (const [key, layer] of Object.entries(layers)) {
@@ -389,7 +910,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    // 建立單一 Undo 快照，清空選取狀態，回傳更新後的 Store 狀態
     return {
       ...pushUndoState(state),
       document: updatedDocument,
@@ -416,7 +936,7 @@ export const useCADStore = create<CADState>((set, get) => ({
     ) as SketchFeature | undefined;
     
     if (!sketch) return state;
-    
+
     const existingEntity = sketch.entities.find((e) => e.id === id);
     if (!existingEntity) return state;
 
@@ -500,7 +1020,6 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!sketch) return state;
 
-    // Dynamically adjust constraint type and value based on dimension.dimType
     let actualConstraint = { ...constraint };
     if (dimension.type === 'linear') {
       const p1 = dimension.points[0];
@@ -521,7 +1040,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       }
     }
 
-    // Test solver with new constraint
     const testConstraints = [...sketch.constraints, actualConstraint];
     const solverResult = solveConstraints(sketch.entities, testConstraints);
     const dofState = analyzeSketchDOF(solverResult.entities, testConstraints);
@@ -538,7 +1056,6 @@ export const useCADStore = create<CADState>((set, get) => ({
         pointIndices: actualConstraint.pointIndices
       };
       
-      // Add dimension only, without constraint, marked as reference
       newDocument = {
         ...state.document,
         featureTree: state.document.featureTree.map((f) => {
@@ -646,11 +1163,9 @@ export const useCADStore = create<CADState>((set, get) => ({
         if (f.id === state.activeSketchId && f.type === 'SKETCH') {
           const sketch = f as SketchFeature;
 
-          // 找出對應的 dimension，判定是否為直徑標註
           const linkedDim = sketch.dimensions?.find((d) => d.constraintId === constraintId);
           const isDiameter = linkedDim ? !!linkedDim.isDiameter : false;
 
-          // 圓形或圓弧的 radius = isDiameter ? value / 2 : value
           const finalConstraintValue = (linkedDim && linkedDim.type === 'radial')
             ? (isDiameter ? value / 2 : value)
             : value;
@@ -662,13 +1177,11 @@ export const useCADStore = create<CADState>((set, get) => ({
             return c;
           });
 
-          // Apply constraints to solve the sketch, driving the line shrinking/stretching, and update profiles
           const updatedSketch = applyConstraintsToSketch({
             ...sketch,
             constraints: updatedConstraints,
           });
 
-          // 同步尺寸標註的點位隨幾何變形而更新
           if (updatedSketch.dimensions) {
             updatedSketch.dimensions = updatedSketch.dimensions.map((dim) => {
               if (dim.constraintId === constraintId) {
@@ -748,7 +1261,6 @@ export const useCADStore = create<CADState>((set, get) => ({
                   }
                 }
               } else {
-                // 對於其他非當前編輯的標註，幾何縮放時同步其點位
                 const linkedConstraint = updatedConstraints.find((c) => c.id === dim.constraintId);
                 const eIds = linkedConstraint?.entityIds || dim.entityIds;
                 const pIndices = linkedConstraint?.pointIndices || dim.pointIndices;
@@ -959,7 +1471,6 @@ export const useCADStore = create<CADState>((set, get) => ({
     const { toRemoveIds, toAddEntities } = trimResult;
     const toRemoveSet = new Set(toRemoveIds);
 
-    // 1. 過濾失效的約束與對應的尺寸標註
     const remainingConstraints = sketch.constraints.filter(
       (c) => !c.entityIds.some((id) => toRemoveSet.has(id))
     );
@@ -972,7 +1483,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       (d) => !d.constraintId || !removedConstraintIds.has(d.constraintId)
     );
 
-    // 2. 更新實體列表，移除 targetEntityId，加入新生成的子圖元
     const updatedEntities = [
       ...sketch.entities.filter((e) => !toRemoveSet.has(e.id)),
       ...toAddEntities,
@@ -985,7 +1495,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       dimensions: remainingDimensions,
     };
 
-    // 3. 重新計算約束、自由度與閉合封閉面
     const updatedSketch = applyConstraintsToSketch(tempSketch);
 
     const updatedDocument: CADDocument = {
@@ -1168,7 +1677,6 @@ export const useCADStore = create<CADState>((set, get) => ({
     const updatedSketch = applyCopyToSketch(sketch, entityIds, basePoint, targetPoint);
     if (updatedSketch === sketch) return state;
 
-    // 複製後的新圖元位於陣列後方
     const newEntities = updatedSketch.entities.slice(prevEntityCount);
     const newEntityIds = newEntities.map((e) => e.id);
 
@@ -1257,7 +1765,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    // 選取包含所有新陣列圖元，便於視覺回饋與接續操作
     const newEntityIds = updatedSketch.entities.map((e) => e.id);
 
     return {
@@ -1286,7 +1793,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    // 選取包含所有新陣列圖元，便於視覺回饋與接續操作
     const newEntityIds = updatedSketch.entities.map((e) => e.id);
 
     return {
@@ -1366,10 +1872,11 @@ export const useCADStore = create<CADState>((set, get) => ({
   canRedo: () => get().redoStack.length > 0,
 
   resetDocument: () => {
+    const doc = createInitialDocument();
     set({
-      document: createInitialDocument(),
+      document: doc,
       activeLayerId: '0',
-      activeSketchId: 'sketch-1',
+      activeSketchId: doc.activeSketchId,
       selectedEntityIds: [],
       selectedFeatureId: null,
       currentTool: 'SELECT',

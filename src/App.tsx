@@ -13,6 +13,7 @@ import { OsnapSettingsModal } from './components/OsnapSettingsModal';
 import { PolarSettingsModal } from './components/PolarSettingsModal';
 import { LayerControlBar } from './components/LayerControlBar';
 import { LayerManagerModal } from './components/LayerManagerModal';
+import { FeatureTreePanel } from './components/FeatureTreePanel';
 import { exportSketchToDxf, downloadDxfFile } from './core/dxf/DxfWriter';
 import { parseDxfContent } from './core/dxf/DxfParser';
 import { solidEngine } from './core/3d/SolidEngine';
@@ -944,67 +945,73 @@ export default function App() {
       </header>
 
       {/* Main Workspace */}
-      <main className="flex-1 relative">
-        {solverState === 'OverDefined' && (
-          <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-30 bg-red-950/95 border-2 border-red-500 text-red-100 px-5 py-3 rounded-md shadow-2xl flex items-center gap-3 animate-pulse pointer-events-none">
-            <AlertTriangle className="text-red-500 shrink-0" size={20} />
-            <div>
-              <span className="font-bold block text-sm">草圖過度定義 (Over-defined)</span>
-              <span className="text-xs text-red-300">偵測到衝突的幾何約束或尺寸標註，請刪除衝突約束以恢復求解。</span>
+      <main className="flex-1 relative flex overflow-hidden">
+        {/* 左側 SolidWorks 特徵樹面板 */}
+        <FeatureTreePanel />
+
+        {/* 右側繪圖與 3D 視圖區域 */}
+        <div className="flex-1 relative overflow-hidden">
+          {solverState === 'OverDefined' && (
+            <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-30 bg-red-950/95 border-2 border-red-500 text-red-100 px-5 py-3 rounded-md shadow-2xl flex items-center gap-3 animate-pulse pointer-events-none">
+              <AlertTriangle className="text-red-500 shrink-0" size={20} />
+              <div>
+                <span className="font-bold block text-sm">草圖過度定義 (Over-defined)</span>
+                <span className="text-xs text-red-300">偵測到衝突的幾何約束或尺寸標註，請刪除衝突約束以恢復求解。</span>
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* 匯入 DXF 成功訊息浮條 */}
-        {importToast && (
-          <div className="absolute top-4 right-4 z-40 bg-emerald-950/95 border border-emerald-500/60 text-emerald-100 px-4 py-3 rounded-lg shadow-2xl flex items-center gap-3 animate-in fade-in slide-in-from-top-2 duration-200">
-            <CheckCircle2 className="text-emerald-400 shrink-0" size={22} />
-            <div>
-              <span className="font-bold block text-sm text-emerald-300">
-                DXF 匯入成功
-              </span>
-              <span className="text-xs text-emerald-200/90 block">
-                已載入 {importToast.entityCount} 個圖元 (單位: {importToast.units})
-                {importToast.mergedPointsCount !== undefined && importToast.mergedPointsCount > 0 ? (
-                  <span className="ml-1 text-emerald-400">
-                    • 縫合 {importToast.mergedPointsCount} 個端點
-                  </span>
-                ) : null}
-                {importToast.removedEntitiesCount !== undefined && importToast.removedEntitiesCount > 0 ? (
-                  <span className="ml-1 text-emerald-400">
-                    • 移除 {importToast.removedEntitiesCount} 個無效圖元
-                  </span>
-                ) : null}
-              </span>
+          {/* 匯入 DXF 成功訊息浮條 */}
+          {importToast && (
+            <div className="absolute top-4 right-4 z-40 bg-emerald-950/95 border border-emerald-500/60 text-emerald-100 px-4 py-3 rounded-lg shadow-2xl flex items-center gap-3 animate-in fade-in slide-in-from-top-2 duration-200">
+              <CheckCircle2 className="text-emerald-400 shrink-0" size={22} />
+              <div>
+                <span className="font-bold block text-sm text-emerald-300">
+                  DXF 匯入成功
+                </span>
+                <span className="text-xs text-emerald-200/90 block">
+                  已載入 {importToast.entityCount} 個圖元 (單位: {importToast.units})
+                  {importToast.mergedPointsCount !== undefined && importToast.mergedPointsCount > 0 ? (
+                    <span className="ml-1 text-emerald-400">
+                      • 縫合 {importToast.mergedPointsCount} 個端點
+                    </span>
+                  ) : null}
+                  {importToast.removedEntitiesCount !== undefined && importToast.removedEntitiesCount > 0 ? (
+                    <span className="ml-1 text-emerald-400">
+                      • 移除 {importToast.removedEntitiesCount} 個無效圖元
+                    </span>
+                  ) : null}
+                </span>
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* 獨立全螢幕拖曳上傳 Overlay 遮罩 */}
-        {isDraggingOver && (
-          <div className="fixed inset-0 z-[9999] bg-neutral-950/80 backdrop-blur-sm border-4 border-dashed border-emerald-500 rounded-lg flex flex-col items-center justify-center text-emerald-400 transition-all duration-200 pointer-events-none">
-            <FileUp size={64} className="mb-4 animate-bounce text-emerald-400" />
-            <span className="text-xl font-bold tracking-wide">放開滑鼠以匯入 DXF 圖面</span>
-            <span className="text-sm text-emerald-500/80 mt-1">支援標準 2D DXF 檔案拖放匯入</span>
-          </div>
-        )}
+          {/* 獨立全螢幕拖曳上傳 Overlay 遮罩 */}
+          {isDraggingOver && (
+            <div className="fixed inset-0 z-[9999] bg-neutral-950/80 backdrop-blur-sm border-4 border-dashed border-emerald-500 rounded-lg flex flex-col items-center justify-center text-emerald-400 transition-all duration-200 pointer-events-none">
+              <FileUp size={64} className="mb-4 animate-bounce text-emerald-400" />
+              <span className="text-xl font-bold tracking-wide">放開滑鼠以匯入 DXF 圖面</span>
+              <span className="text-sm text-emerald-500/80 mt-1">支援標準 2D DXF 檔案拖放匯入</span>
+            </div>
+          )}
 
-        <div
-          className="absolute inset-0 w-full h-full"
-          style={
-            viewMode === '3D'
-              ? { opacity: 0.1, pointerEvents: 'none', zIndex: 1 }
-              : { opacity: 1, zIndex: 10 }
-          }
-        >
-          <CADSketchCanvas />
+          <div
+            className="absolute inset-0 w-full h-full"
+            style={
+              viewMode === '3D'
+                ? { opacity: 0.1, pointerEvents: 'none', zIndex: 1 }
+                : { opacity: 1, zIndex: 10 }
+            }
+          >
+            <CADSketchCanvas />
+          </div>
+          
+          {viewMode === '3D' && (
+            <div className="absolute inset-0 w-full h-full z-10">
+              <CAD3DCanvas />
+            </div>
+          )}
         </div>
-        
-        {viewMode === '3D' && (
-          <div className="absolute inset-0 w-full h-full z-10">
-            <CAD3DCanvas />
-          </div>
-        )}
       </main>
       <OsnapSettingsModal />
       <PolarSettingsModal />

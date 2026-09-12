@@ -161,9 +161,9 @@ export interface CustomPlane {
   id: string;
   name: string;
   origin: Point3D;
-  normal: Vector3D;
-  xAxis: Vector3D;
-  yAxis: Vector3D;
+  normal: Point3D;
+  xAxis: Point3D;
+  yAxis: Point3D;
   parentFeatureId?: string;
 }
 
@@ -194,19 +194,33 @@ export const DatumRightPlane: CustomPlane = {
   yAxis: { x: 0, y: 0, z: 1 },
 };
 
-export type FeatureType = 'SKETCH' | 'EXTRUDE' | 'CUT' | 'PLANE';
+export type FeatureType = 
+  | 'SKETCH' 
+  | 'EXTRUDE' 
+  | 'CUT_EXTRUDE' 
+  | 'REVOLVE' 
+  | 'DATUM_PLANE' 
+  | 'FILLET_3D' 
+  | 'CHAMFER_3D';
 
-export interface BaseFeatureNode {
+export interface BaseCADFeature {
   id: string;
   name: string;
   type: FeatureType;
-  dependencies: string[];
-  suppressed: boolean;
+  dependencies: string[]; // 所依賴的父特徵 ID 清單
+  suppressed: boolean;   // 是否被抑制（跳過運算）
+  visible?: boolean;      // 視圖可見度
+  error?: string | null; // 重算錯誤或警告訊息
+  isDirty?: boolean;     // 資料是否變更需重新運算
+  createdAt?: number;
 }
 
-export interface SketchFeature extends BaseFeatureNode {
+export type BaseFeatureNode = BaseCADFeature;
+
+export interface SketchFeature extends BaseCADFeature {
   type: 'SKETCH';
-  plane: CustomPlane;
+  planeFeatureId?: string; // 所屬基準面特徵 ID
+  plane: CustomPlane;     // 快取空間矩陣 / 平面資訊，確保渲染層無損相容
   entities: CADEntity2D[];
   constraints: Constraint[];
   dimensions: Dimension[];
@@ -214,15 +228,73 @@ export interface SketchFeature extends BaseFeatureNode {
   solverState: EntityState;
 }
 
-export interface ExtrudeFeature extends BaseFeatureNode {
+export interface ExtrudeFeature extends BaseCADFeature {
   type: 'EXTRUDE';
-  sketchId: string; // 依賴的 2D 草圖 ID
-  profileIds: string[]; // 指定要擠出的 SketchProfile ID 陣列 (若為空則擠出該草圖全剖面)
-  depth: number; // 擠出深度 (mm)
+  sketchId: string;
+  profileIds: string[];
+  depth: number;
   direction: 'normal' | 'reversed' | 'mid-plane';
+  draftAngle?: number;
+  mergeResult?: boolean;
 }
 
-export type FeatureNode = SketchFeature | ExtrudeFeature;
+export interface CutExtrudeFeature extends BaseCADFeature {
+  type: 'CUT_EXTRUDE';
+  sketchId: string;
+  profileIds: string[];
+  depth: number;
+  direction: 'normal' | 'reversed' | 'mid-plane';
+  throughAll?: boolean;
+}
+
+export interface RevolveFeature extends BaseCADFeature {
+  type: 'REVOLVE';
+  sketchId: string;
+  profileIds: string[];
+  axisEntityId: string; // 草圖內的旋轉軸線
+  angle: number; // 旋轉角度，預設 2*Math.PI
+}
+
+export type DatumPlaneType = 'offset' | 'angle' | 'three-point' | 'face_reference';
+
+export interface DatumPlaneFeature extends BaseCADFeature {
+  type: 'DATUM_PLANE';
+  planeType: DatumPlaneType;
+  referencePlaneId: string;    // 參照的基準面 ID（如預設面 'datum-front', 'datum-top', 'datum-right' 或自訂面 ID）
+  referenceFeatureId?: string; // 參照特徵/基準面 ID（向下相容）
+  offsetDistance: number;       // 偏移距離 (mm)
+  rotationAngle?: number;       // 旋轉角度 (弧度)
+  plane: CustomPlane;           // 計算後的空間姿態
+  dependencies: string[];       // 依賴的特徵 ID 清單 [referencePlaneId]
+  suppressed: boolean;
+  visible: boolean;
+}
+
+export interface Fillet3DFeature extends BaseCADFeature {
+  type: 'FILLET_3D';
+  targetFeatureId: string;
+  radius: number;
+  edgeIndices?: number[];
+}
+
+export interface Chamfer3DFeature extends BaseCADFeature {
+  type: 'CHAMFER_3D';
+  targetFeatureId: string;
+  distance: number;
+  angle?: number;
+  edgeIndices?: number[];
+}
+
+export type CADFeature = 
+  | SketchFeature 
+  | ExtrudeFeature 
+  | CutExtrudeFeature 
+  | RevolveFeature 
+  | DatumPlaneFeature 
+  | Fillet3DFeature 
+  | Chamfer3DFeature;
+
+export type FeatureNode = CADFeature;
 
 export interface CADLayer {
   id: string;
@@ -242,7 +314,8 @@ export interface CADDocument {
   units: 'mm' | 'inch';
   layers: Record<string, CADLayer>;
   planes: Record<string, CustomPlane>;
-  featureTree: FeatureNode[];
+  featureTree: CADFeature[];
+  rollbackIndex: number; // 歷史回退棒位置（0 到 featureTree.length，代表當前計算只執行到該索引之前的特徵）
   activeSketchId: string | null;
   blocks: Record<string, CADBlockDefinition>;
 }
@@ -329,6 +402,7 @@ export function createEmptyCADDocument(): CADDocument {
       'datum-right': DatumRightPlane,
     },
     featureTree: [],
+    rollbackIndex: 0,
     activeSketchId: null,
     blocks: {},
   };

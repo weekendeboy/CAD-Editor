@@ -1,9 +1,15 @@
 // Load opencascade.js dynamically
-import { SolidTaskRequest, SolidTaskResponse, ExtrudeProfileResponseData } from './SolidEngine.types';
+import {
+  SolidTaskRequest,
+  SolidTaskResponse,
+  ExtrudeProfileResponseData,
+  FeatureEvalOp,
+  MeshResult,
+} from './SolidEngine.types';
 import type { SketchProfile, ProfileSegment } from '../../types/cad';
 
 let oc: any = null;
-let currentSolid: any = null; // Store the current solid compound for exporting
+let currentSolid: any = null; // Store the current solid compound for evaluation and export
 
 async function initWorker(wasmBuffer?: ArrayBuffer) {
   if (!oc) {
@@ -12,7 +18,6 @@ async function initWorker(wasmBuffer?: ArrayBuffer) {
         wasmBinary: wasmBuffer,
       };
     } else {
-      // Fallback if not provided
       (self as any).opencascade = {
         locateFile: (path: string, _prefix: string) => {
           return new URL(`/occ/${path}`, self.location.origin).href;
@@ -22,10 +27,8 @@ async function initWorker(wasmBuffer?: ArrayBuffer) {
 
     if (typeof (self as any).importScripts === 'function') {
       (self as any).importScripts('/occ/opencascade.wasm.js');
-      // The script will have picked up self.opencascade during its synchronous execution
       oc = await (self as any).initOpenCascade((self as any).opencascade);
     } else {
-      // Fallback for module workers
       const response = await fetch('/occ/opencascade.wasm.js');
       const text = await response.text();
       // eslint-disable-next-line no-eval
@@ -54,7 +57,6 @@ function buildWireFromSegments(segments: ProfileSegment[], occ: any) {
       const ax2 = new occ.gp_Ax2_3(center, dir);
       const circle = new occ.gp_Circ_2(ax2, seg.radius);
 
-      // OCC arcs: sense is counter-clockwise if sweepFlag is 1 or undefined
       const sense = seg.sweepFlag !== undefined ? seg.sweepFlag === 1 : true;
       const mkArc = new occ.GC_MakeArcOfCircle_4(circle, p1, p2, sense);
       if (mkArc.IsDone()) {
@@ -142,7 +144,125 @@ function createFaceFromProfile(profile: SketchProfile, occ: any) {
   return face;
 }
 
+/**
+ * Converts a 2D sketch profile into a 3D transformed solid.
+ * Performs face creation, local Z-extrusion, local direction shift, and affine 4x4 spatial alignment to the 3D datum plane.
+ */
+function createTransformedSolid(op: FeatureEvalOp, occ: any): any {
+  if (!op.profiles || op.profiles.length === 0) {
+    throw new Error(`Feature ${op.featureId || ''} has no profiles to extrude`);
+  }
+
+  const depth = typeof op.depth === 'number' && !isNaN(op.depth) ? op.depth : 10;
+  const transformedSolids: any[] = [];
+
+  for (const profile of op.profiles) {
+    const face = createFaceFromProfile(profile, occ);
+
+    // 1. Local extrusion along Z-axis (0, 0, depth)
+    const vec = new occ.gp_Vec_4(0, 0, depth);
+    const prismMaker = new occ.BRepPrimAPI_MakePrism_1(face, vec, false, true);
+    let localSolid = prismMaker.Shape();
+
+    // Clean up face, vector, and prism maker
+    face.delete();
+    vec.delete();
+    prismMaker.delete();
+
+    // 2. Local direction offset shift
+    if (op.direction === 'mid-plane') {
+      const trsfMid = new occ.gp_Trsf_1();
+      const vecMid = new occ.gp_Vec_4(0, 0, -depth / 2);
+      trsfMid.SetTranslation_1(vecMid);
+      const xformMid = new occ.BRepBuilderAPI_Transform_2(localSolid, trsfMid, true);
+      const shiftedSolid = xformMid.Shape();
+
+      localSolid.delete();
+      trsfMid.delete();
+      vecMid.delete();
+      xformMid.delete();
+
+      localSolid = shiftedSolid;
+    } else if (op.direction === 'reversed') {
+      const trsfRev = new occ.gp_Trsf_1();
+      const vecRev = new occ.gp_Vec_4(0, 0, -depth);
+      trsfRev.SetTranslation_1(vecRev);
+      const xformRev = new occ.BRepBuilderAPI_Transform_2(localSolid, trsfRev, true);
+      const shiftedSolid = xformRev.Shape();
+
+      localSolid.delete();
+      trsfRev.delete();
+      vecRev.delete();
+      xformRev.delete();
+
+      localSolid = shiftedSolid;
+    }
+
+    // 3. Spatial posture alignment (affine transform to 3D sketch plane coordinate system)
+    const plane: any = op.plane || {};
+    const origin = plane.origin || { x: 0, y: 0, z: 0 };
+    const normal = plane.normal || { x: 0, y: 0, z: 1 };
+    const xAxis = plane.xAxis || { x: 1, y: 0, z: 0 };
+
+    const fromOrig = new occ.gp_Pnt_3(0, 0, 0);
+    const fromNorm = new occ.gp_Dir_4(0, 0, 1);
+    const fromXDir = new occ.gp_Dir_4(1, 0, 0);
+    const fromAx = new occ.gp_Ax3_3(fromOrig, fromNorm, fromXDir);
+
+    const toOrig = new occ.gp_Pnt_3(origin.x, origin.y, origin.z);
+    const toNorm = new occ.gp_Dir_4(normal.x, normal.y, normal.z);
+    const toXDir = new occ.gp_Dir_4(xAxis.x, xAxis.y, xAxis.z);
+    const toAx = new occ.gp_Ax3_3(toOrig, toNorm, toXDir);
+
+    const alignTrsf = new occ.gp_Trsf_1();
+    alignTrsf.SetDisplacement(fromAx, toAx);
+
+    const alignXform = new occ.BRepBuilderAPI_Transform_2(localSolid, alignTrsf, true);
+    const transformedSolid = alignXform.Shape();
+
+    // Clean up temporary alignment objects and local solid
+    localSolid.delete();
+    fromOrig.delete();
+    fromNorm.delete();
+    fromXDir.delete();
+    fromAx.delete();
+    toOrig.delete();
+    toNorm.delete();
+    toXDir.delete();
+    toAx.delete();
+    alignTrsf.delete();
+    alignXform.delete();
+
+    transformedSolids.push(transformedSolid);
+  }
+
+  if (transformedSolids.length === 1) {
+    return transformedSolids[0];
+  }
+
+  // Bundle multiple profiles into a TopoDS_Compound
+  const builder = new occ.BRep_Builder();
+  const compound = new occ.TopoDS_Compound();
+  builder.MakeCompound(compound);
+
+  for (const ts of transformedSolids) {
+    builder.Add(compound, ts);
+    ts.delete();
+  }
+
+  builder.delete();
+  return compound;
+}
+
 function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
+  if (!solid || solid.IsNull()) {
+    return {
+      vertices: new Float32Array(0),
+      normals: new Float32Array(0),
+      indices: new Uint32Array(0),
+    };
+  }
+
   // Incremental mesh
   const mesher = new occ.BRepMesh_IncrementalMesh_2(solid, 0.1, false, 0.5, false);
 
@@ -151,7 +271,11 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
   const indices: number[] = [];
   let indexOffset = 0;
 
-  const explorer = new occ.TopExp_Explorer_2(solid, occ.TopAbs_ShapeEnum.TopAbs_FACE, occ.TopAbs_ShapeEnum.TopAbs_SHAPE);
+  const explorer = new occ.TopExp_Explorer_2(
+    solid,
+    occ.TopAbs_ShapeEnum.TopAbs_FACE,
+    occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+  );
 
   while (explorer.More()) {
     const face = occ.TopoDS.Face_1(explorer.Current());
@@ -219,7 +343,6 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
     }
 
     loc.delete();
-    face.delete();
     explorer.Next();
   }
 
@@ -245,13 +368,98 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest>) => {
         _self.postMessage({ taskId: req.taskId, type: req.type, success: true } as SolidTaskResponse);
         break;
       }
+
+      case 'EVALUATE_FEATURE_TREE': {
+        if (!oc) throw new Error('Worker not initialized');
+
+        const operations: FeatureEvalOp[] = req.payload?.operations || [];
+
+        // Clean up previous global solid if present
+        if (currentSolid) {
+          currentSolid.delete();
+          currentSolid = null;
+        }
+
+        for (const op of operations) {
+          const featureSolid = createTransformedSolid(op, oc);
+          if (!featureSolid || featureSolid.IsNull()) {
+            continue;
+          }
+
+          if (currentSolid === null) {
+            // First feature evaluation
+            if (op.operation === 'JOIN' || op.type === 'EXTRUDE') {
+              currentSolid = featureSolid;
+            } else {
+              // CUT operation requires an existing base body
+              featureSolid.delete();
+            }
+          } else {
+            const isCut = op.operation === 'CUT' || op.type === 'CUT_EXTRUDE';
+
+            if (!isCut) {
+              // Boolean Fuse (JOIN)
+              const fuse = new oc.BRepAlgoAPI_Fuse_3(currentSolid, featureSolid);
+              fuse.Build();
+              if (fuse.IsDone()) {
+                const newSolid = fuse.Shape();
+                currentSolid.delete();
+                featureSolid.delete();
+                currentSolid = newSolid;
+              } else {
+                featureSolid.delete();
+              }
+              fuse.delete();
+            } else {
+              // Boolean Cut (CUT)
+              const cut = new oc.BRepAlgoAPI_Cut_3(currentSolid, featureSolid);
+              cut.Build();
+              if (cut.IsDone()) {
+                const newSolid = cut.Shape();
+                currentSolid.delete();
+                featureSolid.delete();
+                currentSolid = newSolid;
+              } else {
+                featureSolid.delete();
+              }
+              cut.delete();
+            }
+          }
+        }
+
+        if (currentSolid) {
+          const meshData = tessellateSolid(currentSolid, oc);
+          _self.postMessage(
+            {
+              taskId: req.taskId,
+              type: req.type,
+              success: true,
+              data: meshData,
+            } as SolidTaskResponse,
+            [meshData.vertices.buffer, meshData.normals.buffer, meshData.indices.buffer]
+          );
+        } else {
+          const emptyMesh: MeshResult = {
+            vertices: new Float32Array(0),
+            normals: new Float32Array(0),
+            indices: new Uint32Array(0),
+          };
+          _self.postMessage({
+            taskId: req.taskId,
+            type: req.type,
+            success: true,
+            data: emptyMesh,
+          } as SolidTaskResponse);
+        }
+        break;
+      }
+
       case 'EXTRUDE_PROFILES':
       case 'EXTRUDE_PROFILE': {
         if (!oc) throw new Error('Worker not initialized');
 
-        const profiles: SketchProfile[] = req.type === 'EXTRUDE_PROFILES'
-          ? req.payload.profiles
-          : [req.payload.profile];
+        const profiles: SketchProfile[] =
+          req.type === 'EXTRUDE_PROFILES' ? req.payload.profiles : [req.payload.profile];
         const depth = req.payload.depth;
 
         if (!profiles || profiles.length === 0) {
@@ -303,6 +511,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest>) => {
         );
         break;
       }
+
       case 'EXPORT_STEP': {
         if (!oc || !currentSolid) throw new Error('No solid available to export');
 
@@ -310,7 +519,11 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest>) => {
         oc.Interface_Static.SetCVal('write.step.unit', unit);
 
         const stepWriter = new oc.STEPControl_Writer_1();
-        const transferResult = stepWriter.Transfer(currentSolid, oc.STEPControl_StepModelType.STEPControl_AsIs, true);
+        const transferResult = stepWriter.Transfer(
+          currentSolid,
+          oc.STEPControl_StepModelType.STEPControl_AsIs,
+          true
+        );
         if (transferResult !== oc.IFSelect_ReturnStatus.IFSelect_RetDone) {
           stepWriter.delete();
           throw new Error('STEP transfer failed');
@@ -335,6 +548,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest>) => {
         } as SolidTaskResponse);
         break;
       }
+
       case 'EXPORT_STL': {
         if (!oc || !currentSolid) throw new Error('No solid available to export');
 
@@ -362,6 +576,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest>) => {
         );
         break;
       }
+
       default:
         throw new Error(`Unknown task type: ${(req as any).type}`);
     }

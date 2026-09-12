@@ -1,4 +1,4 @@
-import { CADDocument, CADEntity2D, CADLayer, Constraint, Point2D, ExtrudeFeature } from '../types/cad';
+import { CADDocument, CADEntity2D, CADLayer, Constraint, Point2D, ExtrudeFeature, CADFeature } from '../types/cad';
 
 export type OsnapMode = 
   | 'endpoint' 
@@ -38,7 +38,119 @@ export type CADTool =
   | 'RECT_ARRAY'
   | 'POLYGON';
 
-export interface CADState {
+export interface CADActions {
+  // 特徵選取與特徵樹 Actions
+  setSelectedFeatureId: (id: string | null) => void;
+  addFeature: (feature: CADFeature) => void;
+  removeFeature: (id: string) => void;
+  updateFeature: (id: string, updates: Partial<CADFeature>) => void;
+  toggleFeatureSuppression: (id: string) => void;
+  renameFeature: (id: string, newName: string) => void;
+  reorderFeature: (sourceIndex: number, targetIndex: number) => void;
+  setRollbackIndex: (index: number) => void;
+  regenerateFeatureTree: () => void;
+
+  // 基準面 (Datum Plane) & 草圖連動 Actions
+  addOffsetDatumPlane: (refPlaneId: string, distance: number, name?: string) => string;
+  updateDatumPlaneOffset: (planeFeatureId: string, distance: number) => void;
+  toggleFeatureVisibility: (featureId: string) => void;
+  createSketchOnPlane: (planeId: string) => string; // 依附於指定基準面建立新草圖，回傳草圖 ID 並設為 activeSketchId
+
+  // 3D 特徵管理
+  addExtrudeFeature: (feature: Omit<ExtrudeFeature, 'id' | 'type'>) => void;
+  updateExtrudeFeature: (id: string, updates: Partial<ExtrudeFeature>) => void;
+
+  // 鎖點 (Osnap) 控制與設定
+  setOsnapModalOpen: (open: boolean) => void;
+  toggleOsnapMode: (mode: OsnapMode) => void;
+  setAllOsnapModes: (enabled: boolean) => void;
+  toggleOsnap: () => void;
+
+  // 極座標追蹤 (Polar Tracking) 設定
+  setPolarModalOpen: (open: boolean) => void;
+  togglePolarTracking: () => void;
+  setPolarAngleStep: (step: number) => void;
+  addCustomPolarAngle: (angle: number) => void;
+  removeCustomPolarAngle: (angle: number) => void;
+
+  // 環形與矩形陣列設定
+  setArrayItems: (items: number) => void;
+  setArrayFillAngle: (angle: number) => void;
+  setRectArrayCols: (cols: number) => void;
+  setRectArrayRows: (rows: number) => void;
+  setRectArrayColSpacing: (spacing: number) => void;
+  setRectArrayRowSpacing: (spacing: number) => void;
+
+  // 倒角設定
+  setChamferDistance: (distance: number) => void;
+
+  // 正多邊形設定
+  setPolygonSides: (sides: number) => void;
+  setPolygonMethod: (method: 'inscribed' | 'circumscribed') => void;
+
+  // 圖層管理
+  setLayerModalOpen: (open: boolean) => void;
+  setActiveLayer: (layerId: string) => void;
+  addLayer: (layer: CADLayer) => void;
+  updateLayer: (layerId: string, updates: Partial<CADLayer>) => void;
+  removeLayer: (layerId: string) => void;
+  renameLayer: (layerId: string, newName: string) => void;
+  toggleLayerVisibility: (layerId: string) => void;
+  toggleLayerLock: (layerId: string) => void;
+
+  // 視圖與工具控制
+  setViewMode: (mode: '2D' | '3D') => void;
+  setTool: (tool: CADTool) => void;
+  setActiveSketch: (sketchId: string | null) => void;
+  selectEntity: (id: string) => void;
+  clearSelection: () => void;
+
+  // 2D 圖元編輯 Actions
+  addEntity: (entity: CADEntity2D) => void;
+  importEntities: (entities: CADEntity2D[]) => void;
+  importDxfData: (entities: CADEntity2D[], layers: Record<string, CADLayer>) => void;
+  removeEntity: (id: string) => void;
+  updateEntity: (id: string, updates: Partial<CADEntity2D>) => void;
+  updateEntities: (entities: CADEntity2D[]) => void;
+  toggleConstruction: (entityId: string) => void;
+
+  // 約束與尺寸標註 Actions
+  addConstraint: (constraint: Constraint) => void;
+  addDimension: (dimension: any, constraint: Constraint) => void;
+  updateDimensionPosition: (dimensionId: string, newPosition: Point2D) => void;
+  updateDimensionPositionLive: (dimensionId: string, newPosition: Point2D) => void;
+  removeConstraint: (constraintId: string) => void;
+  updateConstraintValue: (constraintId: string, value: number) => void;
+
+  // 控制點拖曳 Actions
+  dragVertexStart: () => void;
+  dragVertexLive: (entityId: string, pointIndex: number, newPos: Point2D) => void;
+  dragVertexCommit: () => void;
+
+  // 2D 幾何修剪、延伸與幾何變換 Actions
+  trimEntity: (entityId: string, clickPoint: Point2D) => void;
+  extendEntity: (entityId: string, clickPoint: Point2D) => void;
+  applyFillet: (entityId1: string, entityId2: string, radius: number) => void;
+  applyChamfer: (entityId1: string, entityId2: string, distance: number) => void;
+  offsetEntity: (entityId: string, distance: number, sidePoint: Point2D) => void;
+  mirrorEntities: (sourceEntityIds: string[], axisLineId: string) => void;
+  moveEntities: (entityIds: string[], basePoint: Point2D, targetPoint: Point2D) => void;
+  copyEntities: (entityIds: string[], basePoint: Point2D, targetPoint: Point2D) => void;
+  scaleEntities: (entityIds: string[], basePoint: Point2D, factor: number) => void;
+  rotateEntities: (entityIds: string[], basePoint: Point2D, angleRad: number) => void;
+  circularArrayEntities: (entityIds: string[], centerPoint: Point2D, items: number, fillAngleDeg: number) => void;
+  rectArrayEntities: (entityIds: string[], cols: number, rows: number, colSpacing: number, rowSpacing: number) => void;
+
+  // 輔助模式與 Undo/Redo
+  toggleOrtho: () => void;
+  resetDocument: () => void;
+  undo: () => void;
+  redo: () => void;
+  canUndo: () => boolean;
+  canRedo: () => boolean;
+}
+
+export interface CADState extends CADActions {
   document: CADDocument;
   
   viewMode: '2D' | '3D';
@@ -52,103 +164,34 @@ export interface CADState {
   // 鎖點開關與各模式勾選狀態（預設全開啟）
   osnapSettings: OsnapSettings;
   isOsnapModalOpen: boolean;
-  setOsnapModalOpen: (open: boolean) => void;
-  toggleOsnapMode: (mode: OsnapMode) => void;
-  setAllOsnapModes: (enabled: boolean) => void;
 
   // 極座標追蹤角度設定（預設 45 度，候選角度包含 15, 30, 45, 90 等）
   polarTrackingEnabled: boolean;
-  polarAngleStep: number; // 角度步進，例如 45
-  customPolarAngles: number[]; // 自訂額外捕捉角度，例如 [22.5, 67.5]
+  polarAngleStep: number;
+  customPolarAngles: number[];
   isPolarModalOpen: boolean;
-  setPolarModalOpen: (open: boolean) => void;
-  togglePolarTracking: () => void;
-  setPolarAngleStep: (step: number) => void;
-  addCustomPolarAngle: (angle: number) => void;
-  removeCustomPolarAngle: (angle: number) => void;
 
   // 環形陣列 (Circular Array) 參數設定
-  arrayItems: number; // 項目總數，預設為 4
-  arrayFillAngle: number; // 填滿角度 (度)，預設為 360
-  setArrayItems: (items: number) => void;
-  setArrayFillAngle: (angle: number) => void;
+  arrayItems: number;
+  arrayFillAngle: number;
 
   // 矩形陣列 (Rectangular Array) 參數設定
-  rectArrayCols: number; // 行數 (X軸)，預設為 4
-  rectArrayRows: number; // 列數 (Y軸)，預設為 3
-  rectArrayColSpacing: number; // X軸間距，預設為 30
-  rectArrayRowSpacing: number; // Y軸間距，預設為 30
-  setRectArrayCols: (cols: number) => void;
-  setRectArrayRows: (rows: number) => void;
-  setRectArrayColSpacing: (spacing: number) => void;
-  setRectArrayRowSpacing: (spacing: number) => void;
+  rectArrayCols: number;
+  rectArrayRows: number;
+  rectArrayColSpacing: number;
+  rectArrayRowSpacing: number;
 
   // 倒角 (Chamfer) 距離設定（預設為 10）
   chamferDistance: number;
-  setChamferDistance: (distance: number) => void;
 
   // 正多邊形 (Polygon) 設定
-  polygonSides: number; // 邊數 (預設 5，範圍 3 ~ 1024)
-  polygonMethod: 'inscribed' | 'circumscribed'; // 內接於圓 / 外切於圓
-  setPolygonSides: (sides: number) => void;
-  setPolygonMethod: (method: 'inscribed' | 'circumscribed') => void;
+  polygonSides: number;
+  polygonMethod: 'inscribed' | 'circumscribed';
 
   // 圖層狀態與管理
   activeLayerId: string;
   isLayerModalOpen: boolean;
-  setLayerModalOpen: (open: boolean) => void;
-  setActiveLayer: (layerId: string) => void;
-  addLayer: (layer: CADLayer) => void;
-  updateLayer: (layerId: string, updates: Partial<CADLayer>) => void;
-  removeLayer: (layerId: string) => void;
-  renameLayer: (layerId: string, newName: string) => void;
-  toggleLayerVisibility: (layerId: string) => void;
-  toggleLayerLock: (layerId: string) => void;
 
   undoStack: CADDocument[];
   redoStack: CADDocument[];
-
-  addExtrudeFeature: (feature: Omit<ExtrudeFeature, 'id' | 'type'>) => void;
-  updateExtrudeFeature: (id: string, updates: Partial<ExtrudeFeature>) => void;
-
-  setViewMode: (mode: '2D' | '3D') => void;
-  setTool: (tool: CADTool) => void;
-  setActiveSketch: (sketchId: string | null) => void;
-  selectEntity: (id: string) => void;
-  clearSelection: () => void;
-  addEntity: (entity: CADEntity2D) => void;
-  importEntities: (entities: CADEntity2D[]) => void;
-  importDxfData: (entities: CADEntity2D[], layers: Record<string, CADLayer>) => void;
-  removeEntity: (id: string) => void;
-  updateEntity: (id: string, updates: Partial<CADEntity2D>) => void;
-  updateEntities: (entities: CADEntity2D[]) => void;
-  toggleConstruction: (entityId: string) => void;
-  addConstraint: (constraint: Constraint) => void;
-  addDimension: (dimension: any, constraint: Constraint) => void;
-  updateDimensionPosition: (dimensionId: string, newPosition: Point2D) => void;
-  updateDimensionPositionLive: (dimensionId: string, newPosition: Point2D) => void;
-  removeConstraint: (constraintId: string) => void;
-  updateConstraintValue: (constraintId: string, value: number) => void;
-  dragVertexStart: () => void;
-  dragVertexLive: (entityId: string, pointIndex: number, newPos: Point2D) => void;
-  dragVertexCommit: () => void;
-  trimEntity: (entityId: string, clickPoint: Point2D) => void;
-  extendEntity: (entityId: string, clickPoint: Point2D) => void;
-  applyFillet: (entityId1: string, entityId2: string, radius: number) => void;
-  applyChamfer: (entityId1: string, entityId2: string, distance: number) => void;
-  offsetEntity: (entityId: string, distance: number, sidePoint: Point2D) => void;
-  mirrorEntities: (sourceEntityIds: string[], axisLineId: string) => void;
-  moveEntities: (entityIds: string[], basePoint: Point2D, targetPoint: Point2D) => void;
-  copyEntities: (entityIds: string[], basePoint: Point2D, targetPoint: Point2D) => void;
-  scaleEntities: (entityIds: string[], basePoint: Point2D, factor: number) => void;
-  rotateEntities: (entityIds: string[], basePoint: Point2D, angleRad: number) => void;
-  circularArrayEntities: (entityIds: string[], centerPoint: Point2D, items: number, fillAngleDeg: number) => void;
-  rectArrayEntities: (entityIds: string[], cols: number, rows: number, colSpacing: number, rowSpacing: number) => void;
-  toggleOsnap: () => void;
-  toggleOrtho: () => void;
-  resetDocument: () => void;
-  undo: () => void;
-  redo: () => void;
-  canUndo: () => boolean;
-  canRedo: () => boolean;
 }
