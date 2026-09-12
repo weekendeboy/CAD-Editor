@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { CADState } from './cadStore.types';
-import { CADDocument, CADEntity2D, createEmptyCADDocument, DatumFrontPlane, SketchFeature } from '../types/cad';
+import { CADDocument, CADEntity2D, CADLayer, createEmptyCADDocument, DatumFrontPlane, SketchFeature } from '../types/cad';
 import {
   insertEntityIntoSketch,
   removeEntityFromSketch,
@@ -62,6 +62,7 @@ function pushUndoState(state: CADState): Partial<CADState> {
 
 export const useCADStore = create<CADState>((set, get) => ({
   document: createInitialDocument(),
+  activeLayerId: '0',
   viewMode: '2D',
   currentTool: 'SELECT',
   activeSketchId: 'sketch-1',
@@ -133,12 +134,106 @@ export const useCADStore = create<CADState>((set, get) => ({
   }),
   
   clearSelection: () => set({ selectedEntityIds: [], selectedFeatureId: null }),
+
+  setActiveLayer: (layerId: string) => set({ activeLayerId: layerId }),
+
+  addLayer: (layer: CADLayer) => set((state) => {
+    if (state.document.layers[layer.id]) {
+      return state;
+    }
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      layers: {
+        ...state.document.layers,
+        [layer.id]: layer,
+      },
+    };
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+    };
+  }),
+
+  updateLayer: (layerId: string, updates: Partial<CADLayer>) => set((state) => {
+    const existingLayer = state.document.layers[layerId];
+    if (!existingLayer) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      layers: {
+        ...state.document.layers,
+        [layerId]: {
+          ...existingLayer,
+          ...updates,
+          id: layerId,
+        },
+      },
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+    };
+  }),
+
+  toggleLayerVisibility: (layerId: string) => set((state) => {
+    const existingLayer = state.document.layers[layerId];
+    if (!existingLayer) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      layers: {
+        ...state.document.layers,
+        [layerId]: {
+          ...existingLayer,
+          visible: !existingLayer.visible,
+        },
+      },
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+    };
+  }),
+
+  toggleLayerLock: (layerId: string) => set((state) => {
+    const existingLayer = state.document.layers[layerId];
+    if (!existingLayer) return state;
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      layers: {
+        ...state.document.layers,
+        [layerId]: {
+          ...existingLayer,
+          locked: !existingLayer.locked,
+        },
+      },
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+    };
+  }),
   
   addEntity: (entity) => set((state) => {
     if (!state.activeSketchId) return state;
+    const activeLayer = state.activeLayerId || '0';
+    const targetLayerId = (!entity.layerId || entity.layerId === '0' || entity.layerId === 'layer-0')
+      ? activeLayer
+      : entity.layerId;
+
+    const newEntity: CADEntity2D = {
+      ...entity,
+      layerId: targetLayerId,
+      isConstruction: entity.isConstruction ?? (targetLayerId === 'CONSTRUCTION'),
+    };
+
     return {
       ...pushUndoState(state),
-      document: insertEntityIntoSketch(state.document, state.activeSketchId, entity)
+      document: insertEntityIntoSketch(state.document, state.activeSketchId, newEntity)
     };
   }),
 
@@ -1165,6 +1260,7 @@ export const useCADStore = create<CADState>((set, get) => ({
   resetDocument: () => {
     set({
       document: createInitialDocument(),
+      activeLayerId: '0',
       activeSketchId: 'sketch-1',
       selectedEntityIds: [],
       selectedFeatureId: null,
@@ -1199,3 +1295,5 @@ export const useCADDocument = () => useCADStore((state) => state.document);
 export const useViewMode = () => useCADStore((state) => state.viewMode);
 export const useCurrentTool = () => useCADStore((state) => state.currentTool);
 export const useActiveSketch = () => useCADStore((state) => state.activeSketchId);
+export const useActiveLayerId = () => useCADStore((state) => state.activeLayerId);
+export const useCADLayers = () => useCADStore((state) => state.document.layers);

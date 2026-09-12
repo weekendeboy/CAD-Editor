@@ -93,6 +93,14 @@ export interface CADState {
   setPolygonSides: (sides: number) => void;
   setPolygonMethod: (method: 'inscribed' | 'circumscribed') => void;
 
+  // 圖層狀態與管理
+  activeLayerId: string;
+  setActiveLayer: (layerId: string) => void;
+  addLayer: (layer: CADLayer) => void;
+  updateLayer: (layerId: string, updates: Partial<CADLayer>) => void;
+  toggleLayerVisibility: (layerId: string) => void;
+  toggleLayerLock: (layerId: string) => void;
+
   undoStack: CADDocument[];
   redoStack: CADDocument[];
 

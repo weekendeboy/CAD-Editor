@@ -150,11 +150,21 @@ function cloneEntity(entity: CADEntity2D): CADEntity2D {
       center: { ...entity.center },
     };
   }
-  return {
-    ...entity,
-    points: entity.points.map((p) => ({ ...p })),
-    bulges: entity.bulges ? [...entity.bulges] : undefined,
-  };
+  if (entity.type === 'polyline') {
+    return {
+      ...entity,
+      points: entity.points.map((p) => ({ ...p })),
+      bulges: entity.bulges ? [...entity.bulges] : undefined,
+    };
+  }
+  if (entity.type === 'insert') {
+    return {
+      ...entity,
+      position: { ...entity.position },
+      scale: { ...entity.scale },
+    };
+  }
+  return entity;
 }
 
 /**

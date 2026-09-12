@@ -1,6 +1,9 @@
 /**
- * AutoCAD Color Index (ACI) & Hex / RGB Color Mapping Library
+ * AutoCAD Color Index (ACI) & DXF Linetype Specification Mapping Library
  * Pure functional implementation without DOM dependencies.
+ *
+ * Implements AutoCAD 0~256 Color Index bidirectional mapping,
+ * RGB Euclidean color distance approximation, and standard DXF linetype definitions.
  */
 
 export const ACI_BYBLOCK = 0;
@@ -11,6 +14,85 @@ export interface RgbColor {
   g: number;
   b: number;
 }
+
+export interface StandardAciColorInfo {
+  aci: number;
+  name: string;
+  hex: string;
+  rgb: RgbColor;
+}
+
+/**
+ * AutoCAD Standard Primary Colors (0~9 & 256)
+ */
+export const ACI_STANDARD_COLORS: Record<number, StandardAciColorInfo> = {
+  0: {
+    aci: 0,
+    name: 'ByBlock',
+    hex: '#FFFFFF',
+    rgb: { r: 255, g: 255, b: 255 },
+  },
+  1: {
+    aci: 1,
+    name: 'Red',
+    hex: '#FF0000',
+    rgb: { r: 255, g: 0, b: 0 },
+  },
+  2: {
+    aci: 2,
+    name: 'Yellow',
+    hex: '#FFFF00',
+    rgb: { r: 255, g: 255, b: 0 },
+  },
+  3: {
+    aci: 3,
+    name: 'Green',
+    hex: '#00FF00',
+    rgb: { r: 0, g: 255, b: 0 },
+  },
+  4: {
+    aci: 4,
+    name: 'Cyan',
+    hex: '#00FFFF',
+    rgb: { r: 0, g: 255, b: 255 },
+  },
+  5: {
+    aci: 5,
+    name: 'Blue',
+    hex: '#0000FF',
+    rgb: { r: 0, g: 0, b: 255 },
+  },
+  6: {
+    aci: 6,
+    name: 'Magenta',
+    hex: '#FF00FF',
+    rgb: { r: 255, g: 0, b: 255 },
+  },
+  7: {
+    aci: 7,
+    name: 'White/Black',
+    hex: '#FFFFFF',
+    rgb: { r: 255, g: 255, b: 255 },
+  },
+  8: {
+    aci: 8,
+    name: 'Dark Gray',
+    hex: '#808080',
+    rgb: { r: 128, g: 128, b: 128 },
+  },
+  9: {
+    aci: 9,
+    name: 'Light Gray',
+    hex: '#C0C0C0',
+    rgb: { r: 192, g: 192, b: 192 },
+  },
+  256: {
+    aci: 256,
+    name: 'ByLayer',
+    hex: '#FFFFFF',
+    rgb: { r: 255, g: 255, b: 255 },
+  },
+};
 
 /**
  * Standard ACI Palette lookup table (index 0..256).
@@ -110,7 +192,7 @@ function buildAciPalette(): RgbColor[] {
 const ACI_PALETTE: RgbColor[] = buildAciPalette();
 
 /**
- * Parses a Hex color string (#RGB or #RRGGBB, with or without #) into an RgbColor object.
+ * Parses a Hex color string (#RGB, #RRGGBB, with or without #) into an RgbColor object.
  * Returns null if the hex string is invalid.
  */
 export function parseHexToRgb(hex: string): RgbColor | null {
@@ -162,28 +244,47 @@ export function rgbToHex(rgb: RgbColor): string {
 
 /**
  * Converts an AutoCAD Color Index (ACI) to an RGB color object.
- * Falls back to #FFFFFF ({r:255, g:255, b:255}) for 0 (BYBLOCK), 256 (BYLAYER), or out-of-bounds indices.
+ * Falls back to defaultColor ({r:255, g:255, b:255} by default)
+ * for 0 (BYBLOCK), 256 (BYLAYER), or out-of-bounds indices.
  */
-export function aciToRgb(aci: number): RgbColor {
+export function aciToRgb(aci: number, defaultColor = { r: 255, g: 255, b: 255 }): RgbColor {
   if (typeof aci !== 'number' || isNaN(aci) || aci < 0 || aci > 256) {
-    return { r: 255, g: 255, b: 255 };
+    return defaultColor;
   }
 
   const index = Math.round(aci);
-  return ACI_PALETTE[index] || { r: 255, g: 255, b: 255 };
+  if (index === 0 || index === 256) {
+    return defaultColor;
+  }
+
+  return ACI_PALETTE[index] || defaultColor;
 }
 
 /**
  * Converts an AutoCAD Color Index (ACI) to a 6-character uppercase Hex string (#RRGGBB).
- * Returns '#FFFFFF' for 0 (BYBLOCK), 256 (BYLAYER), or out-of-bounds indices.
+ * Handles fallback for ACI 0 (ByBlock), 256 (ByLayer), or invalid values using defaultColor (default: '#FFFFFF').
+ *
+ * @param aci AutoCAD Color Index (0..256)
+ * @param defaultColor Fallback hex color string for 0 (ByBlock), 256 (ByLayer), or invalid numbers (defaults to '#FFFFFF')
  */
-export function aciToHex(aci: number): string {
-  return rgbToHex(aciToRgb(aci));
+export function aciToHex(aci: number, defaultColor = '#FFFFFF'): string {
+  if (typeof aci !== 'number' || isNaN(aci) || aci < 0 || aci > 256) {
+    return defaultColor;
+  }
+
+  const index = Math.round(aci);
+  if (index === 0 || index === 256) {
+    return defaultColor;
+  }
+
+  const rgb = ACI_PALETTE[index];
+  return rgb ? rgbToHex(rgb) : defaultColor;
 }
 
 /**
  * Converts RGB values (0..255) to the closest matching ACI index (1..255)
- * using Euclidean color distance in RGB space.
+ * using Euclidean color distance in standard RGB space:
+ * distSq = (R - Ri)^2 + (G - Gi)^2 + (B - Bi)^2
  */
 export function rgbToAci(r: number, g: number, b: number): number {
   const clampR = Math.max(0, Math.min(255, Math.round(r)));
@@ -213,27 +314,37 @@ export function rgbToAci(r: number, g: number, b: number): number {
 }
 
 /**
- * Converts a Hex color string (or ACI number string) to the closest ACI index (1..255).
- * Falls back to ACI 7 (#FFFFFF) if hex is invalid or empty.
+ * Converts a Hex color string (or ACI number / special name) to the closest ACI index (1..255).
+ * Uses RGB Euclidean distance to compare against standard ACI colors.
+ * Returns ACI 7 (#FFFFFF) if hex is invalid or empty.
  */
 export function hexToAci(hex: string): number {
   if (!hex || typeof hex !== 'string') {
     return 7;
   }
 
-  const rgb = parseHexToRgb(hex);
+  const clean = hex.trim();
+  const lower = clean.toLowerCase();
+
+  // Special names
+  if (lower === 'bylayer' || clean === '256') {
+    return ACI_BYLAYER;
+  }
+  if (lower === 'byblock' || clean === '0') {
+    return ACI_BYBLOCK;
+  }
+
+  // Parse hex code (#RGB or #RRGGBB)
+  const rgb = parseHexToRgb(clean);
   if (rgb) {
     return rgbToAci(rgb.r, rgb.g, rgb.b);
   }
 
-  // Check if hex is a direct numeric string (e.g., "1", "256")
-  const num = Number(hex.trim());
+  // Check if hex string is directly a valid numeric index string (e.g., "1", "6")
+  const num = Number(clean);
   if (!isNaN(num) && num >= 0 && num <= 256) {
     const rounded = Math.round(num);
-    if (rounded === 0 || rounded === 256) {
-      return 7;
-    }
-    return rounded;
+    return rounded === 0 || rounded === 256 ? 7 : rounded;
   }
 
   return 7;
@@ -281,4 +392,88 @@ export function getEntityAci(entityColor?: string, isByLayer?: boolean | string)
   }
 
   return hexToAci(entityColor);
+}
+
+// ============================================================================
+// DXF Linetype Definitions & Pattern Mapping
+// ============================================================================
+
+export interface DxfLinetypeDefinition {
+  name: string;
+  desc: string;
+  pattern: number[];
+}
+
+/**
+ * Standard DXF Linetypes:
+ * - CONTINUOUS: Solid continuous line
+ * - DASHED: [6.35, -3.175] (dash 6.35mm, gap 3.175mm)
+ * - CENTER: [12.7, -3.175, 3.175, -3.175] (long dash, gap, short dash, gap)
+ * - HIDDEN: [3.175, -1.5875] (short dash, short gap)
+ */
+export const DXF_LINETYPES: Record<string, DxfLinetypeDefinition> = {
+  CONTINUOUS: {
+    name: 'CONTINUOUS',
+    desc: 'Solid line',
+    pattern: [],
+  },
+  DASHED: {
+    name: 'DASHED',
+    desc: '__ __ __ __ __ __ __ __ __ __ __ __ __ __',
+    pattern: [6.35, -3.175],
+  },
+  CENTER: {
+    name: 'CENTER',
+    desc: '____ _ ____ _ ____ _ ____ _ ____ _ ____',
+    pattern: [12.7, -3.175, 3.175, -3.175],
+  },
+  HIDDEN: {
+    name: 'HIDDEN',
+    desc: '_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _',
+    pattern: [3.175, -1.5875],
+  },
+};
+
+/**
+ * Retrieves the DXF linetype description and pattern array according to AutoCAD standards.
+ * Supports standard DXF linetype names: CONTINUOUS, DASHED, CENTER, HIDDEN (case-insensitive).
+ *
+ * Pattern values:
+ * - Positive number: Line dash length in mm
+ * - Negative number: Space / gap length in mm
+ * - Empty array []: Solid continuous line
+ *
+ * @param type Linetype name (e.g., 'CONTINUOUS', 'DASHED', 'CENTER', 'HIDDEN')
+ * @returns Object containing description and numeric dash pattern
+ */
+export function getDxfLinetypePattern(type: string): { desc: string; pattern: number[] } {
+  if (!type || typeof type !== 'string') {
+    return {
+      desc: DXF_LINETYPES.CONTINUOUS.desc,
+      pattern: [...DXF_LINETYPES.CONTINUOUS.pattern],
+    };
+  }
+
+  const normalized = type.trim().toUpperCase();
+
+  if (DXF_LINETYPES[normalized]) {
+    return {
+      desc: DXF_LINETYPES[normalized].desc,
+      pattern: [...DXF_LINETYPES[normalized].pattern],
+    };
+  }
+
+  // Common aliases
+  if (normalized === 'SOLID') {
+    return {
+      desc: DXF_LINETYPES.CONTINUOUS.desc,
+      pattern: [...DXF_LINETYPES.CONTINUOUS.pattern],
+    };
+  }
+
+  // Fallback to Continuous
+  return {
+    desc: DXF_LINETYPES.CONTINUOUS.desc,
+    pattern: [...DXF_LINETYPES.CONTINUOUS.pattern],
+  };
 }

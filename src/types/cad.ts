@@ -16,6 +16,7 @@ export interface BaseCADEntity2D {
   visible: boolean;
   locked: boolean;
   color?: string;
+  lineType?: string;
   lineWidth?: number;
   isConstruction?: boolean;
   state?: EntityState;
@@ -48,11 +49,27 @@ export interface PolylineEntity extends BaseCADEntity2D {
   closed: boolean;
 }
 
+export interface InsertEntity extends BaseCADEntity2D {
+  type: 'insert';
+  blockName: string;
+  position: Point2D;
+  scale: Point2D; // { x: number, y: number }
+  rotation: number; // 弧度
+}
+
+export interface CADBlockDefinition {
+  id: string;
+  name: string;
+  basePoint: Point2D;
+  entities: CADEntity2D[]; // 圖塊內部的原型圖元
+}
+
 export type CADEntity2D =
   | LineEntity
   | CircleEntity
   | ArcEntity
-  | PolylineEntity;
+  | PolylineEntity
+  | InsertEntity;
 
 export type EntityState = 'UnderDefined' | 'FullyDefined' | 'OverDefined';
 
@@ -209,9 +226,13 @@ export type FeatureNode = SketchFeature | ExtrudeFeature;
 export interface CADLayer {
   id: string;
   name: string;
+  color: string;
+  aciColor: number;
+  lineType: 'CONTINUOUS' | 'DASHED' | 'CENTER';
+  lineWidth: number;
   visible: boolean;
   locked: boolean;
-  color: string;
+  isPlot: boolean;
 }
 
 export interface CADDocument {
@@ -222,7 +243,44 @@ export interface CADDocument {
   planes: Record<string, CustomPlane>;
   featureTree: FeatureNode[];
   activeSketchId: string | null;
+  blocks: Record<string, CADBlockDefinition>;
 }
+
+export const DEFAULT_CAD_LAYERS: Record<string, CADLayer> = {
+  '0': {
+    id: '0',
+    name: '0',
+    color: '#FFFFFF',
+    aciColor: 7,
+    lineType: 'CONTINUOUS',
+    lineWidth: 0.25,
+    visible: true,
+    locked: false,
+    isPlot: true,
+  },
+  'CONSTRUCTION': {
+    id: 'CONSTRUCTION',
+    name: 'CONSTRUCTION',
+    color: '#FF00FF',
+    aciColor: 6,
+    lineType: 'DASHED',
+    lineWidth: 0.25,
+    visible: true,
+    locked: false,
+    isPlot: false,
+  },
+  'DEFPOINTS': {
+    id: 'DEFPOINTS',
+    name: 'DEFPOINTS',
+    color: '#808080',
+    aciColor: 8,
+    lineType: 'CONTINUOUS',
+    lineWidth: 0.25,
+    visible: true,
+    locked: false,
+    isPlot: false,
+  },
+};
 
 export function createEmptyCADDocument(): CADDocument {
   return {
@@ -230,12 +288,38 @@ export function createEmptyCADDocument(): CADDocument {
     title: 'Untitled Document',
     units: 'mm',
     layers: {
-      'layer-0': {
-        id: 'layer-0',
-        name: 'Default',
+      '0': {
+        id: '0',
+        name: '0',
+        color: '#FFFFFF',
+        aciColor: 7,
+        lineType: 'CONTINUOUS',
+        lineWidth: 0.25,
         visible: true,
         locked: false,
-        color: '#000000',
+        isPlot: true,
+      },
+      'CONSTRUCTION': {
+        id: 'CONSTRUCTION',
+        name: 'CONSTRUCTION',
+        color: '#FF00FF',
+        aciColor: 6,
+        lineType: 'DASHED',
+        lineWidth: 0.25,
+        visible: true,
+        locked: false,
+        isPlot: false,
+      },
+      'DEFPOINTS': {
+        id: 'DEFPOINTS',
+        name: 'DEFPOINTS',
+        color: '#808080',
+        aciColor: 8,
+        lineType: 'CONTINUOUS',
+        lineWidth: 0.25,
+        visible: true,
+        locked: false,
+        isPlot: false,
       },
     },
     planes: {
@@ -245,5 +329,6 @@ export function createEmptyCADDocument(): CADDocument {
     },
     featureTree: [],
     activeSketchId: null,
+    blocks: {},
   };
 }

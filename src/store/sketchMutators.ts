@@ -1,4 +1,16 @@
-import { CADDocument, CADEntity2D, Constraint, SketchFeature, LineEntity, ArcEntity, CircleEntity, PolylineEntity, Point2D } from '../types/cad';
+import {
+  CADDocument,
+  CADEntity2D,
+  Constraint,
+  SketchFeature,
+  LineEntity,
+  ArcEntity,
+  CircleEntity,
+  PolylineEntity,
+  InsertEntity,
+  CADBlockDefinition,
+  Point2D,
+} from '../types/cad';
 import { solveConstraints, analyzeSketchDOF } from '../core/solver/ConstraintSolver';
 import { findClosedProfiles } from '../core/2d/TopologyEngine';
 import { createFillet } from '../core/2d/FilletManager';
@@ -445,9 +457,19 @@ export function applyMirrorToSketch(
     return sketch;
   }
 
+  const mirroredEntities = result.mirroredEntities.map((ent) => {
+    if (ent.type === 'polyline') {
+      return {
+        ...ent,
+        bulges: ent.bulges ? ent.bulges.map((b) => -b) : undefined,
+      } as PolylineEntity;
+    }
+    return ent;
+  });
+
   const updatedSketch: SketchFeature = {
     ...sketch,
-    entities: [...sketch.entities, ...result.mirroredEntities],
+    entities: [...sketch.entities, ...mirroredEntities],
     constraints: [...sketch.constraints, ...result.generatedConstraints],
   };
 
@@ -491,7 +513,13 @@ export function applyMoveToSketch(
       return {
         ...e,
         points: e.points.map((p) => ({ x: p.x + dx, y: p.y + dy })),
+        bulges: e.bulges ? [...e.bulges] : undefined,
       } as PolylineEntity;
+    } else if (e.type === 'insert') {
+      return {
+        ...e,
+        position: { x: e.position.x + dx, y: e.position.y + dy },
+      } as InsertEntity;
     }
     return e;
   });
@@ -590,8 +618,17 @@ export function applyCopyToSketch(
         ...e,
         id: newId,
         points: e.points.map((p) => ({ x: p.x + dx, y: p.y + dy })),
+        bulges: e.bulges ? [...e.bulges] : undefined,
         state: 'UnderDefined',
       } as PolylineEntity;
+    } else if (e.type === 'insert') {
+      return {
+        ...e,
+        id: newId,
+        position: { x: e.position.x + dx, y: e.position.y + dy },
+        scale: { ...e.scale },
+        state: 'UnderDefined',
+      } as InsertEntity;
     }
     return {
       ...(e as any),
@@ -661,7 +698,20 @@ export function applyScaleToSketch(
           x: basePoint.x + (p.x - basePoint.x) * factor,
           y: basePoint.y + (p.y - basePoint.y) * factor,
         })),
+        bulges: e.bulges ? e.bulges.map((b) => (factor < 0 ? -b : b)) : undefined,
       } as PolylineEntity;
+    } else if (e.type === 'insert') {
+      return {
+        ...e,
+        position: {
+          x: basePoint.x + (e.position.x - basePoint.x) * factor,
+          y: basePoint.y + (e.position.y - basePoint.y) * factor,
+        },
+        scale: {
+          x: e.scale.x * factor,
+          y: e.scale.y * factor,
+        },
+      } as InsertEntity;
     }
     return e;
   });
@@ -807,7 +857,14 @@ export function applyRotateToSketch(
       return {
         ...e,
         points: e.points.map((p) => rotatePoint2D(p, basePoint, cosT, sinT)),
+        bulges: e.bulges ? [...e.bulges] : undefined,
       } as PolylineEntity;
+    } else if (e.type === 'insert') {
+      return {
+        ...e,
+        position: rotatePoint2D(e.position, basePoint, cosT, sinT),
+        rotation: normalizeAngle(e.rotation + angleRad),
+      } as InsertEntity;
     }
     return e;
   });
@@ -961,6 +1018,16 @@ export function applyCircularArrayToSketch(
           ...source,
           id: newId,
           points: source.points.map((pt) => rotatePoint2D(pt, centerPoint, cosT, sinT)),
+          bulges: source.bulges ? [...source.bulges] : undefined,
+        };
+        clonedEntities.push(cloned);
+      } else if (source.type === 'insert') {
+        const cloned: InsertEntity = {
+          ...source,
+          id: newId,
+          position: rotatePoint2D(source.position, centerPoint, cosT, sinT),
+          rotation: normalizeAngle(source.rotation + currentAngleRad),
+          scale: { ...source.scale },
         };
         clonedEntities.push(cloned);
       }
@@ -1045,6 +1112,15 @@ export function applyRectArrayToSketch(
             ...source,
             id: newId,
             points: source.points.map((pt) => ({ x: pt.x + dx, y: pt.y + dy })),
+            bulges: source.bulges ? [...source.bulges] : undefined,
+          };
+          clonedEntities.push(cloned);
+        } else if (source.type === 'insert') {
+          const cloned: InsertEntity = {
+            ...source,
+            id: newId,
+            position: { x: source.position.x + dx, y: source.position.y + dy },
+            scale: { ...source.scale },
           };
           clonedEntities.push(cloned);
         }
@@ -1062,5 +1138,321 @@ export function applyRectArrayToSketch(
 
   return applyConstraintsToSketch(updatedSketch);
 }
+
+/**
+ * 2D 仿射變換矩陣結構 (3x3 變換矩陣之二維局部簡化)：
+ * [ x' ]   [ a  c  tx ] [ x ]
+ * [ y' ] = [ b  d  ty ] [ y ]
+ * [ 1  ]   [ 0  0  1  ] [ 1 ]
+ */
+export interface AffineMatrix2D {
+  a: number; // S_x * cos(θ)
+  b: number; // S_x * sin(θ)
+  c: number; // -S_y * sin(θ)
+  d: number; // S_y * cos(θ)
+  tx: number; // 平移 X
+  ty: number; // 平移 Y
+}
+
+/**
+ * 依據 InsertEntity 的 position, scale, rotation 以及圖塊原型的 basePoint，
+ * 建立 2D 仿射矩陣。
+ *
+ * 變換流程（維持 2D/3D 解耦，完全在 2D 平面局部座標下求解）：
+ * 1. 平移使得 basePoint 移至原點：T(-basePoint)
+ * 2. 局部縮放：S(scale.x, scale.y)
+ * 3. 旋轉弧度：R(rotation)
+ * 4. 平移至插入座標：T(position)
+ */
+export function createInsertTransformMatrix(
+  insert: InsertEntity,
+  basePoint: Point2D
+): AffineMatrix2D {
+  const cosR = Math.cos(insert.rotation);
+  const sinR = Math.sin(insert.rotation);
+  const sx = insert.scale.x;
+  const sy = insert.scale.y;
+
+  const a = sx * cosR;
+  const b = sx * sinR;
+  const c = -sy * sinR;
+  const d = sy * cosR;
+
+  const tx = insert.position.x - (a * basePoint.x + c * basePoint.y);
+  const ty = insert.position.y - (b * basePoint.x + d * basePoint.y);
+
+  return { a, b, c, d, tx, ty };
+}
+
+/**
+ * 套用 2D 仿射矩陣計算點變換：
+ * x' = a * x + c * y + tx
+ * y' = b * x + d * y + ty
+ */
+export function applyAffineTransformToPoint(p: Point2D, m: AffineMatrix2D): Point2D {
+  return {
+    x: m.a * p.x + m.c * p.y + m.tx,
+    y: m.b * p.x + m.d * p.y + m.ty,
+  };
+}
+
+/**
+ * 實作圖塊平坦化輔助函式：
+ * 根據 insert 的 position、scale、rotation 建立 2D 仿射矩陣。
+ * 將 blockDef 中的所有圖元乘上變換矩陣，回傳全新的平坦化圖元陣列。
+ *
+ * 【穩定無遞迴死鎖防護機制】：
+ * 1. 使用 visited 集合追蹤已展開圖塊名稱，避免循環巢狀引用（如 A 引用 B，B 引用 A）。
+ * 2. 設置最大遞迴深度限制（預設 32 層），杜絕深層巢狀引發的堆疊溢位與死鎖。
+ * 3. 為平坦化後的每個新圖元分配獨立的 UUID，杜絕圖元 ID 衝突。
+ * 4. 嚴格維持 2D 局部座標 (x, y)，精準處理各類型圖元（直線、圓形、圓弧起訖角度、多段線凸度方向）。
+ */
+export function flattenInsertEntity(
+  insert: InsertEntity,
+  blockDef: CADBlockDefinition,
+  blocks?: Record<string, CADBlockDefinition>,
+  visited: Set<string> = new Set<string>(),
+  depth: number = 0
+): CADEntity2D[] {
+  const MAX_RECURSION_DEPTH = 32;
+  if (!blockDef || !blockDef.entities || depth >= MAX_RECURSION_DEPTH) {
+    return [];
+  }
+
+  // 循環參照檢測
+  const currentKey = blockDef.name || blockDef.id;
+  if (visited.has(currentKey)) {
+    console.warn(`[CADBlock] 偵測到圖塊循環引用: "${currentKey}"，已中斷遞迴展開以防止死鎖。`);
+    return [];
+  }
+
+  const nextVisited = new Set(visited);
+  nextVisited.add(currentKey);
+
+  const basePt = blockDef.basePoint || { x: 0, y: 0 };
+  const matrix = createInsertTransformMatrix(insert, basePt);
+
+  // 矩陣行列式：若 det < 0 則代表有鏡射反轉
+  const det = matrix.a * matrix.d - matrix.b * matrix.c;
+  const isMirrored = det < 0;
+
+  // 幾何縮放比例係數
+  const scaleX = Math.hypot(matrix.a, matrix.b);
+  const scaleY = Math.hypot(matrix.c, matrix.d);
+  const avgScale = (scaleX + scaleY) / 2;
+
+  const result: CADEntity2D[] = [];
+
+  for (const entity of blockDef.entities) {
+    const newId = crypto.randomUUID();
+
+    // 屬性繼承處理
+    const layerId = entity.layerId || insert.layerId;
+    const color = insert.color || entity.color;
+    const lineType = insert.lineType || entity.lineType;
+    const lineWidth = insert.lineWidth !== undefined ? insert.lineWidth : entity.lineWidth;
+    const isConstruction = Boolean(entity.isConstruction || insert.isConstruction);
+    const visible = entity.visible !== false && insert.visible !== false;
+    const locked = Boolean(entity.locked || insert.locked);
+
+    switch (entity.type) {
+      case 'line': {
+        const transformedLine: LineEntity = {
+          ...entity,
+          id: newId,
+          layerId,
+          color,
+          lineType,
+          lineWidth,
+          isConstruction,
+          visible,
+          locked,
+          start: applyAffineTransformToPoint(entity.start, matrix),
+          end: applyAffineTransformToPoint(entity.end, matrix),
+          state: 'UnderDefined',
+        };
+        result.push(transformedLine);
+        break;
+      }
+
+      case 'circle': {
+        const transformedCircle: CircleEntity = {
+          ...entity,
+          id: newId,
+          layerId,
+          color,
+          lineType,
+          lineWidth,
+          isConstruction,
+          visible,
+          locked,
+          center: applyAffineTransformToPoint(entity.center, matrix),
+          radius: Math.max(0.001, entity.radius * (Math.sqrt(Math.abs(det)) || avgScale)),
+          state: 'UnderDefined',
+        };
+        result.push(transformedCircle);
+        break;
+      }
+
+      case 'arc': {
+        const transformedCenter = applyAffineTransformToPoint(entity.center, matrix);
+        const transformedRadius = Math.max(0.001, entity.radius * (Math.sqrt(Math.abs(det)) || avgScale));
+
+        // 計算原型圓弧在變換前的起訖端點
+        const pStart: Point2D = {
+          x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
+          y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
+        };
+        const pEnd: Point2D = {
+          x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
+          y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
+        };
+
+        const tStart = applyAffineTransformToPoint(pStart, matrix);
+        const tEnd = applyAffineTransformToPoint(pEnd, matrix);
+
+        let angStart = Math.atan2(tStart.y - transformedCenter.y, tStart.x - transformedCenter.x);
+        let angEnd = Math.atan2(tEnd.y - transformedCenter.y, tEnd.x - transformedCenter.x);
+
+        angStart = normalizeAngle(angStart);
+        angEnd = normalizeAngle(angEnd);
+
+        // 若矩陣包含負縮放鏡射 (det < 0)，逆時針掃描會翻轉為順時針，
+        // 為了維持 CAD 標準逆時針圓弧表示，需交換起訖角
+        let finalStart = angStart;
+        let finalEnd = angEnd;
+        if (isMirrored) {
+          finalStart = angEnd;
+          finalEnd = angStart;
+        }
+
+        const transformedArc: ArcEntity = {
+          ...entity,
+          id: newId,
+          layerId,
+          color,
+          lineType,
+          lineWidth,
+          isConstruction,
+          visible,
+          locked,
+          center: transformedCenter,
+          radius: transformedRadius,
+          startAngle: finalStart,
+          endAngle: finalEnd,
+          state: 'UnderDefined',
+        };
+        result.push(transformedArc);
+        break;
+      }
+
+      case 'polyline': {
+        const transformedPoints = entity.points.map((pt) => applyAffineTransformToPoint(pt, matrix));
+        const transformedBulges = entity.bulges
+          ? entity.bulges.map((b) => (isMirrored ? -b : b))
+          : undefined;
+
+        const transformedPolyline: PolylineEntity = {
+          ...entity,
+          id: newId,
+          layerId,
+          color,
+          lineType,
+          lineWidth,
+          isConstruction,
+          visible,
+          locked,
+          points: transformedPoints,
+          bulges: transformedBulges,
+          closed: entity.closed,
+          state: 'UnderDefined',
+        };
+        result.push(transformedPolyline);
+        break;
+      }
+
+      case 'insert': {
+        // 巢狀圖塊平坦化處理
+        const childBlockDef = blocks ? blocks[entity.blockName] : undefined;
+        const transformedPos = applyAffineTransformToPoint(entity.position, matrix);
+        const transformedRot = normalizeAngle(entity.rotation + insert.rotation);
+        const transformedScale: Point2D = {
+          x: entity.scale.x * insert.scale.x,
+          y: entity.scale.y * insert.scale.y,
+        };
+
+        const transformedChildInsert: InsertEntity = {
+          ...entity,
+          id: newId,
+          layerId,
+          color,
+          lineType,
+          lineWidth,
+          isConstruction,
+          visible,
+          locked,
+          position: transformedPos,
+          rotation: transformedRot,
+          scale: transformedScale,
+          state: 'UnderDefined',
+        };
+
+        if (childBlockDef && !nextVisited.has(childBlockDef.name || childBlockDef.id)) {
+          const nestedResult = flattenInsertEntity(
+            transformedChildInsert,
+            childBlockDef,
+            blocks,
+            nextVisited,
+            depth + 1
+          );
+          result.push(...nestedResult);
+        } else {
+          result.push(transformedChildInsert);
+        }
+        break;
+      }
+
+      default: {
+        result.push({
+          ...(entity as any),
+          id: newId,
+          layerId,
+          state: 'UnderDefined',
+        });
+        break;
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * 展開一組圖元中的所有 InsertEntity。
+ * 提供渲染 (Rendering) 與捕捉 (Snap) 所需的高效平坦化圖元清單。
+ */
+export function flattenDocumentInserts(
+  entities: CADEntity2D[],
+  blocks: Record<string, CADBlockDefinition>
+): CADEntity2D[] {
+  if (!entities || entities.length === 0) return [];
+  if (!blocks || Object.keys(blocks).length === 0) return entities;
+
+  const result: CADEntity2D[] = [];
+  for (const entity of entities) {
+    if (entity.type === 'insert') {
+      const blockDef = blocks[entity.blockName];
+      if (blockDef) {
+        result.push(...flattenInsertEntity(entity, blockDef, blocks));
+      } else {
+        result.push(entity);
+      }
+    } else {
+      result.push(entity);
+    }
+  }
+  return result;
+}
+
 
 

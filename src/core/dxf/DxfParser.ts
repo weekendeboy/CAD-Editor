@@ -4,7 +4,9 @@ import {
   CircleEntity,
   ArcEntity,
   PolylineEntity,
+  InsertEntity,
   CADLayer,
+  CADBlockDefinition,
   Point2D,
 } from '../../types/cad';
 import { aciToHex, rgbToHex } from './DxfColorMap';
@@ -26,6 +28,7 @@ export interface ParsedDxfResult {
   units: 'mm' | 'inch';
   entities: CADEntity2D[];
   layers: Record<string, CADLayer>;
+  blocks?: Record<string, CADBlockDefinition>;
   warnings: string[];
   stitchStats?: {
     mergedPointsCount: number;
@@ -33,7 +36,7 @@ export interface ParsedDxfResult {
   };
 }
 
-interface DxfGroupToken {
+export interface DxfGroupToken {
   code: number;
   value: string;
   lineNum: number;
@@ -41,10 +44,16 @@ interface DxfGroupToken {
 
 /**
  * 2D 仿射變換矩陣 (2D Affine Transformation Matrix)
- * 矩陣表示: [a c tx; b d ty; 0 0 1]
- * 轉換公式: x' = a*x + c*y + tx, y' = b*x + d*y + ty
+ * 矩陣結構:
+ * [ x' ]   [ a  c  tx ] [ x ]
+ * [ y' ] = [ b  d  ty ] [ y ]
+ * [ 1  ]   [ 0  0  1  ] [ 1 ]
+ *
+ * 變換公式:
+ * x' = a * x + c * y + tx
+ * y' = b * x + d * y + ty
  */
-interface AffineMatrix2D {
+export interface AffineMatrix2D {
   a: number;
   b: number;
   c: number;
@@ -56,15 +65,19 @@ interface AffineMatrix2D {
 /**
  * 建立單位矩陣 (Identity Matrix)
  */
-function createIdentityMatrix(): AffineMatrix2D {
+export function createIdentityMatrix(): AffineMatrix2D {
   return { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 };
 }
 
 /**
  * 根據圖塊基準點、插入點、縮放係數與旋轉角度建立 INSERT 2D 仿射變換矩陣
- * 轉換順序：(P - BasePoint) -> 縮放 (Scale) -> 旋轉 (Rotation) -> 平移 (InsertionPoint)
+ * 幾何變換順序：(P - BasePoint) -> 局部縮放 (Scale) -> 旋轉 (Rotation) -> 平移至插入座標 (InsertionPoint)
+ *
+ * 數學推導：
+ * x' = scaleX * cos(θ) * (x - bx) - scaleY * sin(θ) * (y - by) + insX
+ * y' = scaleX * sin(θ) * (x - bx) + scaleY * cos(θ) * (y - by) + insY
  */
-function createInsertMatrix(
+export function createInsertMatrix(
   insX: number,
   insY: number,
   scaleX: number,
@@ -89,9 +102,9 @@ function createInsertMatrix(
 }
 
 /**
- * 矩陣相乘 (Composite Affine Matrix): M_composite = mOuter * mInner
+ * 複合矩陣相乘: M_composite = mOuter * mInner
  */
-function multiplyAffine(mOuter: AffineMatrix2D, mInner: AffineMatrix2D): AffineMatrix2D {
+export function multiplyAffine(mOuter: AffineMatrix2D, mInner: AffineMatrix2D): AffineMatrix2D {
   return {
     a: mOuter.a * mInner.a + mOuter.c * mInner.b,
     b: mOuter.b * mInner.a + mOuter.d * mInner.b,
@@ -105,7 +118,7 @@ function multiplyAffine(mOuter: AffineMatrix2D, mInner: AffineMatrix2D): AffineM
 /**
  * 套用 2D 仿射變換矩陣至點 P(x, y)
  */
-function transformPoint(m: AffineMatrix2D, p: Point2D): Point2D {
+export function transformPoint(m: AffineMatrix2D, p: Point2D): Point2D {
   return {
     x: m.a * p.x + m.c * p.y + m.tx,
     y: m.b * p.x + m.d * p.y + m.ty,
@@ -115,7 +128,7 @@ function transformPoint(m: AffineMatrix2D, p: Point2D): Point2D {
 /**
  * 將弧度角規格化至 [0, 2π) 範圍
  */
-function normalizeAngle(rad: number): number {
+export function normalizeAngle(rad: number): number {
   if (!Number.isFinite(rad)) {
     return 0;
   }
@@ -131,11 +144,11 @@ function normalizeAngle(rad: number): number {
 }
 
 /**
- * 判斷圖層名稱是否為建構線或非列印輔助圖層
+ * 判斷圖層名稱是否為建構線或輔助不列印圖層
  */
-function isConstructionLayer(layerName: string): boolean {
+export function isConstructionLayer(layerName: string): boolean {
   if (!layerName) return false;
-  const upper = layerName.toUpperCase();
+  const upper = layerName.trim().toUpperCase();
   return upper === 'CONSTRUCTION' || upper === 'DEFPOINTS';
 }
 
@@ -175,7 +188,7 @@ export function calculateScaleFactor(
         return 10 / 25.4;
       case 6: // Meters
         return 1000 / 25.4;
-      default: // 0 or Unspecified or others
+      default: // 0 or Unspecified
         return 1.0;
     }
   } else {
@@ -191,7 +204,7 @@ export function calculateScaleFactor(
         return 10.0;
       case 6: // Meters
         return 1000.0;
-      default: // 0 or Unspecified or others
+      default: // 0 or Unspecified
         return 1.0;
     }
   }
@@ -199,10 +212,10 @@ export function calculateScaleFactor(
 
 /**
  * 幾何無損等比縮放運算
- * - 針對所有圖元執行座標換算
- * - 角度 (startAngle/endAngle) 與凸度 (bulges) 為無因次純量，保持不變
+ * - 針對所有圖元執行頂點與圓心座標換算
+ * - 角度與凸度為無因次純量，保持不變
  */
-function applyUnitScaling(entities: CADEntity2D[], scaleFactor: number): CADEntity2D[] {
+export function applyUnitScaling(entities: CADEntity2D[], scaleFactor: number): CADEntity2D[] {
   if (Math.abs(scaleFactor - 1.0) <= 1e-6) {
     return entities;
   }
@@ -235,13 +248,21 @@ function applyUnitScaling(entities: CADEntity2D[], scaleFactor: number): CADEnti
             y: p.y * scaleFactor,
           })),
         };
+      case 'insert':
+        return {
+          ...ent,
+          position: {
+            x: ent.position.x * scaleFactor,
+            y: ent.position.y * scaleFactor,
+          },
+        };
       default:
         return ent;
     }
   });
 }
 
-// 內部原始圖元定義 (Raw DXF Entities)
+// 原始 DXF 圖元規格介面 (Raw DXF Entity Structures)
 export interface RawDxfLine {
   type: 'LINE';
   start: Point2D;
@@ -249,6 +270,8 @@ export interface RawDxfLine {
   layer: string;
   color?: string;
   colorIsByBlock?: boolean;
+  lineType?: string;
+  lineWidth?: number;
 }
 
 export interface RawDxfCircle {
@@ -258,6 +281,8 @@ export interface RawDxfCircle {
   layer: string;
   color?: string;
   colorIsByBlock?: boolean;
+  lineType?: string;
+  lineWidth?: number;
 }
 
 export interface RawDxfArc {
@@ -269,6 +294,8 @@ export interface RawDxfArc {
   layer: string;
   color?: string;
   colorIsByBlock?: boolean;
+  lineType?: string;
+  lineWidth?: number;
 }
 
 export interface RawDxfPolyline {
@@ -279,6 +306,8 @@ export interface RawDxfPolyline {
   layer: string;
   color?: string;
   colorIsByBlock?: boolean;
+  lineType?: string;
+  lineWidth?: number;
 }
 
 export interface RawDxfInsert {
@@ -291,6 +320,8 @@ export interface RawDxfInsert {
   layer: string;
   color?: string;
   colorIsByBlock?: boolean;
+  lineType?: string;
+  lineWidth?: number;
 }
 
 export type RawBlockEntity =
@@ -309,18 +340,87 @@ export interface DxfBlockDefinition {
 let entityCounter = 0;
 
 /**
- * 產生唯一圖元識別碼 (ID)
+ * 產生唯一圖元識別碼
  */
-function generateEntityId(prefix: string): string {
+export function generateEntityId(prefix: string): string {
   entityCounter++;
-  const rand = Math.random().toString(36).substring(2, 7);
-  return `${prefix}-${entityCounter}-${rand}`;
+  const rand = Math.random().toString(36).substring(2, 8);
+  return `${prefix}-${Date.now().toString(36)}-${entityCounter}-${rand}`;
+}
+
+/**
+ * 記憶體友善型 DXF 流式字彙掃描器 (Zero-Heavy-Allocation Stream Tokenizer)
+ * 透過索引掃描行換行符號 (\n)，避免全檔 split 產生的巨量字串陣列負載。
+ */
+export class DxfStreamTokenizer {
+  private content: string;
+  private pos: number = 0;
+  private len: number;
+  private currentLine: number = 0;
+
+  constructor(content: string) {
+    // 移除 UTF-8 BOM 標記
+    this.content = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+    this.len = this.content.length;
+  }
+
+  private readLine(): string | null {
+    if (this.pos >= this.len) return null;
+    let nextNl = this.content.indexOf('\n', this.pos);
+    let line: string;
+    if (nextNl === -1) {
+      line = this.content.substring(this.pos);
+      this.pos = this.len;
+    } else {
+      line = this.content.substring(this.pos, nextNl);
+      this.pos = nextNl + 1;
+    }
+    this.currentLine++;
+    if (line.endsWith('\r')) {
+      line = line.slice(0, -1);
+    }
+    return line;
+  }
+
+  public tokenizeAll(warnings: string[]): DxfGroupToken[] {
+    const tokens: DxfGroupToken[] = [];
+    while (this.pos < this.len) {
+      const codeLine = this.readLine();
+      if (codeLine === null) break;
+      const trimmedCode = codeLine.trim();
+      if (trimmedCode.length === 0) continue;
+
+      const code = parseInt(trimmedCode, 10);
+      if (isNaN(code)) {
+        warnings.push(`Line ${this.currentLine}: Invalid non-numeric group code "${trimmedCode}" ignored.`);
+        continue;
+      }
+
+      const valLine = this.readLine();
+      if (valLine === null) {
+        warnings.push(`Line ${this.currentLine}: Unexpected EOF, missing value for group code ${code}.`);
+        break;
+      }
+
+      // 略過 Group Code 999 註解行
+      if (code === 999) {
+        continue;
+      }
+
+      tokens.push({
+        code,
+        value: valLine.trim(),
+        lineNum: this.currentLine - 1,
+      });
+    }
+    return tokens;
+  }
 }
 
 /**
  * 解析 TrueColor (群組碼 420, 24-bit RGB) 或 ACI (群組碼 62)
  */
-function extractEntityColor(entityTokens: DxfGroupToken[]): {
+export function extractEntityColor(entityTokens: DxfGroupToken[]): {
   colorHex?: string;
   colorIsByBlock: boolean;
 } {
@@ -352,10 +452,37 @@ function extractEntityColor(entityTokens: DxfGroupToken[]): {
 }
 
 /**
- * 從 DXF 群組碼 tokens 集中解析單一原始圖元
- * 雜訊過濾：自動忽略 Handle(5)、Subclass(100)、Soft Pointer(330)、Hard Ownership(360)、102 字典組與 XDATA 等 AutoCAD 2019 特殊欄位
+ * 解析線型 (群組碼 6)
  */
-function parseRawEntityFromTokens(
+export function extractEntityLineType(entityTokens: DxfGroupToken[]): string | undefined {
+  for (const et of entityTokens) {
+    if (et.code === 6) {
+      return et.value.trim();
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 解析線寬 (群組碼 370，單位 1/100 mm)
+ */
+export function extractEntityLineWidth(entityTokens: DxfGroupToken[]): number | undefined {
+  for (const et of entityTokens) {
+    if (et.code === 370) {
+      const val = parseInt(et.value, 10);
+      if (Number.isFinite(val) && val > 0) {
+        return val / 100;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 從 DXF 群組碼 token 集中解析單一原始圖元
+ * 容錯過濾：忽略 AutoCAD 2019+ 之 Handle(5)、Subclass(100)、Pointer(330)、Hard Ownership(360) 與 XDATA 雜訊
+ */
+export function parseRawEntityFromTokens(
   tokens: DxfGroupToken[],
   startIndex: number
 ): { entity?: RawBlockEntity; warning?: string; nextTokenIdx: number } {
@@ -363,13 +490,15 @@ function parseRawEntityFromTokens(
   const startToken = tokens[tokenIdx];
   const entityType = startToken.value.toUpperCase();
 
-  // 1. 處理 POLYLINE (舊式 3D/2D POLYLINE + VERTEX + SEQEND)
+  // 1. 處理舊式複合多段線 (POLYLINE + 頂點序列 VERTEX + SEQEND)
   if (entityType === 'POLYLINE') {
     tokenIdx++; // 消耗 0 -> POLYLINE
     let layer = '0';
     let colorHex: string | undefined = undefined;
     let colorIsByBlock = false;
     let isClosed = false;
+    let lineType: string | undefined = undefined;
+    let lineWidth: number | undefined = undefined;
 
     while (tokenIdx < tokens.length && tokens[tokenIdx].code !== 0) {
       const pt = tokens[tokenIdx];
@@ -392,6 +521,11 @@ function parseRawEntityFromTokens(
             colorHex = aciToHex(Math.abs(aci));
           }
         }
+      } else if (pt.code === 6) {
+        lineType = pt.value.trim();
+      } else if (pt.code === 370) {
+        const val = parseInt(pt.value, 10);
+        if (Number.isFinite(val) && val > 0) lineWidth = val / 100;
       } else if (pt.code === 70) {
         const flags = parseInt(pt.value, 10);
         if (Number.isFinite(flags) && (flags & 1) !== 0) {
@@ -455,6 +589,8 @@ function parseRawEntityFromTokens(
           layer,
           color: colorHex,
           colorIsByBlock,
+          lineType,
+          lineWidth,
         },
         nextTokenIdx: tokenIdx,
       };
@@ -465,7 +601,7 @@ function parseRawEntityFromTokens(
     };
   }
 
-  // 2. 收集標準單區塊圖元群組碼 (LINE, CIRCLE, ARC, LWPOLYLINE, INSERT, ELLIPSE, SPLINE 等)
+  // 2. 收集標準單實體群組碼 (LINE, CIRCLE, ARC, LWPOLYLINE, INSERT, ELLIPSE, SPLINE)
   const entityTokens: DxfGroupToken[] = [startToken];
   tokenIdx++;
   while (tokenIdx < tokens.length && tokens[tokenIdx].code !== 0) {
@@ -482,8 +618,10 @@ function parseRawEntityFromTokens(
   }
 
   const { colorHex, colorIsByBlock } = extractEntityColor(entityTokens);
+  const lineType = extractEntityLineType(entityTokens);
+  const lineWidth = extractEntityLineWidth(entityTokens);
 
-  // A. LINE 圖元解析
+  // A. LINE 圖元
   if (entityType === 'LINE') {
     let x1: number | undefined;
     let y1: number | undefined;
@@ -515,17 +653,19 @@ function parseRawEntityFromTokens(
           layer,
           color: colorHex,
           colorIsByBlock,
+          lineType,
+          lineWidth,
         },
         nextTokenIdx: tokenIdx,
       };
     }
     return {
-      warning: `Line ${startToken.lineNum}: Incomplete or invalid LINE coordinates skipped.`,
+      warning: `Line ${startToken.lineNum}: Incomplete LINE coordinate definition skipped.`,
       nextTokenIdx: tokenIdx,
     };
   }
 
-  // B. CIRCLE 圖元解析
+  // B. CIRCLE 圖元
   if (entityType === 'CIRCLE') {
     let cx: number | undefined;
     let cy: number | undefined;
@@ -554,17 +694,19 @@ function parseRawEntityFromTokens(
           layer,
           color: colorHex,
           colorIsByBlock,
+          lineType,
+          lineWidth,
         },
         nextTokenIdx: tokenIdx,
       };
     }
     return {
-      warning: `Line ${startToken.lineNum}: Incomplete or invalid CIRCLE definition skipped.`,
+      warning: `Line ${startToken.lineNum}: Incomplete or non-positive CIRCLE definition skipped.`,
       nextTokenIdx: tokenIdx,
     };
   }
 
-  // C. ARC 圖元解析
+  // C. ARC 圖元
   if (entityType === 'ARC') {
     let cx: number | undefined;
     let cy: number | undefined;
@@ -603,6 +745,8 @@ function parseRawEntityFromTokens(
           layer,
           color: colorHex,
           colorIsByBlock,
+          lineType,
+          lineWidth,
         },
         nextTokenIdx: tokenIdx,
       };
@@ -613,7 +757,7 @@ function parseRawEntityFromTokens(
     };
   }
 
-  // D. LWPOLYLINE 穩健狀態機解析
+  // D. LWPOLYLINE 輕量多段線
   if (entityType === 'LWPOLYLINE') {
     let isClosed = false;
     const vertices: { x: number; y: number; bulge: number }[] = [];
@@ -626,7 +770,6 @@ function parseRawEntityFromTokens(
           isClosed = true;
         }
       } else if (et.code === 10) {
-        // 若前面已有完整頂點資料，先提交上一頂點
         if (
           currentVertex !== null &&
           currentVertex.x !== undefined &&
@@ -657,10 +800,8 @@ function parseRawEntityFromTokens(
           currentVertex.bulge = b;
         }
       }
-      // 忽略 90(頂點數), 43(寬度), 38(高程), 39(厚度), 100(Subclass), 5(Handle), 330(Pointer) 等雜訊
     }
 
-    // 提交最後一個頂點
     if (
       currentVertex !== null &&
       currentVertex.x !== undefined &&
@@ -689,17 +830,19 @@ function parseRawEntityFromTokens(
           layer,
           color: colorHex,
           colorIsByBlock,
+          lineType,
+          lineWidth,
         },
         nextTokenIdx: tokenIdx,
       };
     }
     return {
-      warning: `Line ${startToken.lineNum}: LWPOLYLINE with fewer than 2 vertices skipped.`,
+      warning: `Line ${startToken.lineNum}: LWPOLYLINE with fewer than 2 valid vertices skipped.`,
       nextTokenIdx: tokenIdx,
     };
   }
 
-  // E. INSERT 圖塊引用解析
+  // E. INSERT 圖塊參照
   if (entityType === 'INSERT') {
     let blockName = '';
     let insX = 0;
@@ -735,6 +878,8 @@ function parseRawEntityFromTokens(
           layer,
           color: colorHex,
           colorIsByBlock,
+          lineType,
+          lineWidth,
         },
         nextTokenIdx: tokenIdx,
       };
@@ -745,7 +890,7 @@ function parseRawEntityFromTokens(
     };
   }
 
-  // F. ELLIPSE 支援轉換 (AutoCAD 2019 橢圓與橢圓弧)
+  // F. ELLIPSE 橢圓圖元支援轉換
   if (entityType === 'ELLIPSE') {
     let cx = 0;
     let cy = 0;
@@ -767,7 +912,6 @@ function parseRawEntityFromTokens(
 
     const majorLen = Math.hypot(mx, my);
     if (majorLen > 1e-6 && ratio > 1e-6) {
-      // 若為正圓且全周長
       if (Math.abs(ratio - 1.0) < 1e-4 && Math.abs(endParam - startParam - Math.PI * 2) < 1e-4) {
         return {
           entity: {
@@ -777,12 +921,14 @@ function parseRawEntityFromTokens(
             layer,
             color: colorHex,
             colorIsByBlock,
+            lineType,
+            lineWidth,
           },
           nextTokenIdx: tokenIdx,
         };
       }
 
-      // 非正圓橢圓：離散化為高精度 LWPOLYLINE 多段線
+      // 橢圓離散化為高精度 LWPOLYLINE 多段線
       const phi = Math.atan2(my, mx);
       const minorLen = majorLen * ratio;
       let sweep = endParam - startParam;
@@ -808,13 +954,15 @@ function parseRawEntityFromTokens(
           layer,
           color: colorHex,
           colorIsByBlock,
+          lineType,
+          lineWidth,
         },
         nextTokenIdx: tokenIdx,
       };
     }
   }
 
-  // G. SPLINE 支援轉換
+  // G. SPLINE 雲狀線支援轉換
   if (entityType === 'SPLINE') {
     const fitPoints: Point2D[] = [];
     const controlPoints: Point2D[] = [];
@@ -861,6 +1009,8 @@ function parseRawEntityFromTokens(
           layer,
           color: colorHex,
           colorIsByBlock,
+          lineType,
+          lineWidth,
         },
         nextTokenIdx: tokenIdx,
       };
@@ -875,8 +1025,15 @@ function parseRawEntityFromTokens(
 
 /**
  * 將單一 RawBlockEntity 套用 2D 仿射變換並展平為系統 CADEntity2D 實體
+ *
+ * 【色彩與圖層穿透規則】：
+ * 1. 圖層穿透：若圖元位於圖層 '0'，動態繼承外層 INSERT 指定之圖層 parentLayer；否則保留自身圖層。
+ * 2. 色彩穿透：
+ *    - ByBlock (群組碼 62=0 或 colorIsByBlock)：繼承 INSERT 的色彩 parentColor（若未指定則繼承 parentLayer 顏色）。
+ *    - ByLayer (群組碼 62=256 或未指定)：繼承該圖元圖層 (resolvedLayer) 之顏色。
+ *    - 實體自定義色彩 (ACI 1~255 或 TrueColor)：完整保留該圖元色彩。
  */
-function flattenBlockEntity(
+export function flattenBlockEntity(
   rawEnt: RawBlockEntity,
   m: AffineMatrix2D,
   parentLayer: string,
@@ -891,27 +1048,38 @@ function flattenBlockEntity(
 ): void {
   const defaultLayerColor = options.defaultLayerColor || '#FFFFFF';
 
-  // 解析圖層與顏色繼承關係
+  // 1. 圖層解析
   const resolvedLayer = !rawEnt.layer || rawEnt.layer === '0' ? parentLayer : rawEnt.layer;
 
-  const resolvedColor = rawEnt.colorIsByBlock
-    ? parentColor
-    : rawEnt.color !== undefined
-    ? rawEnt.color
-    : parentColor;
-
-  // 動態註冊圖層 (若尚未存在)
+  // 動態註冊未在 TABLES 中定義之圖層
   if (!layers[resolvedLayer]) {
+    const isConst = isConstructionLayer(resolvedLayer);
     layers[resolvedLayer] = {
       id: resolvedLayer,
       name: resolvedLayer,
       visible: true,
       locked: false,
-      color: resolvedColor || defaultLayerColor,
+      color: resolvedLayer === '0' ? defaultLayerColor : (isConst ? '#FF00FF' : defaultLayerColor),
+      aciColor: isConst ? 6 : 7,
+      lineType: isConst ? 'DASHED' : 'CONTINUOUS',
+      lineWidth: 0.25,
+      isPlot: !isConst && resolvedLayer.toUpperCase() !== 'DEFPOINTS',
     };
   }
 
+  // 2. 色彩穿透解析
+  let resolvedColor: string | undefined;
+  if (rawEnt.colorIsByBlock) {
+    resolvedColor = parentColor || layers[parentLayer]?.color || layers[resolvedLayer]?.color || defaultLayerColor;
+  } else if (rawEnt.color !== undefined) {
+    resolvedColor = rawEnt.color;
+  } else {
+    resolvedColor = layers[resolvedLayer]?.color || defaultLayerColor;
+  }
+
   const isConstruction = isConstructionLayer(resolvedLayer);
+  const resolvedLineType = rawEnt.lineType || layers[resolvedLayer]?.lineType || 'CONTINUOUS';
+  const resolvedLineWidth = rawEnt.lineWidth !== undefined ? rawEnt.lineWidth : layers[resolvedLayer]?.lineWidth;
 
   // 處理 INSERT 巢狀圖塊展開
   if (rawEnt.type === 'INSERT') {
@@ -929,11 +1097,33 @@ function flattenBlockEntity(
         blocks,
         outEntities
       );
+    } else {
+      const insPoint = transformPoint(m, rawEnt.insertionPoint);
+      const sx = Math.hypot(m.a, m.b) * rawEnt.scaleX;
+      const sy = Math.hypot(m.c, m.d) * rawEnt.scaleY;
+      const rot = normalizeAngle((rawEnt.rotationDeg * Math.PI) / 180 + Math.atan2(m.b, m.a));
+
+      const insertEntity: InsertEntity = {
+        id: generateEntityId('insert'),
+        type: 'insert',
+        blockName: rawEnt.blockName,
+        position: insPoint,
+        scale: { x: sx, y: sy },
+        rotation: rot,
+        layerId: resolvedLayer,
+        visible: true,
+        locked: false,
+        color: resolvedColor,
+        lineType: resolvedLineType,
+        lineWidth: resolvedLineWidth,
+        ...(isConstruction ? { isConstruction: true } : {}),
+      };
+      outEntities.push(insertEntity);
     }
     return;
   }
 
-  // 1. LINE 仿射變換
+  // 1. LINE 圖元
   if (rawEnt.type === 'LINE') {
     const startTrans = transformPoint(m, rawEnt.start);
     const endTrans = transformPoint(m, rawEnt.end);
@@ -946,14 +1136,16 @@ function flattenBlockEntity(
       layerId: resolvedLayer,
       visible: true,
       locked: false,
-      ...(resolvedColor ? { color: resolvedColor } : {}),
+      color: resolvedColor,
+      lineType: resolvedLineType,
+      lineWidth: resolvedLineWidth,
       ...(isConstruction ? { isConstruction: true } : {}),
     };
     outEntities.push(lineEntity);
     return;
   }
 
-  // 2. CIRCLE 仿射變換
+  // 2. CIRCLE 圖元
   if (rawEnt.type === 'CIRCLE') {
     const centerTrans = transformPoint(m, rawEnt.center);
     const sx = Math.hypot(m.a, m.b);
@@ -963,7 +1155,7 @@ function flattenBlockEntity(
     if (Math.abs(sx - sy) >= 1e-5) {
       radiusTrans = rawEnt.radius * Math.sqrt(sx * sy);
       warnings.push(
-        `Non-uniform scaling (scaleX=${sx.toFixed(4)}, scaleY=${sy.toFixed(4)}) applied to CIRCLE; approximated using geometric mean radius.`
+        `Non-uniform scaling (scaleX=${sx.toFixed(4)}, scaleY=${sy.toFixed(4)}) applied to CIRCLE; approximated with geometric mean radius.`
       );
     }
 
@@ -975,14 +1167,16 @@ function flattenBlockEntity(
       layerId: resolvedLayer,
       visible: true,
       locked: false,
-      ...(resolvedColor ? { color: resolvedColor } : {}),
+      color: resolvedColor,
+      lineType: resolvedLineType,
+      lineWidth: resolvedLineWidth,
       ...(isConstruction ? { isConstruction: true } : {}),
     };
     outEntities.push(circleEntity);
     return;
   }
 
-  // 3. ARC 仿射變換
+  // 3. ARC 圖元
   if (rawEnt.type === 'ARC') {
     const centerTrans = transformPoint(m, rawEnt.center);
     const sx = Math.hypot(m.a, m.b);
@@ -992,7 +1186,7 @@ function flattenBlockEntity(
     if (Math.abs(sx - sy) >= 1e-5) {
       radiusTrans = rawEnt.radius * Math.sqrt(sx * sy);
       warnings.push(
-        `Non-uniform scaling (scaleX=${sx.toFixed(4)}, scaleY=${sy.toFixed(4)}) applied to ARC; approximated using geometric mean radius.`
+        `Non-uniform scaling (scaleX=${sx.toFixed(4)}, scaleY=${sy.toFixed(4)}) applied to ARC; approximated with geometric mean radius.`
       );
     }
 
@@ -1018,7 +1212,7 @@ function flattenBlockEntity(
       Math.atan2(pEndTrans.y - centerTrans.y, pEndTrans.x - centerTrans.x)
     );
 
-    // 鏡像翻轉處理 (Reflection Check)
+    // 鏡射反轉 (det < 0) 處理：交換起始與結束角度以維持逆時針方向定義
     const det = m.a * m.d - m.b * m.c;
     if (det < 0) {
       const temp = newStartAngle;
@@ -1036,14 +1230,16 @@ function flattenBlockEntity(
       layerId: resolvedLayer,
       visible: true,
       locked: false,
-      ...(resolvedColor ? { color: resolvedColor } : {}),
+      color: resolvedColor,
+      lineType: resolvedLineType,
+      lineWidth: resolvedLineWidth,
       ...(isConstruction ? { isConstruction: true } : {}),
     };
     outEntities.push(arcEntity);
     return;
   }
 
-  // 4. LWPOLYLINE / POLYLINE 仿射變換
+  // 4. LWPOLYLINE / POLYLINE 圖元
   if (rawEnt.type === 'LWPOLYLINE' || rawEnt.type === 'POLYLINE') {
     const transformedPoints = rawEnt.points.map((pt) => transformPoint(m, pt));
     const det = m.a * m.d - m.b * m.c;
@@ -1065,7 +1261,9 @@ function flattenBlockEntity(
       layerId: resolvedLayer,
       visible: true,
       locked: false,
-      ...(resolvedColor ? { color: resolvedColor } : {}),
+      color: resolvedColor,
+      lineType: resolvedLineType,
+      lineWidth: resolvedLineWidth,
       ...(isConstruction ? { isConstruction: true } : {}),
     };
 
@@ -1080,9 +1278,14 @@ function flattenBlockEntity(
 }
 
 /**
- * 展平 INSERT 圖塊引用 (Flatten Block Reference)
+ * 展平 INSERT 圖塊參照 (Flatten Block Reference)
+ *
+ * 【防護機制】：
+ * 1. visitedBlocks 追蹤集合防止 A -> B -> A 循環巢狀圖塊死鎖。
+ * 2. 嚴格限制最大遞迴深度（預設 8 層），超過時安全終止。
+ * 3. 依序複合仿射變換矩陣：[縮放 -> 旋轉 -> 平移]。
  */
-function flattenInsert(
+export function flattenInsert(
   rawInsert: RawDxfInsert,
   parentMatrix: AffineMatrix2D,
   parentLayer: string,
@@ -1099,7 +1302,7 @@ function flattenInsert(
 
   if (depth >= maxDepth) {
     warnings.push(
-      `Maximum block nesting depth (${maxDepth}) reached for block "${rawInsert.blockName}", skipping nested insertion.`
+      `Maximum block nesting depth (${maxDepth}) reached for block "${rawInsert.blockName}", skipping nested insertion to prevent recursion deadlock.`
     );
     return;
   }
@@ -1117,7 +1320,7 @@ function flattenInsert(
 
   const normalizedName = blockDef.name.toUpperCase();
   if (visitedBlocks.has(normalizedName)) {
-    warnings.push(`Circular block reference detected for block "${blockDef.name}", skipped.`);
+    warnings.push(`Circular block reference detected for block "${blockDef.name}", skipped to avoid infinite recursion.`);
     return;
   }
 
@@ -1134,12 +1337,11 @@ function flattenInsert(
 
   const effectiveLayer =
     rawInsert.layer && rawInsert.layer !== '0' ? rawInsert.layer : parentLayer;
-  const effectiveColor =
-    rawInsert.colorIsByBlock
-      ? parentColor
-      : rawInsert.color !== undefined
-      ? rawInsert.color
-      : parentColor;
+  const effectiveColor = rawInsert.colorIsByBlock
+    ? parentColor
+    : rawInsert.color !== undefined
+    ? rawInsert.color
+    : parentColor;
 
   const newVisited = new Set(visitedBlocks);
   newVisited.add(normalizedName);
@@ -1162,24 +1364,11 @@ function flattenInsert(
 }
 
 /**
- * 解析標準 ASCII DXF 內容文字，完成【AutoCAD $INSUNITS 單位解析、BLOCKS 平坦化展開、單位等比縮放與 Auto-Stitch 容差縫合】
- *
- * 解析流水線 (Pipeline Order):
- * [Tokenizer 逐行掃描 + 註解與雜訊過濾]
- *   ↓
- * [BLOCKS 定義收集 + ENTITIES 幾何提取]
- *   ↓
- * [INSERT 圖塊 2D 仿射展開 (flattenBlocks)]
- *   ↓
- * [單位自適應等比縮放 (Unit Scaling Matrix)]
- *   ↓
- * [空間容差端點縫合 (autoStitchEntities)]
- *   ↓
- * [輸出 ParsedDxfResult（units 強制標記為 targetUnits）]
+ * 解析標準 ASCII DXF 檔案文字，完整執行 TABLES 圖層表提取、BLOCKS 圖塊提取、INSERT 仿射展開、單位縮放與 Auto-Stitch 拓撲縫合
  *
  * @param dxfContent DXF 純文字內容
  * @param options 解析設定選項
- * @returns 解析結果 (單位, 展開縮放與縫合後的圖元陣列, 圖層字典, 警告訊息清單, Auto-Stitch 統計資料)
+ * @returns 解析結果 (單位, 展開縮放與縫合後的圖元陣列, 圖層字典, 圖塊字典, 警告訊息清單, Auto-Stitch 統計資料)
  */
 export function parseDxfContent(
   dxfContent: string,
@@ -1200,71 +1389,41 @@ export function parseDxfContent(
       visible: true,
       locked: false,
       color: defaultLayerColor,
+      aciColor: 7,
+      lineType: 'CONTINUOUS',
+      lineWidth: 0.25,
+      isPlot: true,
     },
   };
 
-  let insunitsCode = 0; // 0 = Unspecified
+  let insunitsCode = 0; // 0 = 未指定
 
   if (!dxfContent || typeof dxfContent !== 'string' || dxfContent.trim().length === 0) {
     return {
       units: targetUnits,
       entities: [],
       layers,
+      blocks: {},
       warnings: ['DXF content is empty or invalid.'],
     };
   }
 
-  // 1. Stream Group Code Tokenizer (群組碼詞法分析器)
-  const cleanContent = dxfContent.replace(/^\uFEFF/, '');
-  const lines = cleanContent.split(/\r?\n/);
-  const tokens: DxfGroupToken[] = [];
-
-  let lineIdx = 0;
-  while (lineIdx < lines.length) {
-    const rawCodeLine = lines[lineIdx].trim();
-    lineIdx++;
-
-    if (rawCodeLine === '') {
-      continue;
-    }
-
-    const code = parseInt(rawCodeLine, 10);
-    if (isNaN(code)) {
-      warnings.push(`Line ${lineIdx}: Invalid non-numeric group code "${rawCodeLine}" skipped.`);
-      continue;
-    }
-
-    if (lineIdx >= lines.length) {
-      warnings.push(`Line ${lineIdx}: Unexpected EOF, missing value for group code ${code}.`);
-      break;
-    }
-
-    const value = lines[lineIdx].trim();
-    lineIdx++;
-
-    // 忽略 Group Code 999 註解
-    if (code === 999) {
-      continue;
-    }
-
-    tokens.push({
-      code,
-      value,
-      lineNum: lineIdx - 1,
-    });
-  }
+  // 1. 流式 Group Code 掃描器 (防止大檔案記憶體暴增)
+  const tokenizer = new DxfStreamTokenizer(dxfContent);
+  const tokens = tokenizer.tokenizeAll(warnings);
 
   if (tokens.length === 0) {
     return {
       units: targetUnits,
       entities: [],
       layers,
-      warnings: ['No valid DXF group code tokens found.'],
+      blocks: {},
+      warnings: ['No valid DXF group code tokens found in content.'],
     };
   }
 
-  // 2. Section State Machine and Blocks/Entities Collector
-  const blocks: Record<string, DxfBlockDefinition> = {};
+  // 2. 區段狀態機與圖層/圖塊收集器
+  const dxfBlocks: Record<string, DxfBlockDefinition> = {};
   let currentSection = 'NONE';
   let tokenIdx = 0;
 
@@ -1290,12 +1449,12 @@ export function parseDxfContent(
       continue;
     }
 
-    // EOF 判斷
+    // EOF 結束判斷
     if (token.code === 0 && token.value.toUpperCase() === 'EOF') {
       break;
     }
 
-    // A. 解析 HEADER 區段 (單位判斷 $INSUNITS)
+    // A. 解析 HEADER 區段 (讀取單位代碼 $INSUNITS)
     if (currentSection === 'HEADER') {
       if (token.code === 9 && token.value.toUpperCase() === '$INSUNITS') {
         tokenIdx++;
@@ -1315,46 +1474,90 @@ export function parseDxfContent(
       continue;
     }
 
-    // B. 解析 TABLES 區段 (LAYER 表與顏色)
+    // B. 解析 TABLES 區段 (精準解析 LAYER 表)
     if (currentSection === 'TABLES') {
       if (token.code === 0 && token.value.toUpperCase() === 'LAYER') {
         tokenIdx++;
         let layerName = '';
-        let layerColorHex: string | undefined = undefined;
+        let aciColor = 7;
+        let colorHex: string | undefined = undefined;
+        let lineTypeName = 'CONTINUOUS';
+        let isPlot = true;
+        let isVisible = true;
+        let isLocked = false;
+        let lineWidth = 0.25;
 
         while (tokenIdx < tokens.length && tokens[tokenIdx].code !== 0) {
           const subToken = tokens[tokenIdx];
           if (subToken.code === 2) {
-            layerName = subToken.value;
+            layerName = subToken.value.trim();
           } else if (subToken.code === 420) {
             const intVal = parseInt(subToken.value, 10);
             if (Number.isFinite(intVal) && intVal >= 0) {
               const r = (intVal >> 16) & 0xff;
               const g = (intVal >> 8) & 0xff;
               const b = intVal & 0xff;
-              layerColorHex = rgbToHex({ r, g, b });
+              colorHex = rgbToHex({ r, g, b });
             }
-          } else if (subToken.code === 62 && !layerColorHex) {
-            const aci = Math.abs(parseInt(subToken.value, 10));
-            if (!isNaN(aci) && aci !== 256 && aci !== 0) {
-              layerColorHex = aciToHex(aci);
+          } else if (subToken.code === 62) {
+            const rawAci = parseInt(subToken.value, 10);
+            if (Number.isFinite(rawAci)) {
+              if (rawAci < 0) {
+                isVisible = false; // 負值代表圖層被關閉 (Off)
+              }
+              const absAci = Math.abs(rawAci);
+              aciColor = absAci;
+              if (!colorHex && absAci !== 0 && absAci !== 256) {
+                colorHex = aciToHex(absAci);
+              }
+            }
+          } else if (subToken.code === 6) {
+            lineTypeName = subToken.value.trim();
+          } else if (subToken.code === 290) {
+            const pVal = parseInt(subToken.value, 10);
+            isPlot = pVal !== 0;
+          } else if (subToken.code === 70) {
+            const flags = parseInt(subToken.value, 10);
+            if (Number.isFinite(flags)) {
+              if ((flags & 1) !== 0) isVisible = false; // 凍結 (Frozen)
+              if ((flags & 4) !== 0) isLocked = true;   // 鎖定 (Locked)
+            }
+          } else if (subToken.code === 370) {
+            const lw = parseInt(subToken.value, 10);
+            if (Number.isFinite(lw) && lw > 0) {
+              lineWidth = lw / 100;
             }
           }
           tokenIdx++;
         }
 
         if (layerName) {
-          if (!layers[layerName]) {
-            layers[layerName] = {
-              id: layerName,
-              name: layerName,
-              visible: true,
-              locked: false,
-              color: layerColorHex || defaultLayerColor,
-            };
-          } else if (layerColorHex) {
-            layers[layerName].color = layerColorHex;
+          const isConst = isConstructionLayer(layerName);
+          let mappedLineType: 'CONTINUOUS' | 'DASHED' | 'CENTER' = 'CONTINUOUS';
+          const upperLT = lineTypeName.toUpperCase();
+          if (upperLT.includes('DASH') || upperLT.includes('HIDDEN')) {
+            mappedLineType = 'DASHED';
+          } else if (upperLT.includes('CENTER')) {
+            mappedLineType = 'CENTER';
           }
+          if (isConst) {
+            mappedLineType = 'DASHED';
+          }
+
+          const resolvedLayerColor = colorHex || (isConst ? '#FF00FF' : defaultLayerColor);
+          const resolvedIsPlot = isConst || layerName.toUpperCase() === 'DEFPOINTS' ? false : isPlot;
+
+          layers[layerName] = {
+            id: layerName,
+            name: layerName,
+            visible: isVisible,
+            locked: isLocked,
+            color: resolvedLayerColor,
+            aciColor: isConst ? 6 : aciColor,
+            lineType: mappedLineType,
+            lineWidth,
+            isPlot: resolvedIsPlot,
+          };
         }
         continue;
       }
@@ -1362,7 +1565,7 @@ export function parseDxfContent(
       continue;
     }
 
-    // C. 解析 BLOCKS 區段 (收集圖塊定義: BLOCK ... ENDBLK)
+    // C. 解析 BLOCKS 區段 (提取 BLOCK ... ENDBLK)
     if (currentSection === 'BLOCKS' || (token.code === 0 && token.value.toUpperCase() === 'BLOCK')) {
       if (token.code === 0 && token.value.toUpperCase() === 'BLOCK') {
         tokenIdx++; // 消耗 0 -> BLOCK
@@ -1374,7 +1577,9 @@ export function parseDxfContent(
         while (tokenIdx < tokens.length && tokens[tokenIdx].code !== 0) {
           const bt = tokens[tokenIdx];
           if (bt.code === 2) {
-            blockName = bt.value;
+            blockName = bt.value.trim();
+          } else if (bt.code === 3 && !blockName) {
+            blockName = bt.value.trim();
           } else if (bt.code === 10) {
             bx = parseFloat(bt.value) || 0;
           } else if (bt.code === 20) {
@@ -1385,7 +1590,7 @@ export function parseDxfContent(
 
         const blockEntities: RawBlockEntity[] = [];
 
-        // 收集 BLOCK 內包含的基礎圖元，直至 0 -> ENDBLK
+        // 收集 BLOCK 內部的所有原型實體直至 0 -> ENDBLK
         while (tokenIdx < tokens.length) {
           const subTok = tokens[tokenIdx];
           if (subTok.code !== 0) {
@@ -1399,7 +1604,7 @@ export function parseDxfContent(
             while (tokenIdx < tokens.length && tokens[tokenIdx].code !== 0) {
               tokenIdx++;
             }
-            break; // 結束當前圖塊收集
+            break;
           }
 
           const rawRes = parseRawEntityFromTokens(tokens, tokenIdx);
@@ -1417,9 +1622,9 @@ export function parseDxfContent(
             basePoint: { x: bx, y: by },
             entities: blockEntities,
           };
-          blocks[blockName] = blockDef;
-          blocks[blockName.toUpperCase()] = blockDef;
-          blocks[blockName.toLowerCase()] = blockDef;
+          dxfBlocks[blockName] = blockDef;
+          dxfBlocks[blockName.toUpperCase()] = blockDef;
+          dxfBlocks[blockName.toLowerCase()] = blockDef;
         }
         continue;
       }
@@ -1427,12 +1632,12 @@ export function parseDxfContent(
       continue;
     }
 
-    // D. 解析 ENTITIES 區段 (或未聲明 section 時之預設圖元)
+    // D. 解析 ENTITIES 區段 (或無區段宣告之通用幾何圖元)
     if (currentSection === 'ENTITIES' || currentSection === 'NONE') {
       if (token.code === 0) {
         const entityType = token.value.toUpperCase();
 
-        // 跳過結構標記
+        // 忽略非圖元結構控制標記
         if (
           entityType === 'SECTION' ||
           entityType === 'ENDSEC' ||
@@ -1458,7 +1663,7 @@ export function parseDxfContent(
             options,
             warnings,
             layers,
-            blocks,
+            dxfBlocks,
             rawEntities
           );
         }
@@ -1473,18 +1678,59 @@ export function parseDxfContent(
     tokenIdx++;
   }
 
-  // 3. 單位自適應等比縮放 (Unit Scaling Matrix)
+  // 3. 彙整輸出 CADBlockDefinition 快取字典
+  const parsedBlocks: Record<string, CADBlockDefinition> = {};
+  for (const [name, def] of Object.entries(dxfBlocks)) {
+    // 避免重複寫入大小寫別名
+    if (parsedBlocks[def.name]) continue;
+
+    const cadBlockEntities: CADEntity2D[] = [];
+    for (const rawEnt of def.entities) {
+      flattenBlockEntity(
+        rawEnt,
+        createIdentityMatrix(),
+        '0',
+        undefined,
+        0,
+        new Set(),
+        { ...options, flattenBlocks: false },
+        warnings,
+        layers,
+        dxfBlocks,
+        cadBlockEntities
+      );
+    }
+
+    parsedBlocks[def.name] = {
+      id: `block-${def.name}`,
+      name: def.name,
+      basePoint: { ...def.basePoint },
+      entities: cadBlockEntities,
+    };
+  }
+
+  // 4. 單位自適應等比縮放運算 (Unit Scaling Matrix)
   const scaleFactor = calculateScaleFactor(insunitsCode, targetUnits, customScaleFactor);
   let scaledEntities = rawEntities;
 
   if (Math.abs(scaleFactor - 1.0) > 1e-6) {
     scaledEntities = applyUnitScaling(rawEntities, scaleFactor);
+
+    // 同步縮放快取圖塊之原型圖元與基準點
+    for (const [name, blk] of Object.entries(parsedBlocks)) {
+      parsedBlocks[name] = {
+        ...blk,
+        basePoint: { x: blk.basePoint.x * scaleFactor, y: blk.basePoint.y * scaleFactor },
+        entities: applyUnitScaling(blk.entities, scaleFactor),
+      };
+    }
+
     warnings.push(
       `Applied unit scaling matrix with factor ${scaleFactor} (source $INSUNITS: ${insunitsCode}, target: ${targetUnits}).`
     );
   }
 
-  // 4. Post-processing: Auto-Stitch Topology Repair (端點容差縫合)
+  // 5. 拓撲後處理：Auto-Stitch 端點容差縫合
   const autoStitch = options.autoStitch !== false;
   const stitchTolerance = options.stitchTolerance ?? 1e-3;
 
@@ -1520,6 +1766,7 @@ export function parseDxfContent(
     units: targetUnits,
     entities: finalEntities,
     layers,
+    blocks: parsedBlocks,
     warnings,
     ...(stitchStats ? { stitchStats } : {}),
   };

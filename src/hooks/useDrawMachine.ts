@@ -13,7 +13,7 @@ import { PolarTrackingResult, calculatePolarTracking, PolarExtensionIntersection
 import { OTrackManager, TrackAnchor, TrackGuideLine } from '../core/2d/ObjectTracking';
 import { determineLinearDimType } from '../core/2d/DimensionEngine';
 import { getBestTangentPoint } from '../core/2d/TangentEngine';
-import { arcToBulge } from '../core/2d/BulgeMath';
+import { arcToBulge, endpointsToBulge } from '../core/2d/BulgeMath';
 
 function getDistanceToLineSegment(p: Point2D, sStart: Point2D, sEnd: Point2D): number {
   const vx = sEnd.x - sStart.x;
@@ -437,7 +437,7 @@ export function useDrawMachine() {
 
   // Polyline internal states
   const [polylineMode, setPolylineMode] = useState<'LINE' | 'ARC'>('LINE');
-  const [polySegments, setPolySegments] = useState<Array<{ entityId: string; endPt: Point2D; type: 'line' | 'arc' }>>([]);
+  const [polySegments, setPolySegments] = useState<Array<{ entityId: string; endPt: Point2D; type: 'line' | 'arc'; bulge?: number }>>([]);
   const [lastTangentDir, setLastTangentDir] = useState<Point2D | null>(null);
   const [polylineWarning, setPolylineWarning] = useState<string | null>(null);
 
@@ -558,7 +558,10 @@ export function useDrawMachine() {
   }, [lastTangentDir, polySegments.length]);
 
   const finishPolyline = useCallback(
-    (closed: boolean = false, overrideSegments?: Array<{ entityId: string; endPt: Point2D; type: 'line' | 'arc' }>) => {
+    (
+      closed: boolean = false,
+      overrideSegments?: Array<{ entityId: string; endPt: Point2D; type: 'line' | 'arc'; bulge?: number }>
+    ) => {
       const segments = overrideSegments || drawSession.polySegments || polySegments;
       if (!segments || segments.length === 0) {
         cancelDrawing();
@@ -593,21 +596,25 @@ export function useDrawMachine() {
       // 初始化 bulges 陣列 = new Array(points.length).fill(0)
       const bulges = new Array(points.length).fill(0);
 
-      // 遍歷 drawSession.polySegments (或 segments)，當段落類型為 arc 時呼叫 arcToBulge(arcEntity)
+      // 遍歷 segments 填入對應的凸度值
       segments.forEach((seg, index) => {
-        if (seg.type === 'arc' && index < bulges.length) {
-          const arcEntity = currentEntities.find((e) => e.id === seg.entityId) as ArcEntity | undefined;
-          if (arcEntity && arcEntity.type === 'arc') {
-            let bulgeVal = arcToBulge(arcEntity);
-            const p1 = points[index];
-            const arcStart = {
-              x: arcEntity.center.x + arcEntity.radius * Math.cos(arcEntity.startAngle),
-              y: arcEntity.center.y + arcEntity.radius * Math.sin(arcEntity.startAngle),
-            };
-            if (Math.hypot(p1.x - arcStart.x, p1.y - arcStart.y) > 1e-3) {
-              bulgeVal = -bulgeVal;
+        if (index < bulges.length) {
+          if (seg.bulge !== undefined) {
+            bulges[index] = seg.bulge;
+          } else if (seg.type === 'arc') {
+            const arcEntity = currentEntities.find((e) => e.id === seg.entityId) as ArcEntity | undefined;
+            if (arcEntity && arcEntity.type === 'arc') {
+              let bulgeVal = arcToBulge(arcEntity);
+              const p1 = points[index];
+              const arcStart = {
+                x: arcEntity.center.x + arcEntity.radius * Math.cos(arcEntity.startAngle),
+                y: arcEntity.center.y + arcEntity.radius * Math.sin(arcEntity.startAngle),
+              };
+              if (Math.hypot(p1.x - arcStart.x, p1.y - arcStart.y) > 1e-3) {
+                bulgeVal = -bulgeVal;
+              }
+              bulges[index] = bulgeVal;
             }
-            bulges[index] = bulgeVal;
           }
         }
       });
@@ -825,6 +832,11 @@ export function useDrawMachine() {
         setPolylineMode('LINE');
         setPolylineWarning(null);
         customEvent.preventDefault();
+      } else if (customEvent.detail.key === 'c') {
+        if (polySegments.length >= 2) {
+          finishPolyline(true);
+          customEvent.preventDefault();
+        }
       }
     };
 
@@ -1205,7 +1217,18 @@ export function useDrawMachine() {
                 currentEntities.filter((e) => filteredSources.includes(e.id)),
                 closestAxis
               );
-              setMirrorPreviewEntities(result ? result.mirroredEntities : null);
+              const previewEntities = result
+                ? result.mirroredEntities.map((ent) => {
+                    if (ent.type === 'polyline') {
+                      return {
+                        ...ent,
+                        bulges: ent.bulges ? ent.bulges.map((b) => -b) : undefined,
+                      } as PolylineEntity;
+                    }
+                    return ent;
+                  })
+                : null;
+              setMirrorPreviewEntities(previewEntities);
             } else {
               setMirrorPreviewEntities(null);
             }
@@ -1249,6 +1272,7 @@ export function useDrawMachine() {
                 ...e,
                 id: `move-preview-${e.id}`,
                 points: e.points.map((p) => ({ x: p.x + dx, y: p.y + dy })),
+                bulges: e.bulges ? [...e.bulges] : undefined,
               } as PolylineEntity;
             }
             return e;
@@ -1310,6 +1334,7 @@ export function useDrawMachine() {
                   x: scaleBasePoint.x + (p.x - scaleBasePoint.x) * factor,
                   y: scaleBasePoint.y + (p.y - scaleBasePoint.y) * factor,
                 })),
+                bulges: e.bulges ? e.bulges.map((b) => (factor < 0 ? -b : b)) : undefined,
               } as PolylineEntity;
             }
             return e;
@@ -1376,6 +1401,7 @@ export function useDrawMachine() {
                   x: (p.x - rotateBasePoint.x) * cosT - (p.y - rotateBasePoint.y) * sinT + rotateBasePoint.x,
                   y: (p.x - rotateBasePoint.x) * sinT + (p.y - rotateBasePoint.y) * cosT + rotateBasePoint.y,
                 })),
+                bulges: e.bulges ? [...e.bulges] : undefined,
               } as PolylineEntity;
             }
             return e;
@@ -1638,8 +1664,19 @@ export function useDrawMachine() {
             }
           }
 
+          // 計算當前段落的凸度 b = tan(theta / 4)
+          let calculatedBulge = 0;
+          if (polylineMode === 'ARC' && arcData) {
+            calculatedBulge = endpointsToBulge(
+              drawSession.startPoint,
+              actualEndPt,
+              arcData.center,
+              !arcData.isStartPointMatchingPStart
+            );
+          }
+
           let newEntityId = '';
-          let newSegs: Array<{ entityId: string; endPt: Point2D; type: 'line' | 'arc' }> = [];
+          let newSegs: Array<{ entityId: string; endPt: Point2D; type: 'line' | 'arc'; bulge: number }> = [];
 
           if (polylineMode === 'ARC' && arcData) {
             const newArc: ArcEntity = {
@@ -1658,7 +1695,10 @@ export function useDrawMachine() {
 
             const newTangent = getSegmentEndTangent(newArc, arcData.isStartPointMatchingPStart);
             setLastTangentDir(newTangent);
-            newSegs = [...polySegments, { entityId: newArc.id, endPt: actualEndPt, type: 'arc' }];
+            newSegs = [
+              ...polySegments,
+              { entityId: newArc.id, endPt: actualEndPt, type: 'arc', bulge: calculatedBulge },
+            ];
             setPolySegments(newSegs);
           } else {
             // Default to LINE
@@ -1676,7 +1716,10 @@ export function useDrawMachine() {
 
             const newTangent = getSegmentEndTangent(newLine);
             setLastTangentDir(newTangent);
-            newSegs = [...polySegments, { entityId: newLine.id, endPt: actualEndPt, type: 'line' }];
+            newSegs = [
+              ...polySegments,
+              { entityId: newLine.id, endPt: actualEndPt, type: 'line', bulge: 0 },
+            ];
             setPolySegments(newSegs);
 
             if (res.inferredConstraint) {
@@ -1785,6 +1828,7 @@ export function useDrawMachine() {
             step: 1,
             inferredConstraint: null,
             polySegments: newSegs,
+            bulges: newSegs.map((s) => s.bulge),
           });
           setStartSnap(res.snap);
         }
