@@ -142,7 +142,7 @@ export const useCADStore = create<CADState>((set, get) => ({
     };
   }),
 
-  importEntities: (entities) => set((state) => {
+  importDxfData: (entities, layers) => set((state) => {
     if (!entities || entities.length === 0 || !state.activeSketchId) {
       return state;
     }
@@ -168,8 +168,19 @@ export const useCADStore = create<CADState>((set, get) => ({
     // 調用既有的 applyConstraintsToSketch(updatedSketch)，使拓撲引擎自動重新提取封閉面輪廓（profiles）與淨面積/DOF
     const updatedSketch = applyConstraintsToSketch(mergedSketch);
 
+    // 將傳入的 layers 附加至 state.document.layers 中（保留既有圖層，新增不存在的圖層）
+    const mergedLayers = { ...state.document.layers };
+    if (layers) {
+      for (const [key, layer] of Object.entries(layers)) {
+        if (!mergedLayers[key]) {
+          mergedLayers[key] = layer;
+        }
+      }
+    }
+
     const updatedDocument: CADDocument = {
       ...state.document,
+      layers: mergedLayers,
       featureTree: state.document.featureTree.map((f) =>
         f.id === state.activeSketchId ? updatedSketch : f
       ),
@@ -182,6 +193,8 @@ export const useCADStore = create<CADState>((set, get) => ({
       selectedEntityIds: [],
     };
   }),
+
+  importEntities: (entities) => get().importDxfData(entities, {}),
 
   removeEntity: (id) => set((state) => {
     if (!state.activeSketchId) return state;
@@ -593,6 +606,106 @@ export const useCADStore = create<CADState>((set, get) => ({
     return {
       ...pushUndoState(state),
       document: updatedDocument,
+    };
+  }),
+
+  dragVertexStart: () => set((state) => {
+    return {
+      ...pushUndoState(state)
+    };
+  }),
+
+  dragVertexLive: (entityId, pointIndex, newPos) => set((state) => {
+    if (!state.activeSketchId) return state;
+    
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+    
+    if (!sketch) return state;
+
+    const existingEntity = sketch.entities.find((e) => e.id === entityId);
+    if (!existingEntity) return state;
+
+    const updatedEntity = JSON.parse(JSON.stringify(existingEntity)) as CADEntity2D;
+    
+    if (updatedEntity.type === 'line') {
+      if (pointIndex === 0) updatedEntity.start = newPos;
+      else if (pointIndex === 1) updatedEntity.end = newPos;
+    } else if (updatedEntity.type === 'circle') {
+       if (pointIndex === 0) {
+           updatedEntity.center = newPos;
+       } else if (pointIndex === 1) {
+           updatedEntity.radius = Math.hypot(newPos.x - updatedEntity.center.x, newPos.y - updatedEntity.center.y);
+       }
+    } else if (updatedEntity.type === 'arc') {
+       if (pointIndex === 0) {
+           const dx = newPos.x - updatedEntity.center.x;
+           const dy = newPos.y - updatedEntity.center.y;
+           updatedEntity.startAngle = Math.atan2(dy, dx);
+           updatedEntity.radius = Math.hypot(dx, dy);
+       } else if (pointIndex === 1) {
+           const dx = newPos.x - updatedEntity.center.x;
+           const dy = newPos.y - updatedEntity.center.y;
+           updatedEntity.endAngle = Math.atan2(dy, dx);
+           updatedEntity.radius = Math.hypot(dx, dy);
+       } else if (pointIndex === 2) {
+           updatedEntity.center = newPos;
+       }
+    } else if (updatedEntity.type === 'polyline') {
+       if (updatedEntity.points[pointIndex]) {
+           updatedEntity.points[pointIndex] = newPos;
+       }
+    }
+
+    const newEntities = sketch.entities.map(e => e.id === entityId ? updatedEntity : e);
+
+    const tempFixConstraint = {
+       id: 'temp-drag-fix',
+       type: 'fix' as const,
+       entityIds: [entityId],
+       pointIndices: [pointIndex]
+    };
+
+    const tempSketch: SketchFeature = {
+       ...sketch,
+       entities: newEntities,
+       constraints: [...sketch.constraints, tempFixConstraint],
+    };
+    
+    const solvedTempSketch = applyConstraintsToSketch(tempSketch);
+    solvedTempSketch.constraints = sketch.constraints;
+
+    const updatedDocument: CADDocument = {
+       ...state.document,
+       featureTree: state.document.featureTree.map(f => 
+          f.id === state.activeSketchId ? solvedTempSketch : f
+       )
+    };
+
+    return { document: updatedDocument };
+  }),
+
+  dragVertexCommit: () => set((state) => {
+    if (!state.activeSketchId) return state;
+    
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+    
+    if (!sketch) return state;
+
+    const finalSketch = applyConstraintsToSketch(sketch);
+
+    const updatedDocument: CADDocument = {
+       ...state.document,
+       featureTree: state.document.featureTree.map(f => 
+          f.id === state.activeSketchId ? finalSketch : f
+       )
+    };
+
+    return {
+       document: updatedDocument,
     };
   }),
 

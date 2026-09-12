@@ -102,6 +102,7 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const toastTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const dragCounterRef = useRef<number>(0);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [importToast, setImportToast] = useState<{
     entityCount: number;
@@ -132,7 +133,7 @@ export default function App() {
     setPolygonSides,
     polygonMethod,
     setPolygonMethod,
-    importEntities,
+    importDxfData,
   } = useCADStore();
 
   // 清除彈窗 Timer 清理機制
@@ -297,7 +298,7 @@ export default function App() {
       }
 
       if (result.entities && result.entities.length > 0) {
-        importEntities(result.entities);
+        importDxfData(result.entities, result.layers);
 
         const bbox = computeEntitiesBoundingBox(result.entities);
 
@@ -339,19 +340,28 @@ export default function App() {
     e.target.value = '';
   };
 
-  // 拖曳放置 handlers
+  // 拖曳放置 handlers（使用 Drag Counter 結合 pointer-events-none 防止進入子元素時閃爍）
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current += 1;
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      setIsDraggingOver(true);
+    }
+  };
+
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!isDraggingOver) {
-      setIsDraggingOver(true);
-    }
+    e.dataTransfer.dropEffect = 'copy';
   };
 
   const handleDragLeave = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+    dragCounterRef.current -= 1;
+    if (dragCounterRef.current <= 0) {
+      dragCounterRef.current = 0;
       setIsDraggingOver(false);
     }
   };
@@ -359,6 +369,7 @@ export default function App() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    dragCounterRef.current = 0;
     setIsDraggingOver(false);
 
     const file = e.dataTransfer.files?.[0];
@@ -368,7 +379,13 @@ export default function App() {
   };
 
   return (
-    <div className="w-full h-screen flex flex-col bg-neutral-900 text-white overflow-hidden">
+    <div
+      className="w-full h-screen flex flex-col bg-neutral-900 text-white overflow-hidden relative"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       {/* 隱藏的檔案上傳輸入框 */}
       <input
         type="file"
@@ -851,12 +868,7 @@ export default function App() {
       </header>
 
       {/* Main Workspace */}
-      <main
-        className="flex-1 relative"
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-      >
+      <main className="flex-1 relative">
         {solverState === 'OverDefined' && (
           <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-30 bg-red-950/95 border-2 border-red-500 text-red-100 px-5 py-3 rounded-md shadow-2xl flex items-center gap-3 animate-pulse pointer-events-none">
             <AlertTriangle className="text-red-500 shrink-0" size={20} />
@@ -892,9 +904,9 @@ export default function App() {
           </div>
         )}
 
-        {/* 拖曳放置半透明遮罩指示 */}
+        {/* 獨立全螢幕拖曳上傳 Overlay 遮罩 */}
         {isDraggingOver && (
-          <div className="absolute inset-0 z-50 bg-neutral-950/80 backdrop-blur-sm border-4 border-dashed border-emerald-500 rounded-lg flex flex-col items-center justify-center text-emerald-400 transition-all duration-200 pointer-events-none">
+          <div className="fixed inset-0 z-[9999] bg-neutral-950/80 backdrop-blur-sm border-4 border-dashed border-emerald-500 rounded-lg flex flex-col items-center justify-center text-emerald-400 transition-all duration-200 pointer-events-none">
             <FileUp size={64} className="mb-4 animate-bounce text-emerald-400" />
             <span className="text-xl font-bold tracking-wide">放開滑鼠以匯入 DXF 圖面</span>
             <span className="text-sm text-emerald-500/80 mt-1">支援標準 2D DXF 檔案拖放匯入</span>

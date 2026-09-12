@@ -13,6 +13,7 @@ import { PolarTrackingResult, calculatePolarTracking, PolarExtensionIntersection
 import { OTrackManager, TrackAnchor, TrackGuideLine } from '../core/2d/ObjectTracking';
 import { determineLinearDimType } from '../core/2d/DimensionEngine';
 import { getBestTangentPoint } from '../core/2d/TangentEngine';
+import { arcToBulge } from '../core/2d/BulgeMath';
 
 function getDistanceToLineSegment(p: Point2D, sStart: Point2D, sEnd: Point2D): number {
   const vx = sEnd.x - sStart.x;
@@ -255,10 +256,14 @@ export function useDrawMachine() {
   const osnapSettings = useCADStore((state) => state.osnapSettings);
   const orthoEnabled = useCADStore((state) => state.orthoEnabled);
   const addEntity = useCADStore((state) => state.addEntity);
+  const removeEntity = useCADStore((state) => state.removeEntity);
   const addConstraint = useCADStore((state) => state.addConstraint);
   const addDimension = useCADStore((state) => state.addDimension);
   const updateDimensionPosition = useCADStore((state) => state.updateDimensionPosition);
   const updateDimensionPositionLive = useCADStore((state) => state.updateDimensionPositionLive);
+  const dragVertexStart = useCADStore((state) => state.dragVertexStart);
+  const dragVertexLive = useCADStore((state) => state.dragVertexLive);
+  const dragVertexCommit = useCADStore((state) => state.dragVertexCommit);
   const trimEntity = useCADStore((state) => state.trimEntity);
   const extendEntity = useCADStore((state) => state.extendEntity);
   const applyFillet = useCADStore((state) => state.applyFillet);
@@ -314,6 +319,35 @@ export function useDrawMachine() {
     initialTextPos: Point2D;
     startWorldPt: Point2D;
   } | null>(null);
+
+  // Drag vertex state
+  const [dragVertexInfo, setDragVertexInfo] = useState<{
+    entityId: string;
+    pointIndex: number;
+    startPos: Point2D;
+  } | null>(null);
+
+  const startDragVertex = useCallback((entityId: string, pointIndex: number, worldPt: Point2D) => {
+    dragVertexStart();
+    setDragVertexInfo({ entityId, pointIndex, startPos: worldPt });
+  }, [dragVertexStart]);
+
+  const updateDragVertex = useCallback((worldPt: Point2D) => {
+    if (!dragVertexInfo) return;
+    dragVertexLive(dragVertexInfo.entityId, dragVertexInfo.pointIndex, worldPt);
+  }, [dragVertexInfo, dragVertexLive]);
+
+  const endDragVertex = useCallback((worldPt?: Point2D) => {
+    if (!dragVertexInfo) return;
+    if (worldPt && (worldPt.x !== dragVertexInfo.startPos.x || worldPt.y !== dragVertexInfo.startPos.y)) {
+       dragVertexCommit();
+    } else {
+       // If didn't move, just revert by calling undo? Or if dragVertexCommit just doesn't push undo state?
+       // Actually, if it didn't move, we could just commit it, since it's the same.
+       dragVertexCommit();
+    }
+    setDragVertexInfo(null);
+  }, [dragVertexInfo, dragVertexCommit]);
 
   const startDragDimensionText = useCallback((dimId: string, initialTextPos: Point2D, worldPt: Point2D) => {
     setDraggingDimInfo({
@@ -446,6 +480,7 @@ export function useDrawMachine() {
     setDimSelectedLineId2(null);
     setDimSelectedCircleOrArc(null);
     setDraggingDimInfo(null);
+    setDragVertexInfo(null);
     setStartSnap(null);
     setFilletFirstEntityId(null);
     setChamferFirstEntityId(null);
@@ -521,6 +556,84 @@ export function useDrawMachine() {
       }
     });
   }, [lastTangentDir, polySegments.length]);
+
+  const finishPolyline = useCallback(
+    (closed: boolean = false, overrideSegments?: Array<{ entityId: string; endPt: Point2D; type: 'line' | 'arc' }>) => {
+      const segments = overrideSegments || drawSession.polySegments || polySegments;
+      if (!segments || segments.length === 0) {
+        cancelDrawing();
+        return;
+      }
+
+      // 取得第 0 個段落對應的實體以找到起點
+      const firstSeg = segments[0];
+      const firstEntity = currentEntities.find((e) => e.id === firstSeg.entityId);
+      let p0: Point2D | null = null;
+      if (firstEntity) {
+        if (firstEntity.type === 'line') {
+          p0 = firstEntity.start;
+        } else if (firstEntity.type === 'arc') {
+          p0 = {
+            x: firstEntity.center.x + firstEntity.radius * Math.cos(firstEntity.startAngle),
+            y: firstEntity.center.y + firstEntity.radius * Math.sin(firstEntity.startAngle),
+          };
+        }
+      }
+      if (!p0) {
+        p0 = drawSession.startPoint || segments[0].endPt;
+      }
+
+      // 收集頂點 points 陣列
+      const points: Point2D[] = [p0];
+      const segCount = closed ? segments.length - 1 : segments.length;
+      for (let i = 0; i < segCount; i++) {
+        points.push(segments[i].endPt);
+      }
+
+      // 初始化 bulges 陣列 = new Array(points.length).fill(0)
+      const bulges = new Array(points.length).fill(0);
+
+      // 遍歷 drawSession.polySegments (或 segments)，當段落類型為 arc 時呼叫 arcToBulge(arcEntity)
+      segments.forEach((seg, index) => {
+        if (seg.type === 'arc' && index < bulges.length) {
+          const arcEntity = currentEntities.find((e) => e.id === seg.entityId) as ArcEntity | undefined;
+          if (arcEntity && arcEntity.type === 'arc') {
+            let bulgeVal = arcToBulge(arcEntity);
+            const p1 = points[index];
+            const arcStart = {
+              x: arcEntity.center.x + arcEntity.radius * Math.cos(arcEntity.startAngle),
+              y: arcEntity.center.y + arcEntity.radius * Math.sin(arcEntity.startAngle),
+            };
+            if (Math.hypot(p1.x - arcStart.x, p1.y - arcStart.y) > 1e-3) {
+              bulgeVal = -bulgeVal;
+            }
+            bulges[index] = bulgeVal;
+          }
+        }
+      });
+
+      // 將 bulges 寫入 PolylineEntity
+      const polylineEntity: PolylineEntity = {
+        id: crypto.randomUUID(),
+        layerId: 'layer-0',
+        visible: true,
+        locked: false,
+        type: 'polyline',
+        points,
+        bulges,
+        closed,
+      };
+
+      // 移除單一個案段落實體，將 PolylineEntity 寫入 Store
+      segments.forEach((seg) => {
+        removeEntity(seg.entityId);
+      });
+
+      addEntity(polylineEntity);
+      cancelDrawing();
+    },
+    [drawSession, polySegments, currentEntities, removeEntity, addEntity, cancelDrawing]
+  );
 
   // 當工具切換時，將狀態徹底重置，並特別為鏡射工具初始化選取
   useEffect(() => {
@@ -632,6 +745,8 @@ export function useDrawMachine() {
         cancelDrawing();
       } else if ((e.key === 'm' || e.key === 'M') && currentTool === 'POLYLINE') {
         togglePolylineMode();
+      } else if (e.key === 'Enter' && currentTool === 'POLYLINE') {
+        finishPolyline(false);
       } else if (e.key === 'Enter' && currentTool === 'MIRROR') {
         if (mirrorStep === 'PICK_SOURCE') {
           setMirrorStep('PICK_AXIS');
@@ -660,8 +775,18 @@ export function useDrawMachine() {
     };
 
     window.addEventListener('keydown', handleKeyDown);
+
+    const handlePolylineKeypress = (e: Event) => {
+      const customEvent = e as CustomEvent<{ key: string }>;
+      if (customEvent.detail && (customEvent.detail.key === 'enter' || customEvent.detail.key === 'return')) {
+        finishPolyline(false);
+      }
+    };
+    window.addEventListener('cad-polyline-keypress', handlePolylineKeypress);
+
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('cad-polyline-keypress', handlePolylineKeypress);
     };
   }, [
     cancelDrawing,
@@ -945,8 +1070,18 @@ export function useDrawMachine() {
         updateDragDimensionText(worldPt);
         return;
       }
-
+      
       const res = resolveEffectiveCursor(worldPt, scale);
+      
+      if (dragVertexInfo) {
+        updateDragVertex(res.point);
+        // Also update snapping states so the UI shows the snap marker
+        setCurrentSnap(res.snap);
+        setOtrackGuideLines(res.otrackGuideLines);
+        setPolarTracking(res.polarTracking);
+        setPolarExtensionIntersection(res.polarExtensionIntersection || null);
+        return;
+      }
 
       setCurrentSnap(res.snap);
       setOtrackGuideLines(res.otrackGuideLines);
@@ -1504,6 +1639,7 @@ export function useDrawMachine() {
           }
 
           let newEntityId = '';
+          let newSegs: Array<{ entityId: string; endPt: Point2D; type: 'line' | 'arc' }> = [];
 
           if (polylineMode === 'ARC' && arcData) {
             const newArc: ArcEntity = {
@@ -1522,7 +1658,8 @@ export function useDrawMachine() {
 
             const newTangent = getSegmentEndTangent(newArc, arcData.isStartPointMatchingPStart);
             setLastTangentDir(newTangent);
-            setPolySegments((prev) => [...prev, { entityId: newArc.id, endPt: actualEndPt, type: 'arc' }]);
+            newSegs = [...polySegments, { entityId: newArc.id, endPt: actualEndPt, type: 'arc' }];
+            setPolySegments(newSegs);
           } else {
             // Default to LINE
             const newLine: LineEntity = {
@@ -1539,7 +1676,8 @@ export function useDrawMachine() {
 
             const newTangent = getSegmentEndTangent(newLine);
             setLastTangentDir(newTangent);
-            setPolySegments((prev) => [...prev, { entityId: newLine.id, endPt: actualEndPt, type: 'line' }]);
+            newSegs = [...polySegments, { entityId: newLine.id, endPt: actualEndPt, type: 'line' }];
+            setPolySegments(newSegs);
 
             if (res.inferredConstraint) {
               addConstraint({
@@ -1636,7 +1774,7 @@ export function useDrawMachine() {
               entityIds: [newEntityId, firstEntityId],
               pointIndices: [newEndIndex, 0],
             });
-            cancelDrawing();
+            finishPolyline(true, newSegs);
             return;
           }
 
@@ -1646,6 +1784,7 @@ export function useDrawMachine() {
             currentCursor: actualEndPt,
             step: 1,
             inferredConstraint: null,
+            polySegments: newSegs,
           });
           setStartSnap(res.snap);
         }
@@ -2794,7 +2933,17 @@ export function useDrawMachine() {
 
         const newTangent = getSegmentEndTangent(newLine);
         setLastTangentDir(newTangent);
-        setPolySegments((prev) => [...prev, { entityId: newLine.id, endPt: exactEndPt, type: 'line' }]);
+        const newSegs = [...polySegments, { entityId: newLine.id, endPt: exactEndPt, type: 'line' }];
+        setPolySegments(newSegs);
+        setDrawSession((prev) => ({
+          ...prev,
+          isDrawing: true,
+          startPoint: exactEndPt,
+          currentCursor: exactEndPt,
+          step: 1,
+          inferredConstraint: null,
+          polySegments: newSegs,
+        }));
 
         let inferred: 'horizontal' | 'vertical' | null = null;
         if (Math.abs(u.y) < 1e-5) {
@@ -3055,5 +3204,9 @@ export function useDrawMachine() {
     startDragDimensionText,
     updateDragDimensionText,
     endDragDimensionText,
+    // Drag vertex exports
+    isDraggingVertex: !!dragVertexInfo,
+    startDragVertex,
+    endDragVertex,
   };
 }

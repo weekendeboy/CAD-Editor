@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { useCADStore } from '../store/cadStore';
 import { useViewport } from '../hooks/useViewport';
 import { CADGrid } from './CADGrid';
@@ -16,6 +16,8 @@ import { createChamfer } from '../core/2d/ChamferManager';
 import { isAngleOnArc } from '../core/2d/IntersectionEngine';
 import { CircularArrayPanel } from './CircularArrayPanel';
 import { RectangularArrayPanel } from './RectangularArrayPanel';
+import { GripRenderer } from './GripRenderer';
+import { EntityGrip, applyGripDrag } from '../core/2d/GripManager';
 
 // 輔助函式：計算點到線段的最短距離
 function getDistanceToLineSegment(p: Point2D, sStart: Point2D, sEnd: Point2D): number {
@@ -77,6 +79,12 @@ export const CADSketchCanvas: React.FC = () => {
   const [boxSelectStart, setBoxSelectStart] = useState<Point2D | null>(null);
   const [boxSelectCurrent, setBoxSelectCurrent] = useState<Point2D | null>(null);
 
+  // 夾點拖曳狀態 (Grip Editing State)
+  const [activeGrip, setActiveGrip] = useState<{
+    grip: EntityGrip;
+    originalEntity: CADEntity2D;
+  } | null>(null);
+
   // 尺寸編輯狀態
   const [editingDimension, setEditingDimension] = useState<{
     dimension: Dimension;
@@ -98,6 +106,7 @@ export const CADSketchCanvas: React.FC = () => {
     selectEntity,
     clearSelection,
     updateConstraintValue,
+    updateEntity,
     orthoEnabled,
     polarTrackingEnabled,
     polarAngleStep,
@@ -188,6 +197,9 @@ export const CADSketchCanvas: React.FC = () => {
     isDraggingDimText,
     startDragDimensionText,
     endDragDimensionText,
+    isDraggingVertex,
+    startDragVertex,
+    endDragVertex,
   } = useDrawMachine();
 
   // Dynamic DDE / HUD states
@@ -202,6 +214,13 @@ export const CADSketchCanvas: React.FC = () => {
       setIsHudFocused(false);
     }
   }, [drawSession.isDrawing]);
+
+  // 切換工具時自動清除 activeGrip 狀態
+  useEffect(() => {
+    if (currentTool !== 'SELECT') {
+      setActiveGrip(null);
+    }
+  }, [currentTool]);
 
   // Global keydown interception to capture numbers and dot keys
   useEffect(() => {
@@ -220,7 +239,6 @@ export const CADSketchCanvas: React.FC = () => {
         (currentTool === 'LINE' || currentTool === 'POLYLINE' || currentTool === 'CIRCLE' || currentTool === 'POLYGON' || currentTool === 'MOVE' || currentTool === 'COPY' || currentTool === 'SCALE' || currentTool === 'ROTATE') &&
         drawSession.isDrawing
       ) {
-        // Intercept digit keys 0-9, period '.', and minus '-'
         if (/^[0-9.-]$/.test(e.key)) {
           e.preventDefault();
           setHudInputLength(e.key);
@@ -260,7 +278,6 @@ export const CADSketchCanvas: React.FC = () => {
   const handleEditDimension = useCallback((dim: Dimension) => {
     if (!dim.constraintId) return;
     
-    // 找出對應的約束，讀取目前數值
     const sketch = document.featureTree.find(
       (f) => f.id === activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
@@ -274,7 +291,6 @@ export const CADSketchCanvas: React.FC = () => {
           : Math.hypot((dim.points[1]?.x || dim.points[0].x + 10) - dim.points[0].x, (dim.points[1]?.y || dim.points[0].y) - dim.points[0].y)
         );
 
-    // 計算文字的螢幕座標位置
     const screenPt = worldToScreen(dim.textPosition);
 
     setEditingDimension({
@@ -313,7 +329,7 @@ export const CADSketchCanvas: React.FC = () => {
     return () => observer.disconnect();
   }, []);
 
-  // 執行矩形陣列生成：讀取來源圖元與 Store 參數並套用變異
+  // 執行矩形陣列生成
   const executeRectArray = useCallback(() => {
     if (rectArraySourceIds.length === 0) return;
     const {
@@ -327,7 +343,55 @@ export const CADSketchCanvas: React.FC = () => {
     cancelDrawing();
   }, [rectArraySourceIds, cancelDrawing]);
 
-  // 處理滑鼠移動時更新世界座標與繪圖狀態 (包含 scale 以進行鎖點計算)
+  // 取得目前草圖內的 entities, profiles, constraints, dimensions 與 solverState
+  let rawEntities: CADEntity2D[] = [];
+  let currentProfiles: any[] = [];
+  let currentConstraints: any[] = [];
+  let currentDimensions: any[] = [];
+  let currentSolverState: any = 'UnderDefined';
+  if (activeSketchId) {
+    const sketch = document.featureTree.find(
+      (f) => f.id === activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+    if (sketch) {
+      rawEntities = sketch.entities;
+      currentProfiles = sketch.profiles || [];
+      currentConstraints = sketch.constraints || [];
+      currentDimensions = sketch.dimensions || [];
+      currentSolverState = sketch.solverState;
+    }
+  }
+
+  // 處理夾點熱點按壓事件 (handleGripPointerDown)
+  const handleGripPointerDown = useCallback(
+    (grip: EntityGrip, e: React.PointerEvent) => {
+      e.stopPropagation();
+      const entity = rawEntities.find((ent) => ent.id === grip.entityId);
+      if (entity) {
+        setActiveGrip({
+          grip,
+          originalEntity: JSON.parse(JSON.stringify(entity)),
+        });
+      }
+    },
+    [rawEntities]
+  );
+
+  // 依據 activeGrip 計算 60 FPS 即時動態變形後的 currentEntities
+  const currentEntities = useMemo(() => {
+    if (!activeGrip) return rawEntities;
+    const currentPt = currentSnap ? currentSnap.point : mouseWorldPos;
+    const draggedEntity = applyGripDrag(
+      activeGrip.originalEntity,
+      activeGrip.grip,
+      currentPt
+    );
+    return rawEntities.map((ent) =>
+      ent.id === activeGrip.grip.entityId ? draggedEntity : ent
+    );
+  }, [rawEntities, activeGrip, currentSnap, mouseWorldPos]);
+
+  // 處理滑鼠移動時更新世界座標與繪圖狀態
   const handlePointerMove = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       viewportHandlers.onPointerMove(e);
@@ -343,32 +407,21 @@ export const CADSketchCanvas: React.FC = () => {
       setMouseWorldPos(worldPt);
       handleDrawPointerMove(worldPt, scale);
 
-      // 若正在框選，更新目前世界座標
+      if (activeGrip) {
+        // 夾點拖曳中：已由 currentEntities 即時計算動態形變，阻斷框選邏輯
+        if (boxSelectStart) {
+          setBoxSelectStart(null);
+          setBoxSelectCurrent(null);
+        }
+        return;
+      }
+
       if (boxSelectStart) {
         setBoxSelectCurrent(worldPt);
       }
     },
-    [viewportHandlers, screenToWorld, handleDrawPointerMove, scale, boxSelectStart]
+    [viewportHandlers, screenToWorld, handleDrawPointerMove, scale, boxSelectStart, activeGrip]
   );
-
-  // 取得目前草圖內的 entities, profiles, constraints, dimensions 與 solverState
-  let currentEntities: any[] = [];
-  let currentProfiles: any[] = [];
-  let currentConstraints: any[] = [];
-  let currentDimensions: any[] = [];
-  let currentSolverState: any = 'UnderDefined';
-  if (activeSketchId) {
-    const sketch = document.featureTree.find(
-      (f) => f.id === activeSketchId && f.type === 'SKETCH'
-    ) as SketchFeature | undefined;
-    if (sketch) {
-      currentEntities = sketch.entities;
-      currentProfiles = sketch.profiles || [];
-      currentConstraints = sketch.constraints || [];
-      currentDimensions = sketch.dimensions || [];
-      currentSolverState = sketch.solverState;
-    }
-  }
 
   // 計算向內偏移半徑錯誤狀態
   const getOffsetRadiusError = () => {
@@ -376,7 +429,6 @@ export const CADSketchCanvas: React.FC = () => {
     const targetEntity = currentEntities.find((e) => e.id === offsetTargetId);
     if (!targetEntity || (targetEntity.type !== 'circle' && targetEntity.type !== 'arc')) return null;
 
-    // 計算滑鼠到圓心/弧心的距離，以判斷是否在內側 (向內偏移)
     const dist = Math.hypot(mouseWorldPos.x - targetEntity.center.x, mouseWorldPos.y - targetEntity.center.y);
     if (dist < targetEntity.radius && offsetDistance >= targetEntity.radius) {
       return 'Offset distance exceeds radius!';
@@ -390,7 +442,6 @@ export const CADSketchCanvas: React.FC = () => {
     (e: React.PointerEvent<HTMLDivElement>) => {
       viewportHandlers.onPointerDown(e);
       
-      // 僅左鍵點擊 (button 0) 才觸發繪圖或框選事件
       if (e.button === 0) {
         if (!containerRef.current) return;
         const rect = containerRef.current.getBoundingClientRect();
@@ -401,17 +452,70 @@ export const CADSketchCanvas: React.FC = () => {
         const worldPt = screenToWorld(screenPt);
 
         if (currentTool === 'SELECT') {
-          // 若點擊在空白背景處（未直接選中圖元），記錄框選起始點與當前點
+          // Check if dragging a vertex
+          const hitThreshold = 12 / scale;
+          let hitVertex: { entityId: string; pointIndex: number } | null = null;
+          
+          for (const entity of currentEntities) {
+            if (entity.locked) continue;
+            if (entity.type === 'line') {
+              if (Math.hypot(worldPt.x - entity.start.x, worldPt.y - entity.start.y) < hitThreshold) {
+                hitVertex = { entityId: entity.id, pointIndex: 0 };
+                break;
+              }
+              if (Math.hypot(worldPt.x - entity.end.x, worldPt.y - entity.end.y) < hitThreshold) {
+                hitVertex = { entityId: entity.id, pointIndex: 1 };
+                break;
+              }
+            } else if (entity.type === 'circle') {
+              if (Math.hypot(worldPt.x - entity.center.x, worldPt.y - entity.center.y) < hitThreshold) {
+                hitVertex = { entityId: entity.id, pointIndex: 0 };
+                break;
+              }
+              const distCenter = Math.hypot(worldPt.x - entity.center.x, worldPt.y - entity.center.y);
+              if (Math.abs(distCenter - entity.radius) < hitThreshold) {
+                hitVertex = { entityId: entity.id, pointIndex: 1 };
+                break;
+              }
+            } else if (entity.type === 'arc') {
+              const startPt = { x: entity.center.x + entity.radius * Math.cos(entity.startAngle), y: entity.center.y + entity.radius * Math.sin(entity.startAngle) };
+              const endPt = { x: entity.center.x + entity.radius * Math.cos(entity.endAngle), y: entity.center.y + entity.radius * Math.sin(entity.endAngle) };
+              if (Math.hypot(worldPt.x - startPt.x, worldPt.y - startPt.y) < hitThreshold) {
+                hitVertex = { entityId: entity.id, pointIndex: 0 };
+                break;
+              }
+              if (Math.hypot(worldPt.x - endPt.x, worldPt.y - endPt.y) < hitThreshold) {
+                hitVertex = { entityId: entity.id, pointIndex: 1 };
+                break;
+              }
+              if (Math.hypot(worldPt.x - entity.center.x, worldPt.y - entity.center.y) < hitThreshold) {
+                hitVertex = { entityId: entity.id, pointIndex: 2 };
+                break;
+              }
+            } else if (entity.type === 'polyline') {
+              for (let i = 0; i < entity.points.length; i++) {
+                if (Math.hypot(worldPt.x - entity.points[i].x, worldPt.y - entity.points[i].y) < hitThreshold) {
+                  hitVertex = { entityId: entity.id, pointIndex: i };
+                  break;
+                }
+              }
+              if (hitVertex) break;
+            }
+          }
+
+          if (hitVertex) {
+            startDragVertex(hitVertex.entityId, hitVertex.pointIndex, worldPt);
+            return;
+          }
+
           if (!(e.target as HTMLElement).closest('.cad-entity')) {
             setBoxSelectStart(worldPt);
             setBoxSelectCurrent(worldPt);
-            // 若未按住 Shift 鍵，先呼叫 clearSelection() 清空已選圖元
             if (!e.shiftKey) {
               clearSelection();
             }
           }
         } else if (currentTool === 'FILLET') {
-          // Fillet 工具的防呆與邊界驗證
           const clickPt = currentSnap ? currentSnap.point : worldPt;
           const threshold = 15 / scale;
           let closestEntity: any = null;
@@ -436,7 +540,6 @@ export const CADSketchCanvas: React.FC = () => {
               if (firstEnt && (firstEnt.type === 'line' || firstEnt.type === 'arc')) {
                 const filletResult = createFillet(firstEnt, closestEntity, filletRadius);
                 if (!filletResult) {
-                  // 圓角半徑過大，阻斷並在狀態列顯示錯誤
                   setFilletError('Fillet radius too large or invalid geometry transition');
                   return;
                 }
@@ -445,7 +548,6 @@ export const CADSketchCanvas: React.FC = () => {
               handleCanvasClick(worldPt, scale);
             }
           } else {
-            // 點擊未命中任何線段/圓弧：明確攔截事件並提供清空選擇與取消提示，防止狀態穿透
             e.stopPropagation();
             if (filletFirstEntityId) {
               setFilletError('Selection cleared. Pick first line or arc again.');
@@ -455,7 +557,6 @@ export const CADSketchCanvas: React.FC = () => {
             }
           }
         } else if (currentTool === 'CHAMFER') {
-          // Chamfer 工具的防呆與邊界驗證
           const clickPt = currentSnap ? currentSnap.point : worldPt;
           const threshold = 15 / scale;
           let closestEntity: any = null;
@@ -480,7 +581,6 @@ export const CADSketchCanvas: React.FC = () => {
               if (firstEnt && firstEnt.type === 'line') {
                 const chamferResult = createChamfer(firstEnt, closestEntity, chamferDistance);
                 if (!chamferResult) {
-                  // 倒角距離過大或兩線平行，阻斷並在狀態列顯示錯誤
                   setChamferError('Chamfer distance too large or lines are parallel');
                   return;
                 }
@@ -489,7 +589,6 @@ export const CADSketchCanvas: React.FC = () => {
               handleCanvasClick(worldPt, scale);
             }
           } else {
-            // 點擊未命中任何直線：明確攔截事件並提供清空選擇與取消提示，防止狀態穿透
             e.stopPropagation();
             if (chamferFirstEntityId) {
               setChamferError('Selection cleared. Pick first line again.');
@@ -517,6 +616,7 @@ export const CADSketchCanvas: React.FC = () => {
       chamferFirstEntityId,
       chamferDistance,
       cancelDrawing,
+      startDragVertex,
     ]
   );
 
@@ -539,6 +639,27 @@ export const CADSketchCanvas: React.FC = () => {
     (e: React.PointerEvent<HTMLDivElement>) => {
       viewportHandlers.onPointerUp(e);
 
+      // 夾點拖曳放開處理 (Grip Editing Commit)
+      if (activeGrip) {
+        if (containerRef.current) {
+          const rect = containerRef.current.getBoundingClientRect();
+          const screenPt = {
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top,
+          };
+          const worldPt = screenToWorld(screenPt);
+          const finalPt = currentSnap ? currentSnap.point : worldPt;
+          const finalEntity = applyGripDrag(
+            activeGrip.originalEntity,
+            activeGrip.grip,
+            finalPt
+          );
+          updateEntity(finalEntity.id, finalEntity);
+        }
+        setActiveGrip(null);
+        return;
+      }
+
       if (isDraggingDimText) {
         if (containerRef.current) {
           const rect = containerRef.current.getBoundingClientRect();
@@ -554,6 +675,22 @@ export const CADSketchCanvas: React.FC = () => {
         return;
       }
 
+      if (isDraggingVertex) {
+        if (containerRef.current) {
+          const rect = containerRef.current.getBoundingClientRect();
+          const screenPt = {
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top,
+          };
+          const worldPt = screenToWorld(screenPt);
+          const finalPt = currentSnap ? currentSnap.point : worldPt;
+          endDragVertex(finalPt);
+        } else {
+          endDragVertex();
+        }
+        return;
+      }
+
       if (boxSelectStart) {
         if (!containerRef.current) return;
         const rect = containerRef.current.getBoundingClientRect();
@@ -563,16 +700,13 @@ export const CADSketchCanvas: React.FC = () => {
         };
         const worldPt = screenToWorld(screenPt);
 
-        // 計算世界座標包圍盒
         const minX = Math.min(boxSelectStart.x, worldPt.x);
         const maxX = Math.max(boxSelectStart.x, worldPt.x);
         const minY = Math.min(boxSelectStart.y, worldPt.y);
         const maxY = Math.max(boxSelectStart.y, worldPt.y);
 
-        // 判定拖曳方向
-        const isCrossing = worldPt.x < boxSelectStart.x; // 向左拉為 Crossing 綠框；向右拉為 Window 藍框
+        const isCrossing = worldPt.x < boxSelectStart.x;
 
-        // 若框的寬度與高度皆大於 1 / scale（避免單擊誤觸）
         if (maxX - minX > 1 / scale && maxY - minY > 1 / scale) {
           const selectionBox: SelectionBox = {
             minX,
@@ -582,34 +716,85 @@ export const CADSketchCanvas: React.FC = () => {
             isCrossing,
           };
 
-          // 遍歷 currentEntities，篩選出符合條件的圖元
           const matchedEntities = currentEntities.filter((entity) =>
             isEntityInSelectionBox(entity, selectionBox)
           );
 
-          // 將命中的圖元 ID 加入 Zustand 的 selectEntity
           matchedEntities.forEach((entity) => {
             selectEntity(entity.id);
           });
         }
       }
 
-      // 清空框選狀態
       setBoxSelectStart(null);
       setBoxSelectCurrent(null);
     },
-    [viewportHandlers, isDraggingDimText, endDragDimensionText, boxSelectStart, screenToWorld, scale, currentEntities, selectEntity]
+    [
+      viewportHandlers,
+      activeGrip,
+      currentSnap,
+      updateEntity,
+      isDraggingDimText,
+      endDragDimensionText,
+      boxSelectStart,
+      screenToWorld,
+      scale,
+      currentEntities,
+      selectEntity,
+      isDraggingVertex,
+      endDragVertex,
+    ]
   );
 
   // 處理滑鼠取消事件
   const handlePointerCancel = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       viewportHandlers.onPointerCancel(e);
+      setActiveGrip(null);
       setBoxSelectStart(null);
       setBoxSelectCurrent(null);
     },
     [viewportHandlers]
   );
+
+  // 通用圖元預覽渲染輔助函式
+  const renderEntityPreview = (
+    entity: CADEntity2D,
+    key: string,
+    extraProps: React.SVGProps<SVGElement>
+  ) => {
+    if (entity.type === 'line') {
+      const start = worldToScreen(entity.start);
+      const end = worldToScreen(entity.end);
+      return <line key={key} x1={start.x} y1={start.y} x2={end.x} y2={end.y} {...(extraProps as any)} />;
+    } else if (entity.type === 'circle') {
+      const center = worldToScreen(entity.center);
+      return <circle key={key} cx={center.x} cy={center.y} r={entity.radius * scale} {...(extraProps as any)} />;
+    } else if (entity.type === 'arc') {
+      const worldStart = {
+        x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
+        y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
+      };
+      const worldEnd = {
+        x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
+        y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
+      };
+      const start = worldToScreen(worldStart);
+      const end = worldToScreen(worldEnd);
+      const screenRadius = entity.radius * scale;
+      let diff = entity.endAngle - entity.startAngle;
+      while (diff < 0) diff += 2 * Math.PI;
+      while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
+      const largeArcFlag = diff > Math.PI ? 1 : 0;
+      const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} 0 ${end.x} ${end.y}`;
+      return <path key={key} d={pathData} {...(extraProps as any)} />;
+    } else if (entity.type === 'polyline') {
+      const points = entity.points.map((pt) => worldToScreen(pt));
+      const pathData = points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ') + (entity.closed ? ' Z' : '');
+      return <path key={key} d={pathData} {...(extraProps as any)} />;
+    }
+    return null;
+  };
 
   // 格式化鎖點類型名稱
   const snapLabel = currentSnap
@@ -645,7 +830,7 @@ export const CADSketchCanvas: React.FC = () => {
           height={dimensions.height}
           style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
         >
-          {/* 封閉面渲染層 (置於線條與節點下方) */}
+          {/* 封閉面渲染層 */}
           <ProfileRenderer
             profiles={currentProfiles}
             worldToScreen={worldToScreen}
@@ -661,11 +846,12 @@ export const CADSketchCanvas: React.FC = () => {
               currentTool={currentTool}
             />
           </g>
-          {/* 約束視覺標記渲染層 (置於圖元渲染層上方) */}
+          {/* 約束視覺標記渲染層 */}
           <ConstraintBadgeRenderer
             constraints={currentConstraints}
             entities={currentEntities}
             worldToScreen={worldToScreen}
+            selectedEntityIds={selectedEntityIds}
           />
           {/* 尺寸標註渲染層 */}
           <g style={{ pointerEvents: 'all' }}>
@@ -684,20 +870,31 @@ export const CADSketchCanvas: React.FC = () => {
             worldToScreen={worldToScreen}
             scale={scale}
             dimSelectedCircleOrArc={dimSelectedCircleOrArc}
-            dimLine1={currentEntities.find(e => e.id === dimSelectedLineId) as any}
-            dimLine2={currentEntities.find(e => e.id === dimSelectedLineId2) as any}
+            dimLine1={currentEntities.find((e) => e.id === dimSelectedLineId) as any}
+            dimLine2={currentEntities.find((e) => e.id === dimSelectedLineId2) as any}
             polylineMode={polylineMode}
             lastTangentDir={lastTangentDir}
             movePreviewEntities={movePreviewEntities}
             scalePreviewEntities={scalePreviewEntities}
             rotatePreviewEntities={rotatePreviewEntities}
           />
-          {/* 疊加鎖點標記層 (地位於圖元與預覽層上方) */}
+
+          {/* 夾點渲染元件 (GripRenderer): 位於 Dimension/Rubberband 之上，SnapMarker 之下 */}
+          <GripRenderer
+            selectedEntities={currentEntities.filter((e) => selectedEntityIds.includes(e.id))}
+            activeGripId={activeGrip?.grip.id || null}
+            worldToScreen={worldToScreen}
+            onGripPointerDown={handleGripPointerDown}
+            currentTool={currentTool}
+          />
+
+          {/* 疊加鎖點標記層 */}
           <SnapMarker
             snap={currentSnap}
             worldToScreen={worldToScreen}
           />
-          {/* 固定點 (Fix Constraint) 標記層 (金黃色微型鎖頭圖示) */}
+
+          {/* 固定點 (Fix Constraint) 標記層 */}
           {currentConstraints
             .filter((c: any) => c.type === 'fix' && c.entityIds?.length > 0)
             .map((c: any) => {
@@ -724,9 +921,7 @@ export const CADSketchCanvas: React.FC = () => {
                   transform={`translate(${screenPt.x}, ${screenPt.y})`}
                   className="pointer-events-none select-none"
                 >
-                  {/* 背景微光圈 */}
                   <circle cx="0" cy="0" r="8" fill="#18181b" stroke="#eab308" strokeWidth="1.2" opacity="0.95" />
-                  {/* 鎖扣 (Lock Shackle) */}
                   <path
                     d="M -2.5 -1 L -2.5 -3.2 A 2.5 2.5 0 0 1 2.5 -3.2 L 2.5 -1"
                     fill="none"
@@ -734,7 +929,6 @@ export const CADSketchCanvas: React.FC = () => {
                     strokeWidth="1.2"
                     strokeLinecap="round"
                   />
-                  {/* 鎖身 (Lock Body) */}
                   <rect
                     x="-3.5"
                     y="-1"
@@ -743,974 +937,155 @@ export const CADSketchCanvas: React.FC = () => {
                     rx="1"
                     fill="#facc15"
                   />
-                  {/* 鎖孔 (Keyhole) */}
                   <circle cx="0" cy="1.6" r="0.6" fill="#18181b" />
                 </g>
               );
             })}
 
           {/* Extend 預覽高亮層 */}
-          {extendPreview && currentTool === 'EXTEND' && (() => {
-            const previewEntity = extendPreview.previewEntity;
-            const commonProps = {
-              stroke: '#10b981',
-              strokeWidth: 3,
-              strokeDasharray: '4,4',
-              fill: 'none',
-              className: 'cad-extend-preview',
-            };
-
-            if (previewEntity.type === 'line') {
-              const start = worldToScreen(previewEntity.start);
-              const end = worldToScreen(previewEntity.end);
-              return (
-                <line
-                  key={`extend-preview-${previewEntity.id}`}
-                  x1={start.x}
-                  y1={start.y}
-                  x2={end.x}
-                  y2={end.y}
-                  {...commonProps}
-                />
-              );
-            } else if (previewEntity.type === 'arc') {
-              const worldStart = {
-                x: previewEntity.center.x + previewEntity.radius * Math.cos(previewEntity.startAngle),
-                y: previewEntity.center.y + previewEntity.radius * Math.sin(previewEntity.startAngle),
-              };
-              const worldEnd = {
-                x: previewEntity.center.x + previewEntity.radius * Math.cos(previewEntity.endAngle),
-                y: previewEntity.center.y + previewEntity.radius * Math.sin(previewEntity.endAngle),
-              };
-
-              const start = worldToScreen(worldStart);
-              const end = worldToScreen(worldEnd);
-              const screenRadius = previewEntity.radius * scale;
-
-              let diff = previewEntity.endAngle - previewEntity.startAngle;
-              while (diff < 0) diff += 2 * Math.PI;
-              while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
-
-              const largeArcFlag = diff > Math.PI ? 1 : 0;
-              const sweepFlag = 0;
-
-              const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
-
-              return (
-                <path
-                  key={`extend-preview-${previewEntity.id}`}
-                  d={pathData}
-                  {...commonProps}
-                />
-              );
-            }
-            return null;
-          })()}
+          {extendPreview && currentTool === 'EXTEND' && renderEntityPreview(extendPreview.previewEntity, `extend-preview-${extendPreview.previewEntity.id}`, {
+            stroke: '#10b981',
+            strokeWidth: 3,
+            strokeDasharray: '4,4',
+            fill: 'none',
+            className: 'cad-extend-preview',
+          })}
 
           {/* Trim 預覽高亮層 */}
-          {trimPreviewEntity && currentTool === 'TRIM' && (() => {
-            const commonProps = {
-              stroke: '#ef4444',
-              strokeWidth: 3,
-              strokeDasharray: '4,4',
-              fill: 'none',
-              className: 'cad-trim-preview',
-            };
-
-            if (trimPreviewEntity.type === 'line') {
-              const start = worldToScreen(trimPreviewEntity.start);
-              const end = worldToScreen(trimPreviewEntity.end);
-              return (
-                <line
-                  key={trimPreviewEntity.id}
-                  x1={start.x}
-                  y1={start.y}
-                  x2={end.x}
-                  y2={end.y}
-                  {...commonProps}
-                />
-              );
-            } else if (trimPreviewEntity.type === 'arc') {
-              const worldStart = {
-                x: trimPreviewEntity.center.x + trimPreviewEntity.radius * Math.cos(trimPreviewEntity.startAngle),
-                y: trimPreviewEntity.center.y + trimPreviewEntity.radius * Math.sin(trimPreviewEntity.startAngle),
-              };
-              const worldEnd = {
-                x: trimPreviewEntity.center.x + trimPreviewEntity.radius * Math.cos(trimPreviewEntity.endAngle),
-                y: trimPreviewEntity.center.y + trimPreviewEntity.radius * Math.sin(trimPreviewEntity.endAngle),
-              };
-
-              const start = worldToScreen(worldStart);
-              const end = worldToScreen(worldEnd);
-              const screenRadius = trimPreviewEntity.radius * scale;
-
-              let diff = trimPreviewEntity.endAngle - trimPreviewEntity.startAngle;
-              while (diff < 0) diff += 2 * Math.PI;
-              while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
-
-              const largeArcFlag = diff > Math.PI ? 1 : 0;
-              const sweepFlag = 0;
-
-              const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
-
-              return (
-                <path
-                  key={trimPreviewEntity.id}
-                  d={pathData}
-                  {...commonProps}
-                />
-              );
-            }
-            return null;
-          })()}
+          {trimPreviewEntity && currentTool === 'TRIM' && renderEntityPreview(trimPreviewEntity, `trim-preview-${trimPreviewEntity.id}`, {
+            stroke: '#ef4444',
+            strokeWidth: 3,
+            strokeDasharray: '4,4',
+            fill: 'none',
+            className: 'cad-trim-preview',
+          })}
 
           {/* Offset 預覽高亮層 */}
-          {offsetPreviewEntity && currentTool === 'OFFSET' && (() => {
-            const commonProps = {
-              stroke: '#38bdf8',
-              strokeWidth: 2,
-              strokeDasharray: '5,5',
-              fill: 'none',
-              className: 'cad-offset-preview',
-            };
-
-            if (offsetPreviewEntity.type === 'line') {
-              const start = worldToScreen(offsetPreviewEntity.start);
-              const end = worldToScreen(offsetPreviewEntity.end);
-              return (
-                <line
-                  key={`offset-preview-${offsetPreviewEntity.id}`}
-                  x1={start.x}
-                  y1={start.y}
-                  x2={end.x}
-                  y2={end.y}
-                  {...commonProps}
-                />
-              );
-            } else if (offsetPreviewEntity.type === 'circle') {
-              const center = worldToScreen(offsetPreviewEntity.center);
-              return (
-                <circle
-                  key={`offset-preview-${offsetPreviewEntity.id}`}
-                  cx={center.x}
-                  cy={center.y}
-                  r={offsetPreviewEntity.radius * scale}
-                  {...commonProps}
-                />
-              );
-            } else if (offsetPreviewEntity.type === 'arc') {
-              const worldStart = {
-                x: offsetPreviewEntity.center.x + offsetPreviewEntity.radius * Math.cos(offsetPreviewEntity.startAngle),
-                y: offsetPreviewEntity.center.y + offsetPreviewEntity.radius * Math.sin(offsetPreviewEntity.startAngle),
-              };
-              const worldEnd = {
-                x: offsetPreviewEntity.center.x + offsetPreviewEntity.radius * Math.cos(offsetPreviewEntity.endAngle),
-                y: offsetPreviewEntity.center.y + offsetPreviewEntity.radius * Math.sin(offsetPreviewEntity.endAngle),
-              };
-
-              const start = worldToScreen(worldStart);
-              const end = worldToScreen(worldEnd);
-              const screenRadius = offsetPreviewEntity.radius * scale;
-
-              let diff = offsetPreviewEntity.endAngle - offsetPreviewEntity.startAngle;
-              while (diff < 0) diff += 2 * Math.PI;
-              while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
-
-              const largeArcFlag = diff > Math.PI ? 1 : 0;
-              const sweepFlag = 0;
-
-              const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
-
-              return (
-                <path
-                  key={`offset-preview-${offsetPreviewEntity.id}`}
-                  d={pathData}
-                  {...commonProps}
-                />
-              );
-            }
-            return null;
-          })()}
+          {offsetPreviewEntity && currentTool === 'OFFSET' && renderEntityPreview(offsetPreviewEntity, `offset-preview-${offsetPreviewEntity.id}`, {
+            stroke: '#38bdf8',
+            strokeWidth: 2,
+            strokeDasharray: '5,5',
+            fill: 'none',
+            className: 'cad-offset-preview',
+          })}
 
           {/* Fillet first entity yellow dashed overlay */}
           {filletFirstEntityId && (() => {
             const entity = currentEntities.find((e) => e.id === filletFirstEntityId);
             if (!entity) return null;
-
-            const commonOverlayProps = {
-              stroke: '#eab308', // yellow-500
+            return renderEntityPreview(entity, 'fillet-first-overlay', {
+              stroke: '#eab308',
               strokeWidth: 3.5,
               strokeDasharray: '6,4',
               fill: 'none',
-            };
-
-            if (entity.type === 'line') {
-              const start = worldToScreen(entity.start);
-              const end = worldToScreen(entity.end);
-              return (
-                <g key="fillet-first-entity-overlay">
-                  <line
-                    x1={start.x}
-                    y1={start.y}
-                    x2={end.x}
-                    y2={end.y}
-                    {...commonOverlayProps}
-                  />
-                  <text
-                    x={(start.x + end.x) / 2}
-                    y={(start.y + end.y) / 2 - 12}
-                    fill="#facc15" // yellow-400
-                    fontSize="12"
-                    fontFamily="monospace"
-                    textAnchor="middle"
-                    className="select-none pointer-events-none drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]"
-                  >
-                    已選中第一條圖元，請點選第二條圖元
-                  </text>
-                </g>
-              );
-            } else if (entity.type === 'arc') {
-              const worldStart = {
-                x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
-                y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
-              };
-              const worldEnd = {
-                x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
-                y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
-              };
-
-              const start = worldToScreen(worldStart);
-              const end = worldToScreen(worldEnd);
-              const screenRadius = entity.radius * scale;
-
-              let diff = entity.endAngle - entity.startAngle;
-              while (diff < 0) diff += 2 * Math.PI;
-              while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
-
-              const largeArcFlag = diff > Math.PI ? 1 : 0;
-              const sweepFlag = 0;
-
-              const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
-              const centerScreen = worldToScreen(entity.center);
-
-              return (
-                <g key="fillet-first-entity-overlay">
-                  <path d={pathData} {...commonOverlayProps} />
-                  <text
-                    x={centerScreen.x}
-                    y={centerScreen.y - 12}
-                    fill="#facc15" // yellow-400
-                    fontSize="12"
-                    fontFamily="monospace"
-                    textAnchor="middle"
-                    className="select-none pointer-events-none drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]"
-                  >
-                    已選中第一條圖元，請點選第二條圖元
-                  </text>
-                </g>
-              );
-            }
-            return null;
+            });
           })()}
 
           {/* Chamfer first entity purple dashed overlay */}
           {chamferFirstEntityId && (() => {
             const entity = currentEntities.find((e) => e.id === chamferFirstEntityId);
-            if (!entity || entity.type !== 'line') return null;
-
-            const commonOverlayProps = {
-              stroke: '#a855f7', // purple-500
+            if (!entity) return null;
+            return renderEntityPreview(entity, 'chamfer-first-overlay', {
+              stroke: '#a855f7',
               strokeWidth: 3.5,
               strokeDasharray: '6,4',
               fill: 'none',
-            };
-
-            const start = worldToScreen(entity.start);
-            const end = worldToScreen(entity.end);
-            return (
-              <g key="chamfer-first-entity-overlay">
-                <line
-                  x1={start.x}
-                  y1={start.y}
-                  x2={end.x}
-                  y2={end.y}
-                  {...commonOverlayProps}
-                />
-                <text
-                  x={(start.x + end.x) / 2}
-                  y={(start.y + end.y) / 2 - 12}
-                  fill="#c084fc" // purple-400
-                  fontSize="12"
-                  fontFamily="monospace"
-                  textAnchor="middle"
-                  className="select-none pointer-events-none drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]"
-                >
-                  已選中第一條圖元，請點選第二條直線圖元
-                </text>
-              </g>
-            );
+            });
           })()}
 
-          {/* Mirror 來源圖元加粗高亮 */}
-          {currentTool === 'MIRROR' && mirrorSourceIds.length > 0 && (() => {
-            return currentEntities
+          {/* Mirror 來源與預覽 */}
+          {currentTool === 'MIRROR' && mirrorSourceIds.length > 0 &&
+            currentEntities
               .filter((e) => mirrorSourceIds.includes(e.id))
-              .map((entity) => {
-                const commonProps = {
-                  stroke: '#c084fc', // purple-400
+              .map((entity) =>
+                renderEntityPreview(entity, `mirror-src-${entity.id}`, {
+                  stroke: '#c084fc',
                   strokeWidth: 5,
                   fill: 'none',
                   opacity: 0.6,
-                };
-
-                if (entity.type === 'line') {
-                  const start = worldToScreen(entity.start);
-                  const end = worldToScreen(entity.end);
-                  return (
-                    <line
-                      key={`mirror-source-${entity.id}`}
-                      x1={start.x}
-                      y1={start.y}
-                      x2={end.x}
-                      y2={end.y}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'circle') {
-                  const center = worldToScreen(entity.center);
-                  return (
-                    <circle
-                      key={`mirror-source-${entity.id}`}
-                      cx={center.x}
-                      cy={center.y}
-                      r={entity.radius * scale}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'arc') {
-                  const worldStart = {
-                    x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
-                    y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
-                  };
-                  const worldEnd = {
-                    x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
-                    y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
-                  };
-
-                  const start = worldToScreen(worldStart);
-                  const end = worldToScreen(worldEnd);
-                  const screenRadius = entity.radius * scale;
-
-                  let diff = entity.endAngle - entity.startAngle;
-                  while (diff < 0) diff += 2 * Math.PI;
-                  while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
-
-                  const largeArcFlag = diff > Math.PI ? 1 : 0;
-                  const sweepFlag = 0;
-
-                  const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
-
-                  return (
-                    <path
-                      key={`mirror-source-${entity.id}`}
-                      d={pathData}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'polyline') {
-                  const points = entity.points.map(pt => worldToScreen(pt));
-                  const pathData = points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ') + (entity.closed ? ' Z' : '');
-                  return (
-                    <path
-                      key={`mirror-source-${entity.id}`}
-                      d={pathData}
-                      {...commonProps}
-                    />
-                  );
-                }
-                return null;
-              });
-          })()}
-
-          {/* Mirror 預覽圖元 */}
-          {currentTool === 'MIRROR' && mirrorPreviewEntities && (() => {
-            return mirrorPreviewEntities.map((entity) => {
-              const commonProps = {
-                stroke: '#a855f7', // purple-500
+                })
+              )}
+          {currentTool === 'MIRROR' && mirrorPreviewEntities &&
+            mirrorPreviewEntities.map((entity) =>
+              renderEntityPreview(entity, `mirror-prev-${entity.id}`, {
+                stroke: '#a855f7',
                 strokeWidth: 2,
                 strokeDasharray: '4,4',
                 fill: 'none',
-              };
+              })
+            )}
 
-              if (entity.type === 'line') {
-                const start = worldToScreen(entity.start);
-                const end = worldToScreen(entity.end);
-                return (
-                  <line
-                    key={`mirror-preview-${entity.id}`}
-                    x1={start.x}
-                    y1={start.y}
-                    x2={end.x}
-                    y2={end.y}
-                    {...commonProps}
-                  />
-                );
-              } else if (entity.type === 'circle') {
-                const center = worldToScreen(entity.center);
-                return (
-                  <circle
-                    key={`mirror-preview-${entity.id}`}
-                    cx={center.x}
-                    cy={center.y}
-                    r={entity.radius * scale}
-                    {...commonProps}
-                  />
-                );
-              } else if (entity.type === 'arc') {
-                const worldStart = {
-                  x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
-                  y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
-                };
-                const worldEnd = {
-                  x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
-                  y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
-                };
-
-                const start = worldToScreen(worldStart);
-                const end = worldToScreen(worldEnd);
-                const screenRadius = entity.radius * scale;
-
-                let diff = entity.endAngle - entity.startAngle;
-                while (diff < 0) diff += 2 * Math.PI;
-                while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
-
-                const largeArcFlag = diff > Math.PI ? 1 : 0;
-                const sweepFlag = 0;
-
-                const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
-
-                return (
-                  <path
-                    key={`mirror-preview-${entity.id}`}
-                    d={pathData}
-                    {...commonProps}
-                  />
-                );
-              } else if (entity.type === 'polyline') {
-                const points = entity.points.map(pt => worldToScreen(pt));
-                const pathData = points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ') + (entity.closed ? ' Z' : '');
-                return (
-                  <path
-                    key={`mirror-preview-${entity.id}`}
-                    d={pathData}
-                    {...commonProps}
-                  />
-                );
-              }
-              return null;
-            });
-          })()}
-
-          {/* Move / Copy 來源圖元加粗高亮 */}
-          {(currentTool === 'MOVE' || currentTool === 'COPY') && moveSourceIds.length > 0 && (() => {
-            const isCopy = currentTool === 'COPY';
-            const highlightColor = isCopy ? '#38bdf8' : '#f59e0b';
-            return currentEntities
+          {/* Move / Copy 來源 */}
+          {(currentTool === 'MOVE' || currentTool === 'COPY') && moveSourceIds.length > 0 &&
+            currentEntities
               .filter((e) => moveSourceIds.includes(e.id))
-              .map((entity) => {
-                const commonProps = {
-                  stroke: highlightColor,
+              .map((entity) =>
+                renderEntityPreview(entity, `move-src-${entity.id}`, {
+                  stroke: currentTool === 'COPY' ? '#38bdf8' : '#f59e0b',
                   strokeWidth: 4,
                   fill: 'none',
                   opacity: 0.6,
-                };
+                })
+              )}
 
-                if (entity.type === 'line') {
-                  const start = worldToScreen(entity.start);
-                  const end = worldToScreen(entity.end);
-                  return (
-                    <line
-                      key={`move-source-${entity.id}`}
-                      x1={start.x}
-                      y1={start.y}
-                      x2={end.x}
-                      y2={end.y}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'circle') {
-                  const center = worldToScreen(entity.center);
-                  return (
-                    <circle
-                      key={`move-source-${entity.id}`}
-                      cx={center.x}
-                      cy={center.y}
-                      r={entity.radius * scale}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'arc') {
-                  const worldStart = {
-                    x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
-                    y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
-                  };
-                  const worldEnd = {
-                    x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
-                    y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
-                  };
-
-                  const start = worldToScreen(worldStart);
-                  const end = worldToScreen(worldEnd);
-                  const screenRadius = entity.radius * scale;
-
-                  let diff = entity.endAngle - entity.startAngle;
-                  while (diff < 0) diff += 2 * Math.PI;
-                  while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
-
-                  const largeArcFlag = diff > Math.PI ? 1 : 0;
-                  const sweepFlag = 0;
-
-                  const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
-
-                  return (
-                    <path
-                      key={`move-source-${entity.id}`}
-                      d={pathData}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'polyline') {
-                  const points = entity.points.map((pt) => worldToScreen(pt));
-                  const pathData =
-                    points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ') +
-                    (entity.closed ? ' Z' : '');
-                  return (
-                    <path
-                      key={`move-source-${entity.id}`}
-                      d={pathData}
-                      {...commonProps}
-                    />
-                  );
-                }
-                return null;
-              });
-          })()}
-
-          {/* Rotate 來源圖元加粗高亮 */}
-          {currentTool === 'ROTATE' && rotateSourceIds.length > 0 && (() => {
-            const highlightColor = '#38bdf8';
-            return currentEntities
+          {/* Rotate 來源 */}
+          {currentTool === 'ROTATE' && rotateSourceIds.length > 0 &&
+            currentEntities
               .filter((e) => rotateSourceIds.includes(e.id))
-              .map((entity) => {
-                const commonProps = {
-                  stroke: highlightColor,
+              .map((entity) =>
+                renderEntityPreview(entity, `rotate-src-${entity.id}`, {
+                  stroke: '#38bdf8',
                   strokeWidth: 4,
                   fill: 'none',
                   opacity: 0.6,
-                };
+                })
+              )}
 
-                if (entity.type === 'line') {
-                  const start = worldToScreen(entity.start);
-                  const end = worldToScreen(entity.end);
-                  return (
-                    <line
-                      key={`rotate-source-${entity.id}`}
-                      x1={start.x}
-                      y1={start.y}
-                      x2={end.x}
-                      y2={end.y}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'circle') {
-                  const center = worldToScreen(entity.center);
-                  return (
-                    <circle
-                      key={`rotate-source-${entity.id}`}
-                      cx={center.x}
-                      cy={center.y}
-                      r={entity.radius * scale}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'arc') {
-                  const worldStart = {
-                    x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
-                    y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
-                  };
-                  const worldEnd = {
-                    x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
-                    y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
-                  };
-
-                  const start = worldToScreen(worldStart);
-                  const end = worldToScreen(worldEnd);
-                  const screenRadius = entity.radius * scale;
-
-                  let diff = entity.endAngle - entity.startAngle;
-                  while (diff < 0) diff += 2 * Math.PI;
-                  while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
-
-                  const largeArcFlag = diff > Math.PI ? 1 : 0;
-                  const sweepFlag = 0;
-
-                  const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
-
-                  return (
-                    <path
-                      key={`rotate-source-${entity.id}`}
-                      d={pathData}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'polyline') {
-                  const points = entity.points.map((pt) => worldToScreen(pt));
-                  const pathData =
-                    points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ') +
-                    (entity.closed ? ' Z' : '');
-                  return (
-                    <path
-                      key={`rotate-source-${entity.id}`}
-                      d={pathData}
-                      {...commonProps}
-                    />
-                  );
-                }
-                return null;
-              });
-          })()}
-
-          {/* Circular Array 來源圖元加粗高亮 */}
-          {currentTool === 'CIRCULAR_ARRAY' && arraySourceIds.length > 0 && (() => {
-            const highlightColor = '#c084fc';
-            return currentEntities
+          {/* Circular Array 來源與預覽 */}
+          {currentTool === 'CIRCULAR_ARRAY' && arraySourceIds.length > 0 &&
+            currentEntities
               .filter((e) => arraySourceIds.includes(e.id))
-              .map((entity) => {
-                const commonProps = {
-                  stroke: highlightColor,
+              .map((entity) =>
+                renderEntityPreview(entity, `array-src-${entity.id}`, {
+                  stroke: '#c084fc',
                   strokeWidth: 4,
                   fill: 'none',
                   opacity: 0.7,
-                };
+                })
+              )}
+          {currentTool === 'CIRCULAR_ARRAY' && arrayPreviewEntities &&
+            arrayPreviewEntities.map((entity) =>
+              renderEntityPreview(entity, `array-prev-${entity.id}`, {
+                stroke: '#d8b4fe',
+                strokeWidth: 2,
+                strokeDasharray: '6,4',
+                fill: 'none',
+                opacity: 0.85,
+              })
+            )}
 
-                if (entity.type === 'line') {
-                  const start = worldToScreen(entity.start);
-                  const end = worldToScreen(entity.end);
-                  return (
-                    <line
-                      key={`array-source-${entity.id}`}
-                      x1={start.x}
-                      y1={start.y}
-                      x2={end.x}
-                      y2={end.y}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'circle') {
-                  const center = worldToScreen(entity.center);
-                  return (
-                    <circle
-                      key={`array-source-${entity.id}`}
-                      cx={center.x}
-                      cy={center.y}
-                      r={entity.radius * scale}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'arc') {
-                  const worldStart = {
-                    x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
-                    y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
-                  };
-                  const worldEnd = {
-                    x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
-                    y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
-                  };
-
-                  const start = worldToScreen(worldStart);
-                  const end = worldToScreen(worldEnd);
-                  const screenRadius = entity.radius * scale;
-
-                  let diff = entity.endAngle - entity.startAngle;
-                  while (diff < 0) diff += 2 * Math.PI;
-                  while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
-
-                  const largeArcFlag = diff > Math.PI ? 1 : 0;
-                  const sweepFlag = 0;
-
-                  const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
-
-                  return (
-                    <path
-                      key={`array-source-${entity.id}`}
-                      d={pathData}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'polyline') {
-                  const points = entity.points.map((pt) => worldToScreen(pt));
-                  const pathData =
-                    points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ') +
-                    (entity.closed ? ' Z' : '');
-                  return (
-                    <path
-                      key={`array-source-${entity.id}`}
-                      d={pathData}
-                      {...commonProps}
-                    />
-                  );
-                }
-                return null;
-              });
-          })()}
-
-          {/* Circular Array 即時分身動態預覽 */}
-          {currentTool === 'CIRCULAR_ARRAY' && arrayPreviewEntities && arrayPreviewEntities.length > 0 && (() => {
-            const previewProps = {
-              stroke: '#d8b4fe',
-              strokeWidth: 2,
-              strokeDasharray: '6,4',
-              fill: 'none',
-              opacity: 0.85,
-            };
-
-            return arrayPreviewEntities.map((entity) => {
-              if (entity.type === 'line') {
-                const start = worldToScreen(entity.start);
-                const end = worldToScreen(entity.end);
-                return (
-                  <line
-                    key={entity.id}
-                    x1={start.x}
-                    y1={start.y}
-                    x2={end.x}
-                    y2={end.y}
-                    {...previewProps}
-                  />
-                );
-              } else if (entity.type === 'circle') {
-                const center = worldToScreen(entity.center);
-                return (
-                  <circle
-                    key={entity.id}
-                    cx={center.x}
-                    cy={center.y}
-                    r={entity.radius * scale}
-                    {...previewProps}
-                  />
-                );
-              } else if (entity.type === 'arc') {
-                const worldStart = {
-                  x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
-                  y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
-                };
-                const worldEnd = {
-                  x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
-                  y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
-                };
-
-                const start = worldToScreen(worldStart);
-                const end = worldToScreen(worldEnd);
-                const screenRadius = entity.radius * scale;
-
-                let diff = entity.endAngle - entity.startAngle;
-                while (diff < 0) diff += 2 * Math.PI;
-                while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
-
-                const largeArcFlag = diff > Math.PI ? 1 : 0;
-                const sweepFlag = 0;
-
-                const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
-
-                return (
-                  <path
-                    key={entity.id}
-                    d={pathData}
-                    {...previewProps}
-                  />
-                );
-              } else if (entity.type === 'polyline') {
-                const points = entity.points.map((pt) => worldToScreen(pt));
-                const pathData =
-                  points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ') +
-                  (entity.closed ? ' Z' : '');
-                return (
-                  <path
-                    key={entity.id}
-                    d={pathData}
-                    {...previewProps}
-                  />
-                );
-              }
-              return null;
-            });
-          })()}
-
-          {/* Rectangular Array 來源選取外框高亮 */}
-          {currentTool === 'RECT_ARRAY' && rectArraySourceIds.length > 0 && (() => {
-            const highlightColor = '#60a5fa'; // blue-400
-            return currentEntities
+          {/* Rectangular Array 來源與預覽 */}
+          {currentTool === 'RECT_ARRAY' && rectArraySourceIds.length > 0 &&
+            currentEntities
               .filter((e) => rectArraySourceIds.includes(e.id))
-              .map((entity) => {
-                const commonProps = {
-                  stroke: highlightColor,
+              .map((entity) =>
+                renderEntityPreview(entity, `rect-src-${entity.id}`, {
+                  stroke: '#60a5fa',
                   strokeWidth: 4,
                   fill: 'none',
                   opacity: 0.75,
-                };
-
-                if (entity.type === 'line') {
-                  const start = worldToScreen(entity.start);
-                  const end = worldToScreen(entity.end);
-                  return (
-                    <line
-                      key={`rect-array-source-${entity.id}`}
-                      x1={start.x}
-                      y1={start.y}
-                      x2={end.x}
-                      y2={end.y}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'circle') {
-                  const center = worldToScreen(entity.center);
-                  return (
-                    <circle
-                      key={`rect-array-source-${entity.id}`}
-                      cx={center.x}
-                      cy={center.y}
-                      r={entity.radius * scale}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'arc') {
-                  const worldStart = {
-                    x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
-                    y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
-                  };
-                  const worldEnd = {
-                    x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
-                    y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
-                  };
-
-                  const start = worldToScreen(worldStart);
-                  const end = worldToScreen(worldEnd);
-                  const screenRadius = entity.radius * scale;
-
-                  let diff = entity.endAngle - entity.startAngle;
-                  while (diff < 0) diff += 2 * Math.PI;
-                  while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
-
-                  const largeArcFlag = diff > Math.PI ? 1 : 0;
-                  const sweepFlag = 0;
-
-                  const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
-
-                  return (
-                    <path
-                      key={`rect-array-source-${entity.id}`}
-                      d={pathData}
-                      {...commonProps}
-                    />
-                  );
-                } else if (entity.type === 'polyline') {
-                  const points = entity.points.map((pt) => worldToScreen(pt));
-                  const pathData =
-                    points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ') +
-                    (entity.closed ? ' Z' : '');
-                  return (
-                    <path
-                      key={`rect-array-source-${entity.id}`}
-                      d={pathData}
-                      {...commonProps}
-                    />
-                  );
-                }
-                return null;
-              });
-          })()}
-
-          {/* Rectangular Array 即時動態分身預覽 */}
-          {currentTool === 'RECT_ARRAY' && rectArrayPreviewEntities && rectArrayPreviewEntities.length > 0 && (() => {
-            const previewProps = {
-              stroke: '#60a5fa', // blue-400
-              strokeWidth: 2,
-              strokeDasharray: '6,4',
-              fill: 'none',
-              opacity: 0.85,
-            };
-
-            return rectArrayPreviewEntities.map((entity) => {
-              if (entity.type === 'line') {
-                const start = worldToScreen(entity.start);
-                const end = worldToScreen(entity.end);
-                return (
-                  <line
-                    key={entity.id}
-                    x1={start.x}
-                    y1={start.y}
-                    x2={end.x}
-                    y2={end.y}
-                    {...previewProps}
-                  />
-                );
-              } else if (entity.type === 'circle') {
-                const center = worldToScreen(entity.center);
-                return (
-                  <circle
-                    key={entity.id}
-                    cx={center.x}
-                    cy={center.y}
-                    r={entity.radius * scale}
-                    {...previewProps}
-                  />
-                );
-              } else if (entity.type === 'arc') {
-                const worldStart = {
-                  x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
-                  y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
-                };
-                const worldEnd = {
-                  x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
-                  y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
-                };
-
-                const start = worldToScreen(worldStart);
-                const end = worldToScreen(worldEnd);
-                const screenRadius = entity.radius * scale;
-
-                let diff = entity.endAngle - entity.startAngle;
-                while (diff < 0) diff += 2 * Math.PI;
-                while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
-
-                const largeArcFlag = diff > Math.PI ? 1 : 0;
-                const sweepFlag = 0;
-
-                const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
-
-                return (
-                  <path
-                    key={entity.id}
-                    d={pathData}
-                    {...previewProps}
-                  />
-                );
-              } else if (entity.type === 'polyline') {
-                const points = entity.points.map((pt) => worldToScreen(pt));
-                const pathData =
-                  points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ') +
-                  (entity.closed ? ' Z' : '');
-                return (
-                  <path
-                    key={entity.id}
-                    d={pathData}
-                    {...previewProps}
-                  />
-                );
-              }
-              return null;
-            });
-          })()}
+                })
+              )}
+          {currentTool === 'RECT_ARRAY' && rectArrayPreviewEntities &&
+            rectArrayPreviewEntities.map((entity) =>
+              renderEntityPreview(entity, `rect-prev-${entity.id}`, {
+                stroke: '#60a5fa',
+                strokeWidth: 2,
+                strokeDasharray: '6,4',
+                fill: 'none',
+                opacity: 0.85,
+              })
+            )}
 
           {/* AutoCAD 框選矩形預覽 */}
           {boxSelectStart && boxSelectCurrent && (() => {
@@ -1759,7 +1134,7 @@ export const CADSketchCanvas: React.FC = () => {
             );
           })()}
 
-          {/* Polar Extension Line (Green/Yellow dashed line connecting segment endpoint to intersection) */}
+          {/* Polar Extension Line */}
           {polarExtensionIntersection && (() => {
             const start = worldToScreen(polarExtensionIntersection.extensionRay.start);
             const end = worldToScreen(polarExtensionIntersection.extensionRay.end);
@@ -1769,7 +1144,7 @@ export const CADSketchCanvas: React.FC = () => {
                 y1={start.y}
                 x2={end.x}
                 y2={end.y}
-                stroke="#22c55e" // elegant green-500 line
+                stroke="#22c55e"
                 strokeDasharray="5,4"
                 strokeWidth={1.5}
                 className="pointer-events-none"
@@ -1777,7 +1152,7 @@ export const CADSketchCanvas: React.FC = () => {
             );
           })()}
 
-          {/* Object Tracking (OTrack) Guide Lines */}
+          {/* Object Tracking Guide Lines */}
           {otrackGuideLines.map((gl, idx) => {
             const start = worldToScreen(gl.anchor);
             const end = worldToScreen(gl.targetPoint);
@@ -1796,7 +1171,7 @@ export const CADSketchCanvas: React.FC = () => {
             );
           })}
 
-          {/* Object Tracking (OTrack) Anchors */}
+          {/* Object Tracking Anchors */}
           {otrackAnchors.map((anchor) => {
             const screenPt = worldToScreen(anchor.point);
             return (
@@ -1893,8 +1268,6 @@ export const CADSketchCanvas: React.FC = () => {
           const midPointScreen = worldToScreen(midPointWorld);
           const currentRadius = Math.hypot(cursor.x - center.x, cursor.y - center.y);
 
-          // If focused: Prefix R:, Input has hudInputLength, MM suffix
-          // If NOT focused: input shows `R: ${currentRadius.toFixed(1)} mm` or similar
           const displayValue = isHudFocused 
             ? hudInputLength 
             : `R: ${currentRadius.toFixed(1)} mm`;
@@ -1960,7 +1333,7 @@ export const CADSketchCanvas: React.FC = () => {
           );
         })()}
 
-      {/* AutoCAD style Direct Scale Factor Entry (HUD Scale Factor Input) for SCALE */}
+      {/* AutoCAD style Direct Scale Factor Entry for SCALE */}
       {(currentTool === 'SCALE' &&
         drawSession.isDrawing &&
         drawSession.startPoint &&
@@ -2039,7 +1412,7 @@ export const CADSketchCanvas: React.FC = () => {
           );
         })()}
 
-      {/* AutoCAD style Direct Angle Entry (HUD Rotation Angle Input) for ROTATE */}
+      {/* AutoCAD style Direct Angle Entry for ROTATE */}
       {(currentTool === 'ROTATE' &&
         drawSession.isDrawing &&
         drawSession.startPoint &&
@@ -2425,7 +1798,7 @@ export const CADSketchCanvas: React.FC = () => {
         />
       )}
 
-      {/* AutoCAD 風格的黑色半透明狀態列 */}
+      {/* AutoCAD 風格狀態列 */}
       <div className="absolute bottom-0 right-0 m-4 px-4 py-2 bg-black bg-opacity-70 text-green-400 font-mono text-sm rounded pointer-events-none select-none flex gap-6 items-center">
         <div className={(filletError || chamferError || offsetRadiusError || polylineWarning) ? "text-red-400 font-bold animate-pulse" : ""}>
           {filletError
@@ -2436,6 +1809,8 @@ export const CADSketchCanvas: React.FC = () => {
             ? offsetRadiusError
             : polylineWarning
             ? polylineWarning
+            : activeGrip
+            ? `Grip Editing: Dragging ${activeGrip.grip.type} grip`
             : currentTool === 'TRIM'
             ? 'Trim: Click intersecting edge to cut'
             : currentTool === 'EXTEND'

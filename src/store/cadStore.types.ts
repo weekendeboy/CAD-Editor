@@ -1,4 +1,4 @@
-import { CADDocument, CADEntity2D, Constraint, Point2D } from '../types/cad';
+import { CADDocument, CADEntity2D, CADLayer, Constraint, Point2D } from '../types/cad';
 
 export type OsnapMode = 
   | 'endpoint' 
@@ -103,6 +103,7 @@ export interface CADState {
   clearSelection: () => void;
   addEntity: (entity: CADEntity2D) => void;
   importEntities: (entities: CADEntity2D[]) => void;
+  importDxfData: (entities: CADEntity2D[], layers: Record<string, CADLayer>) => void;
   removeEntity: (id: string) => void;
   updateEntity: (id: string, updates: Partial<CADEntity2D>) => void;
   toggleConstruction: (entityId: string) => void;
@@ -112,6 +113,9 @@ export interface CADState {
   updateDimensionPositionLive: (dimensionId: string, newPosition: Point2D) => void;
   removeConstraint: (constraintId: string) => void;
   updateConstraintValue: (constraintId: string, value: number) => void;
+  dragVertexStart: () => void;
+  dragVertexLive: (entityId: string, pointIndex: number, newPos: Point2D) => void;
+  dragVertexCommit: () => void;
   trimEntity: (entityId: string, clickPoint: Point2D) => void;
   extendEntity: (entityId: string, clickPoint: Point2D) => void;
   applyFillet: (entityId1: string, entityId2: string, radius: number) => void;

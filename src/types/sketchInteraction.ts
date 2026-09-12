@@ -8,6 +8,7 @@ export interface DrawSession {
   step: number;
   polylinePoints?: Point2D[];
   inferredConstraint?: 'horizontal' | 'vertical' | null;
+  polySegments?: Array<{ entityId: string; endPt: Point2D; type: 'line' | 'arc' }>;
 }
 
 export type PreviewEntity =

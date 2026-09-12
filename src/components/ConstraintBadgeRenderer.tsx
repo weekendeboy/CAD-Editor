@@ -6,6 +6,7 @@ interface ConstraintBadgeRendererProps {
   constraints: Constraint[];
   entities: CADEntity2D[];
   worldToScreen: (point: Point2D) => Point2D;
+  selectedEntityIds?: string[];
 }
 
 // Extracted point logic identical to solver for geometric correctness
@@ -108,6 +109,7 @@ export const ConstraintBadgeRenderer: React.FC<ConstraintBadgeRendererProps> = (
   constraints,
   entities,
   worldToScreen,
+  selectedEntityIds = [],
 }) => {
   const { removeConstraint } = useCADStore();
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -122,7 +124,19 @@ export const ConstraintBadgeRenderer: React.FC<ConstraintBadgeRendererProps> = (
     'coincident',
   ];
 
-  const filteredConstraints = constraints.filter((c) => allowedTypes.includes(c.type));
+  // 若 constraints 大於 50 個，基於效能考量，僅渲染目前選取圖元所關聯的約束徽章，若無選取則直接回傳 null
+  let targetConstraints = constraints;
+  if (constraints.length > 50) {
+    if (!selectedEntityIds || selectedEntityIds.length === 0) {
+      return null;
+    }
+    const selectedSet = new Set(selectedEntityIds);
+    targetConstraints = constraints.filter((c) =>
+      c.entityIds.some((id) => selectedSet.has(id))
+    );
+  }
+
+  const filteredConstraints = targetConstraints.filter((c) => allowedTypes.includes(c.type));
 
   const getConstraintSymbol = (type: string): string => {
     switch (type) {

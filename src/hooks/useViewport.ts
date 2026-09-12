@@ -121,10 +121,24 @@ export function useViewport({
   const zoomExtents = useCallback(
     (
       bbox: BoundingBox2D,
-      viewWidth: number,
-      viewHeight: number,
-      padding: number = 0
+      arg2?: number,
+      arg3?: number,
+      arg4?: number
     ) => {
+      let viewWidth = typeof window !== 'undefined' ? window.innerWidth : 1000;
+      let viewHeight = typeof window !== 'undefined' ? Math.max(1, window.innerHeight - 56) : 800;
+      let padding = 80;
+
+      if (typeof arg2 === 'number' && typeof arg3 === 'number') {
+        viewWidth = arg2;
+        viewHeight = arg3;
+        if (typeof arg4 === 'number') {
+          padding = arg4;
+        }
+      } else if (typeof arg2 === 'number') {
+        padding = arg2;
+      }
+
       const { pan: newPan, scale: newScale } = ViewportTransform.getZoomExtents(
         bbox,
         viewWidth,
@@ -144,22 +158,7 @@ export function useViewport({
       const customEvent = e as CustomEvent<CadZoomToBboxEventDetail>;
       if (customEvent.detail?.bbox) {
         const { bbox, padding } = customEvent.detail;
-        const viewWidth = window.innerWidth;
-        const viewHeight = Math.max(1, window.innerHeight - 56);
-        const effectivePadding = padding ?? 80;
-
-        const { pan: newPan, scale: newScale } = ViewportTransform.getZoomExtents(
-          bbox,
-          viewWidth,
-          viewHeight,
-          effectivePadding
-        );
-
-        // 安全防護：限制縮放比例介於 0.001 與 1000 之間
-        const clampedScale = Math.max(0.001, Math.min(1000, newScale));
-
-        setPan(newPan);
-        setScale(clampedScale);
+        zoomExtents(bbox, padding);
       }
     };
 
@@ -167,7 +166,7 @@ export function useViewport({
     return () => {
       window.removeEventListener('cad-zoom-to-bbox', handleZoomToBbox);
     };
-  }, []);
+  }, [zoomExtents]);
 
   return {
     pan,
