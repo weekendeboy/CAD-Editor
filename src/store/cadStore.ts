@@ -122,6 +122,38 @@ export const useCADStore = create<CADState>((set, get) => ({
   undoStack: [],
   redoStack: [],
 
+  addExtrudeFeature: (feature) => set((state) => {
+    const newFeature = {
+      ...feature,
+      id: 'extrude-' + Date.now().toString(),
+      type: 'EXTRUDE' as const,
+    };
+    
+    return {
+      ...pushUndoState(state),
+      document: {
+        ...state.document,
+        featureTree: [...state.document.featureTree, newFeature]
+      }
+    };
+  }),
+
+  updateExtrudeFeature: (id, updates) => set((state) => {
+    const featureIndex = state.document.featureTree.findIndex((f) => f.id === id && f.type === 'EXTRUDE');
+    if (featureIndex === -1) return state;
+
+    const newFeatureTree = [...state.document.featureTree];
+    newFeatureTree[featureIndex] = { ...newFeatureTree[featureIndex], ...updates } as any;
+
+    return {
+      ...pushUndoState(state),
+      document: {
+        ...state.document,
+        featureTree: newFeatureTree
+      }
+    };
+  }),
+
   setViewMode: (mode) => set({ viewMode: mode }),
   
   setTool: (tool) => set({ currentTool: tool }),

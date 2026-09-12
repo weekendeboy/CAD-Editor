@@ -216,9 +216,10 @@ export interface SketchFeature extends BaseFeatureNode {
 
 export interface ExtrudeFeature extends BaseFeatureNode {
   type: 'EXTRUDE';
-  sketchId: string;
-  depth: number;
-  operation: 'ADD' | 'CUT';
+  sketchId: string; // 依賴的 2D 草圖 ID
+  profileIds: string[]; // 指定要擠出的 SketchProfile ID 陣列 (若為空則擠出該草圖全剖面)
+  depth: number; // 擠出深度 (mm)
+  direction: 'normal' | 'reversed' | 'mid-plane';
 }
 
 export type FeatureNode = SketchFeature | ExtrudeFeature;

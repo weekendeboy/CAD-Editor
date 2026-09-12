@@ -1,4 +1,4 @@
-import { CADDocument, CADEntity2D, CADLayer, Constraint, Point2D } from '../types/cad';
+import { CADDocument, CADEntity2D, CADLayer, Constraint, Point2D, ExtrudeFeature } from '../types/cad';
 
 export type OsnapMode = 
   | 'endpoint' 
@@ -107,6 +107,9 @@ export interface CADState {
 
   undoStack: CADDocument[];
   redoStack: CADDocument[];
+
+  addExtrudeFeature: (feature: Omit<ExtrudeFeature, 'id' | 'type'>) => void;
+  updateExtrudeFeature: (id: string, updates: Partial<ExtrudeFeature>) => void;
 
   setViewMode: (mode: '2D' | '3D') => void;
   setTool: (tool: CADTool) => void;

@@ -7,6 +7,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useCADStore } from './store/cadStore';
 import { useCadShortcuts } from './hooks/useCadShortcuts';
 import { CADSketchCanvas } from './components/CADSketchCanvas';
+import CAD3DCanvas from './components/CAD3DCanvas';
 import { SketchFeature, BoundingBox2D, CADEntity2D } from './types/cad';
 import { OsnapSettingsModal } from './components/OsnapSettingsModal';
 import { PolarSettingsModal } from './components/PolarSettingsModal';
@@ -867,6 +868,19 @@ export default function App() {
             <span>Export DXF</span>
           </button>
 
+          {/* 2D/3D Toggle Button */}
+          <button
+            onClick={() => useCADStore.getState().setViewMode(viewMode === '2D' ? '3D' : '2D')}
+            className={`px-3 py-1 rounded text-xs font-semibold border transition-colors shadow-sm flex items-center gap-1.5 ${
+              viewMode === '3D'
+                ? 'bg-blue-600 hover:bg-blue-500 text-white border-blue-500'
+                : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border-neutral-700'
+            }`}
+            title="Toggle 2D/3D View"
+          >
+            {viewMode === '2D' ? 'Switch to 3D' : 'Switch to 2D'}
+          </button>
+
           <div className="flex items-center bg-neutral-900 px-3 py-1 rounded text-sm font-mono border border-neutral-800 text-neutral-300">
             <Maximize size={14} className="mr-2" />
             {viewMode} Mode
@@ -920,7 +934,22 @@ export default function App() {
           </div>
         )}
 
-        <CADSketchCanvas />
+        <div
+          className="absolute inset-0 w-full h-full"
+          style={
+            viewMode === '3D'
+              ? { opacity: 0.1, pointerEvents: 'none', zIndex: 1 }
+              : { opacity: 1, zIndex: 10 }
+          }
+        >
+          <CADSketchCanvas />
+        </div>
+        
+        {viewMode === '3D' && (
+          <div className="absolute inset-0 w-full h-full z-10">
+            <CAD3DCanvas />
+          </div>
+        )}
       </main>
       <OsnapSettingsModal />
       <PolarSettingsModal />
