@@ -17,7 +17,7 @@ import { isAngleOnArc } from '../core/2d/IntersectionEngine';
 import { CircularArrayPanel } from './CircularArrayPanel';
 import { RectangularArrayPanel } from './RectangularArrayPanel';
 import { GripRenderer } from './GripRenderer';
-import { EntityGrip, applyGripDrag } from '../core/2d/GripManager';
+import { EntityGrip, applyGripDrag, applyGripDragWithConstraints } from '../core/2d/GripManager';
 
 // 輔助函式：計算點到線段的最短距離
 function getDistanceToLineSegment(p: Point2D, sStart: Point2D, sEnd: Point2D): number {
@@ -107,6 +107,7 @@ export const CADSketchCanvas: React.FC = () => {
     clearSelection,
     updateConstraintValue,
     updateEntity,
+    updateEntities,
     orthoEnabled,
     polarTrackingEnabled,
     polarAngleStep,
@@ -197,9 +198,6 @@ export const CADSketchCanvas: React.FC = () => {
     isDraggingDimText,
     startDragDimensionText,
     endDragDimensionText,
-    isDraggingVertex,
-    startDragVertex,
-    endDragVertex,
   } = useDrawMachine();
 
   // Dynamic DDE / HUD states
@@ -381,15 +379,13 @@ export const CADSketchCanvas: React.FC = () => {
   const currentEntities = useMemo(() => {
     if (!activeGrip) return rawEntities;
     const currentPt = currentSnap ? currentSnap.point : mouseWorldPos;
-    const draggedEntity = applyGripDrag(
-      activeGrip.originalEntity,
-      activeGrip.grip,
+    return applyGripDragWithConstraints(
+      rawEntities,
+      currentConstraints,
+      activeGrip,
       currentPt
     );
-    return rawEntities.map((ent) =>
-      ent.id === activeGrip.grip.entityId ? draggedEntity : ent
-    );
-  }, [rawEntities, activeGrip, currentSnap, mouseWorldPos]);
+  }, [rawEntities, currentConstraints, activeGrip, currentSnap, mouseWorldPos]);
 
   // 處理滑鼠移動時更新世界座標與繪圖狀態
   const handlePointerMove = useCallback(
@@ -452,62 +448,6 @@ export const CADSketchCanvas: React.FC = () => {
         const worldPt = screenToWorld(screenPt);
 
         if (currentTool === 'SELECT') {
-          // Check if dragging a vertex
-          const hitThreshold = 12 / scale;
-          let hitVertex: { entityId: string; pointIndex: number } | null = null;
-          
-          for (const entity of currentEntities) {
-            if (entity.locked) continue;
-            if (entity.type === 'line') {
-              if (Math.hypot(worldPt.x - entity.start.x, worldPt.y - entity.start.y) < hitThreshold) {
-                hitVertex = { entityId: entity.id, pointIndex: 0 };
-                break;
-              }
-              if (Math.hypot(worldPt.x - entity.end.x, worldPt.y - entity.end.y) < hitThreshold) {
-                hitVertex = { entityId: entity.id, pointIndex: 1 };
-                break;
-              }
-            } else if (entity.type === 'circle') {
-              if (Math.hypot(worldPt.x - entity.center.x, worldPt.y - entity.center.y) < hitThreshold) {
-                hitVertex = { entityId: entity.id, pointIndex: 0 };
-                break;
-              }
-              const distCenter = Math.hypot(worldPt.x - entity.center.x, worldPt.y - entity.center.y);
-              if (Math.abs(distCenter - entity.radius) < hitThreshold) {
-                hitVertex = { entityId: entity.id, pointIndex: 1 };
-                break;
-              }
-            } else if (entity.type === 'arc') {
-              const startPt = { x: entity.center.x + entity.radius * Math.cos(entity.startAngle), y: entity.center.y + entity.radius * Math.sin(entity.startAngle) };
-              const endPt = { x: entity.center.x + entity.radius * Math.cos(entity.endAngle), y: entity.center.y + entity.radius * Math.sin(entity.endAngle) };
-              if (Math.hypot(worldPt.x - startPt.x, worldPt.y - startPt.y) < hitThreshold) {
-                hitVertex = { entityId: entity.id, pointIndex: 0 };
-                break;
-              }
-              if (Math.hypot(worldPt.x - endPt.x, worldPt.y - endPt.y) < hitThreshold) {
-                hitVertex = { entityId: entity.id, pointIndex: 1 };
-                break;
-              }
-              if (Math.hypot(worldPt.x - entity.center.x, worldPt.y - entity.center.y) < hitThreshold) {
-                hitVertex = { entityId: entity.id, pointIndex: 2 };
-                break;
-              }
-            } else if (entity.type === 'polyline') {
-              for (let i = 0; i < entity.points.length; i++) {
-                if (Math.hypot(worldPt.x - entity.points[i].x, worldPt.y - entity.points[i].y) < hitThreshold) {
-                  hitVertex = { entityId: entity.id, pointIndex: i };
-                  break;
-                }
-              }
-              if (hitVertex) break;
-            }
-          }
-
-          if (hitVertex) {
-            startDragVertex(hitVertex.entityId, hitVertex.pointIndex, worldPt);
-            return;
-          }
-
           if (!(e.target as HTMLElement).closest('.cad-entity')) {
             setBoxSelectStart(worldPt);
             setBoxSelectCurrent(worldPt);
@@ -616,7 +556,6 @@ export const CADSketchCanvas: React.FC = () => {
       chamferFirstEntityId,
       chamferDistance,
       cancelDrawing,
-      startDragVertex,
     ]
   );
 
@@ -649,12 +588,13 @@ export const CADSketchCanvas: React.FC = () => {
           };
           const worldPt = screenToWorld(screenPt);
           const finalPt = currentSnap ? currentSnap.point : worldPt;
-          const finalEntity = applyGripDrag(
-            activeGrip.originalEntity,
-            activeGrip.grip,
+          const finalEntities = applyGripDragWithConstraints(
+            rawEntities,
+            currentConstraints,
+            activeGrip,
             finalPt
           );
-          updateEntity(finalEntity.id, finalEntity);
+          updateEntities(finalEntities);
         }
         setActiveGrip(null);
         return;
@@ -671,22 +611,6 @@ export const CADSketchCanvas: React.FC = () => {
           endDragDimensionText(worldPt);
         } else {
           endDragDimensionText();
-        }
-        return;
-      }
-
-      if (isDraggingVertex) {
-        if (containerRef.current) {
-          const rect = containerRef.current.getBoundingClientRect();
-          const screenPt = {
-            x: e.clientX - rect.left,
-            y: e.clientY - rect.top,
-          };
-          const worldPt = screenToWorld(screenPt);
-          const finalPt = currentSnap ? currentSnap.point : worldPt;
-          endDragVertex(finalPt);
-        } else {
-          endDragVertex();
         }
         return;
       }
@@ -733,7 +657,9 @@ export const CADSketchCanvas: React.FC = () => {
       viewportHandlers,
       activeGrip,
       currentSnap,
-      updateEntity,
+      rawEntities,
+      currentConstraints,
+      updateEntities,
       isDraggingDimText,
       endDragDimensionText,
       boxSelectStart,
@@ -741,8 +667,6 @@ export const CADSketchCanvas: React.FC = () => {
       scale,
       currentEntities,
       selectEntity,
-      isDraggingVertex,
-      endDragVertex,
     ]
   );
 
@@ -879,14 +803,16 @@ export const CADSketchCanvas: React.FC = () => {
             rotatePreviewEntities={rotatePreviewEntities}
           />
 
-          {/* 夾點渲染元件 (GripRenderer): 位於 Dimension/Rubberband 之上，SnapMarker 之下 */}
-          <GripRenderer
-            selectedEntities={currentEntities.filter((e) => selectedEntityIds.includes(e.id))}
-            activeGripId={activeGrip?.grip.id || null}
-            worldToScreen={worldToScreen}
-            onGripPointerDown={handleGripPointerDown}
-            currentTool={currentTool}
-          />
+          {/* 夾點渲染元件 (GripRenderer): 包裹於 pointerEvents: 'all' 以防被父級阻斷 */}
+          <g style={{ pointerEvents: 'all' }}>
+            <GripRenderer
+              selectedEntities={currentEntities.filter((e) => selectedEntityIds.includes(e.id))}
+              activeGripId={activeGrip?.grip.id || null}
+              worldToScreen={worldToScreen}
+              onGripPointerDown={handleGripPointerDown}
+              currentTool={currentTool}
+            />
+          </g>
 
           {/* 疊加鎖點標記層 */}
           <SnapMarker

@@ -53,7 +53,7 @@ export const GripRenderer: React.FC<GripRendererProps> = React.memo(
     }
 
     return (
-      <g className="cad-grip-layer">
+      <g className="cad-grip-layer" style={{ pointerEvents: 'all' }}>
         {grips.map((grip) => {
           const screenPt = worldToScreen(grip.point);
           const isHot = activeGripId === grip.id;
@@ -75,23 +75,43 @@ export const GripRenderer: React.FC<GripRendererProps> = React.memo(
           }
 
           return (
-            <rect
+            <g
               key={grip.id}
-              x={screenPt.x - 4}
-              y={screenPt.y - 4}
-              width={8}
-              height={8}
-              fill={fill}
-              stroke={stroke}
-              strokeWidth={strokeWidth}
-              style={{ cursor: grip.cursorStyle || 'pointer' }}
+              className="cad-grip-item"
+              style={{ pointerEvents: 'all', cursor: grip.cursorStyle || 'pointer' }}
               onPointerEnter={() => setHoveredGripId(grip.id)}
               onPointerLeave={() => setHoveredGripId(null)}
               onPointerDown={(e) => {
                 e.stopPropagation();
+                const target = e.target as Element;
+                if (target && typeof target.setPointerCapture === 'function') {
+                  target.setPointerCapture(e.pointerId);
+                }
                 onGripPointerDown(grip, e);
               }}
-            />
+            >
+              {/* 隱形 Hitbox：尺寸 14x14px (x - 7, y - 7) */}
+              <rect
+                x={screenPt.x - 7}
+                y={screenPt.y - 7}
+                width={14}
+                height={14}
+                fill="transparent"
+                stroke="none"
+                style={{ pointerEvents: 'all' }}
+              />
+              {/* 可視方塊：尺寸 8x8px (x - 4, y - 4) */}
+              <rect
+                x={screenPt.x - 4}
+                y={screenPt.y - 4}
+                width={8}
+                height={8}
+                fill={fill}
+                stroke={stroke}
+                strokeWidth={strokeWidth}
+                style={{ pointerEvents: 'all' }}
+              />
+            </g>
           );
         })}
       </g>

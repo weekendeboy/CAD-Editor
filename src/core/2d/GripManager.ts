@@ -1,5 +1,6 @@
-import { CADEntity2D, Point2D } from '../../types/cad';
+import { CADEntity2D, Point2D, Constraint } from '../../types/cad';
 import { calculate3PointArc, normalizeAngle } from './GeometryMath';
+import { solveConstraints } from '../solver/ConstraintSolver';
 
 export type GripType =
   | 'line_start'
@@ -333,4 +334,86 @@ export function applyGripDrag(
   }
 
   return entity;
+}
+
+/**
+ * 結合約束求解器的夾點拖曳動態形變純函數 (applyGripDragWithConstraints)
+ *
+ * @param entities 目前草圖中的所有圖元陣列
+ * @param constraints 目前草圖中的約束條件陣列
+ * @param activeGrip 包含當前被拖曳夾點與其對應原始圖元的物件
+ * @param currentPt 當前游標的世界座標
+ * @returns 經過約束求解後最新的全圖元陣列
+ */
+export function applyGripDragWithConstraints(
+  entities: CADEntity2D[],
+  constraints: Constraint[],
+  activeGrip: { grip: EntityGrip; originalEntity: CADEntity2D },
+  currentPt: Point2D
+): CADEntity2D[] {
+  // 步驟 A：呼叫既有的 applyGripDrag 取得初步變形後的圖元 draggedEntity
+  const draggedEntity = applyGripDrag(
+    activeGrip.originalEntity,
+    activeGrip.grip,
+    currentPt
+  );
+
+  // 步驟 B：構建基礎工作圖元清單
+  const workingEntities = entities.map((ent) =>
+    ent.id === draggedEntity.id ? draggedEntity : ent
+  );
+
+  // 步驟 C：若草圖無約束（!constraints || constraints.length === 0），直接回傳 workingEntities
+  if (!constraints || constraints.length === 0) {
+    return workingEntities;
+  }
+
+  // 步驟 D：若草圖存在約束，依據當前夾點類型生成暫時性錨點約束（Temporary Fix Constraint）
+  const tempFixConstraints: Constraint[] = [];
+  const { grip } = activeGrip;
+
+  if (grip.type === 'line_start') {
+    tempFixConstraints.push({
+      id: '__temp_fix_start',
+      type: 'fix',
+      entityIds: [draggedEntity.id],
+      pointIndices: [0],
+    });
+  } else if (grip.type === 'line_end') {
+    tempFixConstraints.push({
+      id: '__temp_fix_end',
+      type: 'fix',
+      entityIds: [draggedEntity.id],
+      pointIndices: [1],
+    });
+  } else if (grip.type === 'line_mid') {
+    tempFixConstraints.push({
+      id: '__temp_fix_start',
+      type: 'fix',
+      entityIds: [draggedEntity.id],
+      pointIndices: [0],
+    });
+    tempFixConstraints.push({
+      id: '__temp_fix_end',
+      type: 'fix',
+      entityIds: [draggedEntity.id],
+      pointIndices: [1],
+    });
+  } else if (grip.type === 'circle_center' || grip.type === 'arc_center') {
+    tempFixConstraints.push({
+      id: '__temp_fix_center',
+      type: 'fix',
+      entityIds: [draggedEntity.id],
+      pointIndices: [0],
+    });
+  }
+
+  // 步驟 E：呼叫 solveConstraints 求解
+  const result = solveConstraints(workingEntities, [
+    ...constraints,
+    ...tempFixConstraints,
+  ]);
+
+  // 步驟 F：回傳 result.entities
+  return result.entities;
 }

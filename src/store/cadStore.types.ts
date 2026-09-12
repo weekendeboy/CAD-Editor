@@ -106,6 +106,7 @@ export interface CADState {
   importDxfData: (entities: CADEntity2D[], layers: Record<string, CADLayer>) => void;
   removeEntity: (id: string) => void;
   updateEntity: (id: string, updates: Partial<CADEntity2D>) => void;
+  updateEntities: (entities: CADEntity2D[]) => void;
   toggleConstruction: (entityId: string) => void;
   addConstraint: (constraint: Constraint) => void;
   addDimension: (dimension: any, constraint: Constraint) => void;
