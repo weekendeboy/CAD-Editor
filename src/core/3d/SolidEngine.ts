@@ -44,7 +44,16 @@ class SolidEngine {
 
   public async init(): Promise<void> {
     if (!this.initPromise) {
-      this.initPromise = this.dispatch<void>('INIT');
+      this.initPromise = (async () => {
+        // Fetch the WASM binary on the main thread to ensure proper cookie handling and origin context
+        const response = await fetch('/occ/opencascade.wasm.wasm');
+        if (!response.ok) {
+           throw new Error(`Failed to fetch WASM binary: ${response.status} ${response.statusText}`);
+        }
+        const wasmBuffer = await response.arrayBuffer();
+        
+        await this.dispatch<void>('INIT', { wasmBuffer }, [wasmBuffer]);
+      })();
     }
     return this.initPromise;
   }
@@ -54,9 +63,9 @@ class SolidEngine {
     return this.dispatch<ExtrudeProfileResponseData>('EXTRUDE_PROFILE', { profile, depth });
   }
 
-  public async exportSTEP(): Promise<string> {
+  public async exportSTEP(unit: 'mm' | 'inch' = 'mm'): Promise<string> {
     await this.init();
-    return this.dispatch<string>('EXPORT_STEP');
+    return this.dispatch<string>('EXPORT_STEP', { unit });
   }
 
   public async exportSTL(): Promise<Uint8Array> {

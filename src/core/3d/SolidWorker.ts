@@ -5,20 +5,32 @@ import type { SketchProfile, ProfileSegment } from '../../types/cad';
 let oc: any = null;
 let currentSolid: any = null; // Store the current solid for exporting
 
-async function initWorker() {
+async function initWorker(wasmBuffer?: ArrayBuffer) {
   if (!oc) {
+    if (wasmBuffer) {
+      (self as any).opencascade = {
+        wasmBinary: wasmBuffer
+      };
+    } else {
+      // Fallback if not provided
+      (self as any).opencascade = {
+        locateFile: (path: string, prefix: string) => {
+          return new URL(`/occ/${path}`, self.location.origin).href;
+        }
+      };
+    }
+    
     if (typeof (self as any).importScripts === 'function') {
       (self as any).importScripts('/occ/opencascade.wasm.js');
-      oc = await (self as any).initOpenCascade();
+      // The script will have picked up self.opencascade during its synchronous execution
+      oc = await (self as any).initOpenCascade((self as any).opencascade);
     } else {
       // Fallback for some module workers (though importScripts might not exist)
-      // Actually, if we use classic worker, importScripts is available.
-      // Or we can fetch and eval it.
       const response = await fetch('/occ/opencascade.wasm.js');
       const text = await response.text();
       // eslint-disable-next-line no-eval
       eval(text);
-      oc = await (self as any).initOpenCascade();
+      oc = await (self as any).initOpenCascade((self as any).opencascade);
     }
   }
 }
@@ -62,13 +74,9 @@ function buildWireFromSegments(segments: ProfileSegment[], occ: any) {
   return wire;
 }
 
-function buildWireFromProfile(profile: SketchProfile, occ: any) {
-  return buildWireFromSegments(profile.segments, occ);
-}
-
-function extrudeProfile(profile: SketchProfile, depth: number, occ: any) {
+function createFaceFromProfile(profile: SketchProfile, occ: any) {
   // 1. Build Outer Wire
-  const outerWire = buildWireFromProfile(profile, occ);
+  const outerWire = buildWireFromSegments(profile.segments, occ);
   
   // 2. Build Face
   const faceMaker = new occ.BRepBuilderAPI_MakeFace_15(outerWire, true);
@@ -84,19 +92,11 @@ function extrudeProfile(profile: SketchProfile, depth: number, occ: any) {
 
   const face = faceMaker.Face();
   
-  // 4. Extrude Prism
-  const vec = new occ.gp_Vec_4(0, 0, depth);
-  const prismMaker = new occ.BRepPrimAPI_MakePrism_1(face, vec, false, true);
-  const solid = prismMaker.Shape();
-  
   // Clean up
   outerWire.delete();
   faceMaker.delete();
-  face.delete();
-  vec.delete();
-  prismMaker.delete();
   
-  return solid;
+  return face;
 }
 
 function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
@@ -190,7 +190,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest>) => {
   try {
     switch (req.type) {
       case 'INIT': {
-        await initWorker();
+        await initWorker(req.payload?.wasmBuffer);
         _self.postMessage({ taskId: req.taskId, type: req.type, success: true } as SolidTaskResponse);
         break;
       }
@@ -204,7 +204,16 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest>) => {
             currentSolid = null;
         }
 
-        const solid = extrudeProfile(profile, depth, oc);
+        const face = createFaceFromProfile(profile, oc);
+        const vec = new oc.gp_Vec_4(0, 0, depth);
+        const prismMaker = new oc.BRepPrimAPI_MakePrism_1(face, vec, false, true);
+        const solid = prismMaker.Shape();
+        
+        // Clean up
+        face.delete();
+        vec.delete();
+        prismMaker.delete();
+
         currentSolid = solid; // Store for export
         const meshData = tessellateSolid(solid, oc);
         
@@ -218,6 +227,9 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest>) => {
       }
       case 'EXPORT_STEP': {
         if (!oc || !currentSolid) throw new Error('No solid available to export');
+        
+        const unit = req.payload?.unit || 'mm';
+        oc.Interface_Static.SetCVal('write.step.unit', unit);
         
         const stepWriter = new oc.STEPControl_Writer_1();
         const transferResult = stepWriter.Transfer(currentSolid, oc.STEPControl_StepModelType.STEPControl_AsIs, true);

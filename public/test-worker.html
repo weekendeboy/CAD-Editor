@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html><body>
+<script>
+const workerCode = `
+importScripts(self.location.origin + '/occ/opencascade.wasm.js');
+self.initOpenCascade({
+  locateFile: (path) => self.location.origin + '/occ/' + path
+}).then(oc => {
+  postMessage('ok: ' + !!oc);
+}).catch(e => {
+  postMessage('error: ' + e);
+});
+`;
+const blob = new Blob([workerCode], { type: 'application/javascript' });
+const worker = new Worker(URL.createObjectURL(blob));
+worker.onmessage = e => console.log(e.data);
+</script>
+</body></html>

@@ -285,7 +285,8 @@ export default function App() {
 
   const handleExportSTEP = async () => {
     try {
-      const stepContent = await solidEngine.exportSTEP();
+      const unit = document.units || 'mm';
+      const stepContent = await solidEngine.exportSTEP(unit as 'mm' | 'inch');
       const blob = new Blob([stepContent], { type: 'model/step' });
       const url = URL.createObjectURL(blob);
       const a = window.document.createElement('a');

@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html><body>
+<script>
+async function test() {
+  const res = await fetch('/occ/opencascade.wasm.wasm');
+  const buf = await res.arrayBuffer();
+  document.body.innerHTML = 'Buffer length: ' + buf.byteLength;
+}
+test();
+</script>
+</body></html>

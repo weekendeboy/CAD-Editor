@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html><body>
+<script>
+const workerCode = `
+self.onmessage = async () => {
+  try {
+    const res = await fetch('/occ/opencascade.wasm.wasm');
+    const text = await res.text();
+    postMessage(text.substring(0, 50));
+  } catch (e) {
+    postMessage("Error: " + e.message);
+  }
+};
+`;
+const blob = new Blob([workerCode], { type: 'application/javascript' });
+const worker = new Worker(URL.createObjectURL(blob));
+worker.onmessage = e => document.body.innerHTML = 'Worker fetched: ' + e.data.replace(/</g, '&lt;');
+worker.postMessage('go');
+</script>
+</body></html>
