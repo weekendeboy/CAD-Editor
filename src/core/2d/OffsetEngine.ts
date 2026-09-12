@@ -433,8 +433,9 @@ function intersectCircleCircleInfinite(c1: Point2D, r1: number, c2: Point2D, r2:
 
 /**
  * 求解轉角處空間交點 (Corner Miter Point)，回傳與原轉角座標最近之交點。
+ * 完整支援 Line - Line, Line - Arc, Arc - Line, Arc - Arc。
  */
-function solveCornerIntersection(
+export function solveCornerIntersection(
   curveA: LineEntity | ArcEntity,
   elemA: ChainElement,
   curveB: LineEntity | ArcEntity,
@@ -677,7 +678,59 @@ export function calculateOffsetChain(
 }
 
 /**
- * 計算單一圖元等距偏移 (保留舊版單一圖元呼叫相容性)
+ * 通用與舊介面相容之 calculateChainOffset 函式
+ */
+export function calculateChainOffset(
+  targetEntityOrId: CADEntity2D | string,
+  optionsOrDistance: OffsetOptions | number,
+  sidePointOrEntities?: Point2D | CADEntity2D[],
+  allEntitiesOrConstraints?: CADEntity2D[] | Constraint[],
+  constraintsParam?: Constraint[]
+): OffsetChainResult | null {
+  let targetEntity: CADEntity2D | undefined;
+  let options: OffsetOptions;
+  let allEntities: CADEntity2D[] = [];
+  let constraints: Constraint[] = [];
+
+  if (typeof targetEntityOrId === 'string') {
+    const entityList = Array.isArray(allEntitiesOrConstraints)
+      ? (allEntitiesOrConstraints as CADEntity2D[])
+      : Array.isArray(sidePointOrEntities)
+      ? (sidePointOrEntities as CADEntity2D[])
+      : [];
+    targetEntity = entityList.find((e) => e.id === targetEntityOrId);
+    if (!targetEntity) return null;
+
+    if (typeof optionsOrDistance === 'number') {
+      if (!sidePointOrEntities || Array.isArray(sidePointOrEntities)) return null;
+      options = { distance: optionsOrDistance, sidePoint: sidePointOrEntities as Point2D };
+      allEntities = entityList;
+      constraints = constraintsParam || [];
+    } else {
+      options = optionsOrDistance;
+      allEntities = entityList;
+      constraints = (Array.isArray(allEntitiesOrConstraints) ? constraintsParam : (allEntitiesOrConstraints as Constraint[])) || [];
+    }
+  } else {
+    targetEntity = targetEntityOrId;
+    if (typeof optionsOrDistance === 'number') {
+      if (!sidePointOrEntities || Array.isArray(sidePointOrEntities)) return null;
+      options = { distance: optionsOrDistance, sidePoint: sidePointOrEntities as Point2D };
+      allEntities = (Array.isArray(allEntitiesOrConstraints) ? allEntitiesOrConstraints : []) as CADEntity2D[];
+      constraints = constraintsParam || [];
+    } else {
+      options = optionsOrDistance;
+      allEntities = (Array.isArray(sidePointOrEntities) ? sidePointOrEntities : []) as CADEntity2D[];
+      constraints = (Array.isArray(allEntitiesOrConstraints) ? allEntitiesOrConstraints : []) as Constraint[];
+    }
+  }
+
+  return calculateOffsetChain(targetEntity, options, allEntities, constraints);
+}
+
+/**
+ * 計算單一圖元等距法向偏置 (Normal Offset)
+ * 支援 Line, Arc, Circle。
  */
 export function calculateOffsetEntity(entity: CADEntity2D, options: OffsetOptions): OffsetResult | null {
   const { distance, sidePoint } = options;
@@ -802,3 +855,43 @@ export function calculateOffsetEntity(entity: CADEntity2D, options: OffsetOption
   }
 }
 
+/**
+ * 通用 calculateOffset 函式，多重引數支援
+ */
+export function calculateOffset(
+  entityOrId: CADEntity2D | string,
+  distanceOrOptions: number | OffsetOptions,
+  sidePointOrEntities?: Point2D | CADEntity2D[],
+  entitiesParam?: CADEntity2D[]
+): OffsetResult | null {
+  let targetEntity: CADEntity2D | undefined;
+  let distance: number;
+  let sidePoint: Point2D;
+
+  if (typeof entityOrId === 'string') {
+    const allEntities = Array.isArray(sidePointOrEntities) ? sidePointOrEntities : (entitiesParam || []);
+    targetEntity = allEntities.find((e) => e.id === entityOrId);
+    if (!targetEntity) return null;
+
+    if (typeof distanceOrOptions === 'number') {
+      distance = distanceOrOptions;
+      if (!sidePointOrEntities || Array.isArray(sidePointOrEntities)) return null;
+      sidePoint = sidePointOrEntities as Point2D;
+    } else {
+      distance = distanceOrOptions.distance;
+      sidePoint = distanceOrOptions.sidePoint;
+    }
+  } else {
+    targetEntity = entityOrId;
+    if (typeof distanceOrOptions === 'number') {
+      distance = distanceOrOptions;
+      if (!sidePointOrEntities || Array.isArray(sidePointOrEntities)) return null;
+      sidePoint = sidePointOrEntities as Point2D;
+    } else {
+      distance = distanceOrOptions.distance;
+      sidePoint = distanceOrOptions.sidePoint;
+    }
+  }
+
+  return calculateOffsetEntity(targetEntity, { distance, sidePoint });
+}
