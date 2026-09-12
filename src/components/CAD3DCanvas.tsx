@@ -1,39 +1,70 @@
-import React, { useMemo, useRef } from 'react';
+import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Environment } from '@react-three/drei';
 import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
-import { ExtrudeFeature, SketchFeature } from '../types/cad';
-import { createExtrudeGeometry } from '../core/3d/GeometryAdapter';
+import { ExtrudeFeature, SketchFeature, SketchProfile } from '../types/cad';
+import { solidEngine } from '../core/3d/SolidEngine';
 
-interface ExtrudeMeshProps {
+interface SolidFeatureMeshProps {
   feature: ExtrudeFeature;
   sketch: SketchFeature;
 }
 
-const ExtrudeMesh: React.FC<ExtrudeMeshProps> = ({ feature, sketch }) => {
-  const meshRef = useRef<THREE.Mesh>(null);
+const SolidFeatureMesh: React.FC<SolidFeatureMeshProps> = ({ feature, sketch }) => {
+  const [geometries, setGeometries] = useState<THREE.BufferGeometry[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  // Generate geometries for all selected profiles (or all profiles if none selected)
-  const geometries = useMemo(() => {
-    const profilesToExtrude = feature.profileIds && feature.profileIds.length > 0
-      ? sketch.profiles.filter(p => feature.profileIds.includes(p.id))
-      : sketch.profiles;
+  useEffect(() => {
+    let active = true;
 
-    return profilesToExtrude.map(profile => {
-      // Extrude using GeometryAdapter
-      const depth = feature.direction === 'mid-plane' ? feature.depth / 2 : feature.depth;
-      const geom = createExtrudeGeometry(profile, depth);
+    const computeMeshes = async () => {
+      setLoading(true);
       
-      // If mid-plane, translate by -depth/2
-      if (feature.direction === 'mid-plane') {
-        geom.translate(0, 0, -depth);
-      } else if (feature.direction === 'reversed') {
-        geom.translate(0, 0, -depth);
+      try {
+        await solidEngine.init();
+        
+        const profilesToExtrude = feature.profileIds && feature.profileIds.length > 0
+          ? sketch.profiles.filter(p => feature.profileIds.includes(p.id))
+          : sketch.profiles;
+
+        const depth = feature.direction === 'mid-plane' ? feature.depth / 2 : feature.depth;
+        const generatedGeometries: THREE.BufferGeometry[] = [];
+
+        for (const profile of profilesToExtrude) {
+          const meshData = await solidEngine.extrudeProfile(profile, depth);
+          
+          if (!active) return;
+          
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute('position', new THREE.BufferAttribute(meshData.vertices, 3));
+          geometry.setAttribute('normal', new THREE.BufferAttribute(meshData.normals, 3));
+          geometry.setIndex(new THREE.BufferAttribute(meshData.indices, 1));
+          
+          if (feature.direction === 'mid-plane' || feature.direction === 'reversed') {
+            geometry.translate(0, 0, -depth);
+          }
+          
+          generatedGeometries.push(geometry);
+        }
+
+        if (active) {
+          setGeometries(generatedGeometries);
+          setLoading(false);
+        }
+      } catch (error) {
+        console.error("Failed to generate solid mesh", error);
+        if (active) setLoading(false);
       }
-      
-      return geom;
-    });
+    };
+
+    computeMeshes();
+
+    return () => {
+      active = false;
+      // Cleanup geometries on unmount or re-run
+      geometries.forEach(g => g.dispose());
+    };
   }, [feature, sketch]);
 
   const quaternion = useMemo(() => {
@@ -58,22 +89,34 @@ const ExtrudeMesh: React.FC<ExtrudeMeshProps> = ({ feature, sketch }) => {
 
   return (
     <group position={position} quaternion={quaternion}>
-      {geometries.map((geom, idx) => (
-        <mesh key={`${feature.id}-${idx}`} geometry={geom}>
-          <meshStandardMaterial 
-            color="#cbd5e1" 
-            metalness={0.2} 
-            roughness={0.5} 
-            side={THREE.DoubleSide} 
-          />
+      {loading ? (
+        // Simple loading indicator / wireframe
+        <mesh>
+          <boxGeometry args={[10, 10, 10]} />
+          <meshBasicMaterial color="#ef4444" wireframe />
         </mesh>
-      ))}
+      ) : (
+        geometries.map((geom, idx) => (
+          <mesh key={`${feature.id}-${idx}`} geometry={geom}>
+            <meshStandardMaterial 
+              color="#cbd5e1" 
+              metalness={0.2} 
+              roughness={0.5} 
+              side={THREE.DoubleSide} 
+            />
+          </mesh>
+        ))
+      )}
     </group>
   );
 };
 
 const CAD3DCanvas: React.FC = () => {
   const document = useCADStore(state => state.document);
+
+  useEffect(() => {
+    solidEngine.init();
+  }, []);
 
   const renderFeatures = useMemo(() => {
     const extrudeFeatures = document.featureTree.filter(
@@ -86,7 +129,7 @@ const CAD3DCanvas: React.FC = () => {
       );
       if (!sketch) return null;
 
-      return <ExtrudeMesh key={extrude.id} feature={extrude} sketch={sketch} />;
+      return <SolidFeatureMesh key={extrude.id} feature={extrude} sketch={sketch} />;
     });
   }, [document.featureTree]);
 

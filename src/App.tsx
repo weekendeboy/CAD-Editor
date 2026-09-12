@@ -15,6 +15,7 @@ import { LayerControlBar } from './components/LayerControlBar';
 import { LayerManagerModal } from './components/LayerManagerModal';
 import { exportSketchToDxf, downloadDxfFile } from './core/dxf/DxfWriter';
 import { parseDxfContent } from './core/dxf/DxfParser';
+import { solidEngine } from './core/3d/SolidEngine';
 import {
   MousePointer2,
   Pencil,
@@ -280,6 +281,38 @@ export default function App() {
       layers: document.layers || {},
     });
     downloadDxfFile(dxfContent, filename);
+  };
+
+  const handleExportSTEP = async () => {
+    try {
+      const stepContent = await solidEngine.exportSTEP();
+      const blob = new Blob([stepContent], { type: 'model/step' });
+      const url = URL.createObjectURL(blob);
+      const a = window.document.createElement('a');
+      a.href = url;
+      a.download = `${activeSketch?.name || 'model'}.step`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error(e);
+      alert('Failed to export STEP. Make sure to generate a 3D solid first.');
+    }
+  };
+
+  const handleExportSTL = async () => {
+    try {
+      const stlData = await solidEngine.exportSTL();
+      const blob = new Blob([stlData], { type: 'model/stl' });
+      const url = URL.createObjectURL(blob);
+      const a = window.document.createElement('a');
+      a.href = url;
+      a.download = `${activeSketch?.name || 'model'}.stl`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error(e);
+      alert('Failed to export STL. Make sure to generate a 3D solid first.');
+    }
   };
 
   /**
@@ -867,6 +900,27 @@ export default function App() {
             <FileDown size={15} className="text-blue-400" />
             <span>Export DXF</span>
           </button>
+
+          {viewMode === '3D' && (
+            <>
+              <button
+                onClick={handleExportSTEP}
+                className="bg-neutral-800 hover:bg-neutral-700 text-neutral-200 hover:text-white px-3 py-1 rounded text-xs font-semibold border border-neutral-700 transition-colors shadow-sm flex items-center gap-1.5"
+                title="Export STEP Model"
+              >
+                <FileDown size={15} className="text-purple-400" />
+                <span>Export STEP</span>
+              </button>
+              <button
+                onClick={handleExportSTL}
+                className="bg-neutral-800 hover:bg-neutral-700 text-neutral-200 hover:text-white px-3 py-1 rounded text-xs font-semibold border border-neutral-700 transition-colors shadow-sm flex items-center gap-1.5"
+                title="Export STL Mesh"
+              >
+                <FileDown size={15} className="text-pink-400" />
+                <span>Export STL</span>
+              </button>
+            </>
+          )}
 
           {/* 2D/3D Toggle Button */}
           <button

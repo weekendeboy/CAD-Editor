@@ -116,7 +116,7 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
             const sP2 = worldToScreen(p2);
             let sText = worldToScreen(textPosition);
 
-            const isAligned = dim.dimType ? dim.dimType : ((dim as any).isAligned !== false);
+            const isAligned = dim.dimType && dim.dimType !== 'angular' ? dim.dimType : ((dim as any).isAligned !== false);
 
             let layout = calculateLinearDimensionLayout(
               sP1,

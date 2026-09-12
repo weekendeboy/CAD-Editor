@@ -1167,7 +1167,7 @@ export function useDrawMachine() {
           if (extendResult) {
             setExtendPreview({
               originalEntityId: closestEntity.id,
-              previewEntity: extendResult,
+              previewEntity: extendResult.extendedEntity,
             });
           } else {
             setExtendPreview(null);
@@ -1677,7 +1677,7 @@ export function useDrawMachine() {
           }
 
           let newEntityId = '';
-          let newSegs: Array<{ entityId: string; endPt: Point2D; type: 'line' | 'arc'; bulge: number }> = [];
+          let newSegs: Array<{ entityId: string; endPt: Point2D; type: 'line' | 'arc'; bulge?: number }> = [];
 
           if (polylineMode === 'ARC' && arcData) {
             const newArc: ArcEntity = {
@@ -2978,7 +2978,7 @@ export function useDrawMachine() {
 
         const newTangent = getSegmentEndTangent(newLine);
         setLastTangentDir(newTangent);
-        const newSegs = [...polySegments, { entityId: newLine.id, endPt: exactEndPt, type: 'line' }];
+        const newSegs = [...polySegments, { entityId: newLine.id, endPt: exactEndPt, type: 'line' as const }];
         setPolySegments(newSegs);
         setDrawSession((prev) => ({
           ...prev,
