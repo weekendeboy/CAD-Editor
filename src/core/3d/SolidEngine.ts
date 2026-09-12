@@ -63,7 +63,8 @@ export class SolidEngine {
     if (!this.initPromise) {
       this.initPromise = (async () => {
         // Fetch the WASM binary on the main thread to ensure proper cookie handling and origin context
-        const response = await fetch('/occ/opencascade.wasm.wasm');
+        const baseUrl = (import.meta as any).env?.BASE_URL || '/';
+        const response = await fetch(`${baseUrl}occ/opencascade.wasm.wasm`);
         if (!response.ok) {
           throw new Error(`Failed to fetch WASM binary: ${response.status} ${response.statusText}`);
         }

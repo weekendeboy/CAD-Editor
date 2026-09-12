@@ -11,25 +11,42 @@ import type { SketchProfile, ProfileSegment } from '../../types/cad';
 let oc: any = null;
 let currentSolid: any = null; // Store the current solid compound for evaluation and export
 
+const getBaseUrl = () => {
+  // 生產環境 (Production)：Vite 會將 Worker 打包進 /assets/ 資料夾
+  if (self.location.pathname.includes('/assets/')) {
+    return self.location.origin + self.location.pathname.split('/assets/')[0] + '/';
+  }
+  // 開發環境 (Development)：直接返回 origin
+  return self.location.origin + '/';
+};
+
 async function initWorker(wasmBuffer?: ArrayBuffer) {
   if (!oc) {
-    if (wasmBuffer) {
-      (self as any).opencascade = {
-        wasmBinary: wasmBuffer,
-      };
-    } else {
-      (self as any).opencascade = {
-        locateFile: (path: string, _prefix: string) => {
-          return new URL(`/occ/${path}`, self.location.origin).href;
-        },
-      };
+    const baseUrl = getBaseUrl();
+    const jsUrl = `${baseUrl}occ/opencascade.wasm.js`;
+    const wasmUrl = `${baseUrl}occ/opencascade.wasm.wasm`;
+
+    let activeWasmBuffer = wasmBuffer;
+    if (!activeWasmBuffer) {
+      const wasmRes = await fetch(wasmUrl);
+      if (!wasmRes.ok) {
+        throw new Error(`Failed to fetch OpenCASCADE WASM from ${wasmUrl}: ${wasmRes.statusText}`);
+      }
+      activeWasmBuffer = await wasmRes.arrayBuffer();
     }
 
+    (self as any).opencascade = {
+      wasmBinary: activeWasmBuffer,
+    };
+
     if (typeof (self as any).importScripts === 'function') {
-      (self as any).importScripts('/occ/opencascade.wasm.js');
+      (self as any).importScripts(jsUrl);
       oc = await (self as any).initOpenCascade((self as any).opencascade);
     } else {
-      const response = await fetch('/occ/opencascade.wasm.js');
+      const response = await fetch(jsUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch OpenCASCADE JS from ${jsUrl}`);
+      }
       const text = await response.text();
       // eslint-disable-next-line no-eval
       eval(text);
