@@ -7,11 +7,17 @@ export interface EntityRendererProps {
   selectedIds: string[];
   worldToScreen: (pt: Point2D) => Point2D;
   scale: number;
-  solverState?: EntityState;
+  solverState?: EntityState | string;
   onSelectEntity?: (id: string, e: React.MouseEvent) => void;
   currentTool: string;
 }
 
+/**
+ * EntityRenderer
+ * 純函數渲染元件，支援渲染 line, circle, arc, polyline 等 CAD 圖元。
+ * - isConstruction 為 true 時以紫色虛線渲染。
+ * - 在 selectedIds 內時以亮藍色選取高亮狀態渲染。
+ */
 export const EntityRenderer: React.FC<EntityRendererProps> = ({
   entities,
   selectedIds,
@@ -26,34 +32,37 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
     if (entity.visible === false) return null;
 
     const isSelected = selectedIds.includes(entity.id);
-    const entityState: EntityState = (entity as any).state || solverState || 'UnderDefined';
+    const entityState: EntityState = (entity.state || solverState || 'UnderDefined') as EntityState;
 
-    // 依據規格判定圖元顏色、線款與虛線樣式：
-    // 1. 建構線 (isConstruction === true)：顯示為紫色虛線 (#c084fc / 選取時 #38bdf8)
-    // 2. OverDefined：警示紅色 (#ef4444)
-    // 3. Selected：亮藍色 (#38bdf8)
+    // 依據規格判定圖元顏色、線寬與虛線樣式：
+    // 1. 選取高亮 (Selected)：亮藍色 (#38bdf8)
+    // 2. 建構線 (isConstruction === true)：顯示為紫色虛線 (#c084fc / 選取時 #38bdf8 虛線)
+    // 3. OverDefined：警示紅色 (#ef4444)
     // 4. FullyDefined：綠色 (#10b981)
     // 5. UnderDefined：藍色 (#60a5fa)
     let strokeColor = '#60a5fa';
     let strokeWidth = entity.lineWidth || 1.5;
     let strokeDasharray: string | undefined = undefined;
 
-    if (entity.isConstruction === true) {
-      strokeColor = isSelected ? '#38bdf8' : '#c084fc';
-      strokeDasharray = '6,4';
-      if (isSelected) {
-        strokeWidth = 2.5;
+    if (isSelected) {
+      strokeColor = '#38bdf8';
+      strokeWidth = 3;
+      if (entity.isConstruction) {
+        strokeDasharray = '6,4';
       }
+    } else if (entity.isConstruction) {
+      strokeColor = '#c084fc';
+      strokeWidth = entity.lineWidth || 1.5;
+      strokeDasharray = '6,4';
     } else if (entityState === 'OverDefined') {
       strokeColor = '#ef4444';
       strokeWidth = 2.5;
-    } else if (isSelected) {
-      strokeColor = '#38bdf8';
-      strokeWidth = 3;
     } else if (entityState === 'FullyDefined') {
       strokeColor = '#10b981';
+      strokeWidth = entity.lineWidth || 1.5;
     } else {
-      strokeColor = '#60a5fa';
+      strokeColor = entity.color || '#60a5fa';
+      strokeWidth = entity.lineWidth || 1.5;
     }
 
     const isSelectMode = currentTool === 'SELECT';
@@ -63,7 +72,6 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
       strokeWidth,
       strokeDasharray,
       fill: 'none',
-      pointerEvents: (isSelectMode ? 'all' : 'none') as React.CSSProperties['pointerEvents'],
       style: {
         cursor: isSelectMode ? 'pointer' : 'crosshair',
         pointerEvents: (isSelectMode ? 'all' : 'none') as React.CSSProperties['pointerEvents'],
@@ -112,7 +120,7 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
       }
 
       case 'arc': {
-        // 計算世界座標的起終點
+        // 計算世界座標的起終點 (CCW 逆時針方向)
         const worldStart = {
           x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
           y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
@@ -133,7 +141,7 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
         while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
 
         const largeArcFlag = diff > Math.PI ? 1 : 0;
-        const sweepFlag = 0;
+        const sweepFlag = 0; // CAD 笛卡爾座標系 Y 向上映射至 SVG Y 向下時，CCW 弧對應 sweepFlag = 0
 
         const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
 
@@ -172,3 +180,4 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
     </g>
   );
 };
+
