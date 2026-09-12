@@ -14,6 +14,7 @@ import { PolarSettingsModal } from './components/PolarSettingsModal';
 import { LayerControlBar } from './components/LayerControlBar';
 import { LayerManagerModal } from './components/LayerManagerModal';
 import { FeatureTreePanel } from './components/FeatureTreePanel';
+import { ExtrudeFeatureModal } from './components/ExtrudeFeatureModal';
 import { exportSketchToDxf, downloadDxfFile } from './core/dxf/DxfWriter';
 import { parseDxfContent } from './core/dxf/DxfParser';
 import { solidEngine } from './core/3d/SolidEngine';
@@ -51,6 +52,7 @@ import {
   FileDown,
   FileUp,
   CheckCircle2,
+  Box,
 } from 'lucide-react';
 
 /**
@@ -115,6 +117,15 @@ export default function App() {
     mergedPointsCount?: number;
     removedEntitiesCount?: number;
   } | null>(null);
+
+  // 伸長長料 (Extrude Boss) / 伸長除料 (Extrude Cut) 參數設定彈窗狀態
+  const [extrudeModalConfig, setExtrudeModalConfig] = useState<{
+    isOpen: boolean;
+    mode: 'EXTRUDE' | 'CUT_EXTRUDE';
+  }>({
+    isOpen: false,
+    mode: 'EXTRUDE',
+  });
 
   const {
     currentTool,
@@ -415,6 +426,10 @@ export default function App() {
       handleProcessDxfFile(file);
     }
   };
+
+  // 檢查是否需顯示 Extrude 3D 特徵按鈕（切換至 3D 模式時，或當前草圖包含封閉輪廓時）
+  const showExtrudeButtons =
+    viewMode === '3D' || Boolean(activeSketch?.profiles && activeSketch.profiles.length > 0);
 
   return (
     <div
@@ -848,7 +863,29 @@ export default function App() {
           <LayerControlBar />
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
+          {/* 3D Extrude Boss / Extrude Cut 特徵建立按鈕 */}
+          {showExtrudeButtons && (
+            <div className="flex items-center gap-1.5 bg-neutral-900 p-1 rounded-md border border-neutral-800">
+              <button
+                onClick={() => setExtrudeModalConfig({ isOpen: true, mode: 'EXTRUDE' })}
+                className="bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/40 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                title="伸長長料 (Extrude Boss)"
+              >
+                <Box size={15} className="text-blue-400" />
+                <span>伸長長料</span>
+              </button>
+              <button
+                onClick={() => setExtrudeModalConfig({ isOpen: true, mode: 'CUT_EXTRUDE' })}
+                className="bg-amber-600/20 hover:bg-amber-600/30 text-amber-400 border border-amber-500/40 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                title="伸長除料 (Extrude Cut)"
+              >
+                <Scissors size={15} className="text-amber-400" />
+                <span>伸長除料</span>
+              </button>
+            </div>
+          )}
+
           <div className="flex items-center gap-2">
             <button
               onClick={undo}
@@ -1005,7 +1042,7 @@ export default function App() {
           >
             <CADSketchCanvas />
           </div>
-          
+
           {viewMode === '3D' && (
             <div className="absolute inset-0 w-full h-full z-10">
               <CAD3DCanvas />
@@ -1013,9 +1050,16 @@ export default function App() {
           )}
         </div>
       </main>
+
+      {/* 輔助與特徵彈窗群 */}
       <OsnapSettingsModal />
       <PolarSettingsModal />
       <LayerManagerModal />
+      <ExtrudeFeatureModal
+        isOpen={extrudeModalConfig.isOpen}
+        mode={extrudeModalConfig.mode}
+        onClose={() => setExtrudeModalConfig((prev) => ({ ...prev, isOpen: false }))}
+      />
     </div>
   );
 }

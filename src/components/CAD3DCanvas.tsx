@@ -4,15 +4,16 @@ import { OrbitControls, Environment, Grid, Text } from '@react-three/drei';
 import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
 import {
-  ExtrudeFeature,
-  SketchFeature,
-  DatumPlaneFeature,
   CustomPlane,
   DatumFrontPlane,
   DatumTopPlane,
   DatumRightPlane,
+  DatumPlaneFeature,
+  ExtrudeFeature,
+  SketchFeature,
 } from '../types/cad';
 import { solidEngine } from '../core/3d/SolidEngine';
+import { buildFeatureEvalOps } from '../core/3d/FeaturePipelineAdapter';
 
 // Error Boundary 元件，防止 3D Canvas 渲染或 WebGL 錯誤導致整個 React 畫面白屏消失
 interface ErrorBoundaryProps {
@@ -62,179 +63,6 @@ class ThreeErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryStat
   }
 }
 
-interface SolidFeatureMeshProps {
-  feature: ExtrudeFeature;
-  sketch: SketchFeature;
-}
-
-const SolidFeatureMesh: React.FC<SolidFeatureMeshProps> = ({ feature, sketch }) => {
-  const groupRef = useRef<THREE.Group>(null);
-  const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
-
-  // 獨立材質物件與記憶體釋放管理
-  const material = useMemo(() => {
-    return new THREE.MeshStandardMaterial({
-      color: '#cbd5e1',
-      metalness: 0.2,
-      roughness: 0.5,
-      side: THREE.DoubleSide,
-    });
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      material.dispose();
-    };
-  }, [material]);
-
-  // 幾何計算與 BufferGeometry 記憶體釋放管理
-  useEffect(() => {
-    let active = true;
-    let localGeom: THREE.BufferGeometry | null = null;
-
-    const computeMeshes = async () => {
-      setLoading(true);
-
-      try {
-        await solidEngine.init();
-
-        const profilesToExtrude =
-          feature.profileIds && feature.profileIds.length > 0
-            ? sketch.profiles.filter((p) => feature.profileIds.includes(p.id))
-            : sketch.profiles;
-
-        if (!profilesToExtrude || profilesToExtrude.length === 0) {
-          if (active) {
-            setGeometry((prev) => {
-              if (prev) prev.dispose();
-              return null;
-            });
-            setLoading(false);
-          }
-          return;
-        }
-
-        const depth = feature.direction === 'mid-plane' ? feature.depth / 2 : feature.depth;
-        const meshData = await solidEngine.extrudeProfiles(profilesToExtrude, depth);
-
-        if (!active) return;
-
-        if (!meshData || !meshData.vertices || meshData.vertices.length === 0) {
-          setGeometry((prev) => {
-            if (prev) prev.dispose();
-            return null;
-          });
-          setLoading(false);
-          return;
-        }
-
-        const geom = new THREE.BufferGeometry();
-        geom.setAttribute('position', new THREE.BufferAttribute(meshData.vertices, 3));
-        geom.setAttribute('normal', new THREE.BufferAttribute(meshData.normals, 3));
-        geom.setIndex(new THREE.BufferAttribute(meshData.indices, 1));
-
-        if (feature.direction === 'mid-plane' || feature.direction === 'reversed') {
-          geom.translate(0, 0, -depth);
-        }
-
-        localGeom = geom;
-
-        if (active) {
-          setGeometry((prev) => {
-            if (prev) prev.dispose();
-            return geom;
-          });
-          setLoading(false);
-        } else {
-          geom.dispose();
-        }
-      } catch (error) {
-        console.error('Failed to generate solid mesh:', error);
-        if (active) {
-          setGeometry((prev) => {
-            if (prev) prev.dispose();
-            return null;
-          });
-          setLoading(false);
-        }
-      }
-    };
-
-    computeMeshes();
-
-    return () => {
-      active = false;
-      if (localGeom) {
-        localGeom.dispose();
-      }
-    };
-  }, [feature, sketch]);
-
-  // 卸載時確保釋放舊幾何資源
-  useEffect(() => {
-    return () => {
-      setGeometry((prev) => {
-        if (prev) prev.dispose();
-        return null;
-      });
-    };
-  }, []);
-
-  // 4x4 矩陣空間對齊：根據草圖平面 (Origin, xAxis, yAxis, Normal) 計算局部對齊矩陣
-  const matrix = useMemo(() => {
-    const m = new THREE.Matrix4();
-    const xAxis = new THREE.Vector3(
-      sketch.plane.xAxis.x,
-      sketch.plane.xAxis.y,
-      sketch.plane.xAxis.z
-    );
-    const yAxis = new THREE.Vector3(
-      sketch.plane.yAxis.x,
-      sketch.plane.yAxis.y,
-      sketch.plane.yAxis.z
-    );
-    const normal = new THREE.Vector3(
-      sketch.plane.normal.x,
-      sketch.plane.normal.y,
-      sketch.plane.normal.z
-    );
-    const origin = new THREE.Vector3(
-      sketch.plane.origin.x,
-      sketch.plane.origin.y,
-      sketch.plane.origin.z
-    );
-
-    m.makeBasis(xAxis, yAxis, normal);
-    m.setPosition(origin);
-    return m;
-  }, [sketch.plane]);
-
-  // 將計算完成的 4x4 矩陣精確套用到 Three.js Group
-  useEffect(() => {
-    if (groupRef.current) {
-      groupRef.current.matrix.copy(matrix);
-      groupRef.current.matrixAutoUpdate = false;
-      groupRef.current.matrixWorldNeedsUpdate = true;
-    }
-  }, [matrix]);
-
-  return (
-    <group ref={groupRef}>
-      {loading ? (
-        <mesh>
-          <boxGeometry args={[10, 10, 10]} />
-          <meshBasicMaterial color="#ef4444" wireframe />
-        </mesh>
-      ) : (
-        geometry && (
-          <mesh geometry={geometry} material={material} castShadow receiveShadow />
-        )
-      )}
-    </group>
-  );
-};
-
 interface DatumPlaneMeshProps {
   plane: CustomPlane;
   name: string;
@@ -255,10 +83,26 @@ const DatumPlaneMesh: React.FC<DatumPlaneMeshProps> = ({
   // 姿態變換：使用 THREE.Matrix4.makeBasis(xAxis, yAxis, normal) 並 setPosition(origin)
   const matrix = useMemo(() => {
     const m = new THREE.Matrix4();
-    const xAxis = new THREE.Vector3(plane.xAxis.x, plane.xAxis.y, plane.xAxis.z);
-    const yAxis = new THREE.Vector3(plane.yAxis.x, plane.yAxis.y, plane.yAxis.z);
-    const normal = new THREE.Vector3(plane.normal.x, plane.normal.y, plane.normal.z);
-    const origin = new THREE.Vector3(plane.origin.x, plane.origin.y, plane.origin.z);
+    const xAxis = new THREE.Vector3(
+      plane.xAxis?.x ?? 1,
+      plane.xAxis?.y ?? 0,
+      plane.xAxis?.z ?? 0
+    );
+    const yAxis = new THREE.Vector3(
+      plane.yAxis?.x ?? 0,
+      plane.yAxis?.y ?? 1,
+      plane.yAxis?.z ?? 0
+    );
+    const normal = new THREE.Vector3(
+      plane.normal?.x ?? 0,
+      plane.normal?.y ?? 0,
+      plane.normal?.z ?? 1
+    );
+    const origin = new THREE.Vector3(
+      plane.origin?.x ?? 0,
+      plane.origin?.y ?? 0,
+      plane.origin?.z ?? 0
+    );
 
     m.makeBasis(xAxis, yAxis, normal);
     m.setPosition(origin);
@@ -358,7 +202,7 @@ const DatumPlaneMesh: React.FC<DatumPlaneMeshProps> = ({
         if (onSelect) onSelect();
       }}
     >
-      {/* 半透明平面 (尺寸 200x200 mm，材質雙面 side={THREE.DoubleSide}，opacity: 0.08 / 選中時 0.2，天藍色 #0284c7) */}
+      {/* 半透明平面 (尺寸 200x200 mm，天藍色 #0284c7，未選中透明度 0.08，選中時 0.2) */}
       <mesh>
         <planeGeometry args={[200, 200]} />
         <meshBasicMaterial
@@ -370,7 +214,7 @@ const DatumPlaneMesh: React.FC<DatumPlaneMeshProps> = ({
         />
       </mesh>
 
-      {/* 邊框線 (Border Wireframe)：深藍色或黃色（選中時） */}
+      {/* 邊框線 (Border Wireframe)：選中時黃色 #facc15，未選中深藍色 #0369a1 */}
       <lineLoop geometry={borderGeometry}>
         <lineBasicMaterial
           color={isSelected ? '#facc15' : '#0369a1'}
@@ -381,7 +225,7 @@ const DatumPlaneMesh: React.FC<DatumPlaneMeshProps> = ({
       {/* 局部坐標軸 Trihedron (X 紅, Y 綠, Z 藍) */}
       <primitive object={trihedronGroup} />
 
-      {/* 文字標籤：平面角隅顯示基準面名稱 */}
+      {/* 文字標籤：左上角顯示基準面名稱 */}
       <Text
         position={[-95, 92, 0.5]}
         fontSize={9}
@@ -397,11 +241,138 @@ const DatumPlaneMesh: React.FC<DatumPlaneMeshProps> = ({
   );
 };
 
+/**
+ * 單一累進實體模型渲染元件 CumulativePartMesh
+ * 訂閱 document.featureTree 與 document.rollbackIndex
+ * 當特徵樹或回退棒變更時，透過 OpenCASCADE 執行完整 CSG 布林運算（含 Boolean Cut 除料）
+ */
+const CumulativePartMesh: React.FC = () => {
+  const document = useCADStore((state) => state.document);
+  const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+
+  const featureTree = document?.featureTree ?? [];
+  const rollbackIndex = document?.rollbackIndex ?? 0;
+  const planes = document?.planes ?? {};
+
+  // 金屬質感灰色 Standard 材質 (color="#cbd5e1", metalness=0.2, roughness=0.5)
+  const material = useMemo(() => {
+    return new THREE.MeshStandardMaterial({
+      color: '#cbd5e1',
+      metalness: 0.2,
+      roughness: 0.5,
+      side: THREE.DoubleSide,
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      material.dispose();
+    };
+  }, [material]);
+
+  // 當特徵樹、回退棒或基準面變更時重新計算實體網格
+  useEffect(() => {
+    let active = true;
+
+    const evaluateTree = async () => {
+      setLoading(true);
+
+      try {
+        await solidEngine.init();
+
+        const ops = buildFeatureEvalOps(featureTree, rollbackIndex, planes);
+
+        if (!ops || ops.length === 0) {
+          if (active) {
+            setGeometry((prev) => {
+              if (prev) prev.dispose();
+              return null;
+            });
+            setLoading(false);
+          }
+          return;
+        }
+
+        const meshData = await solidEngine.evaluateFeatureTree(ops);
+
+        if (!active) return;
+
+        if (!meshData || !meshData.vertices || meshData.vertices.length === 0) {
+          setGeometry((prev) => {
+            if (prev) prev.dispose();
+            return null;
+          });
+          setLoading(false);
+          return;
+        }
+
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.BufferAttribute(meshData.vertices, 3));
+        geom.setAttribute('normal', new THREE.BufferAttribute(meshData.normals, 3));
+        geom.setIndex(new THREE.BufferAttribute(meshData.indices, 1));
+
+        if (active) {
+          setGeometry((prev) => {
+            if (prev) prev.dispose();
+            return geom;
+          });
+          setLoading(false);
+        } else {
+          geom.dispose();
+        }
+      } catch (error) {
+        console.error('Failed to evaluate cumulative solid part mesh:', error);
+        if (active) {
+          setGeometry((prev) => {
+            if (prev) prev.dispose();
+            return null;
+          });
+          setLoading(false);
+        }
+      }
+    };
+
+    evaluateTree();
+
+    return () => {
+      active = false;
+    };
+  }, [featureTree, rollbackIndex, planes]);
+
+  // 卸載時清理 Geometry 記憶體
+  useEffect(() => {
+    return () => {
+      setGeometry((prev) => {
+        if (prev) prev.dispose();
+        return null;
+      });
+    };
+  }, []);
+
+  return (
+    <group>
+      {loading && (
+        <mesh>
+          <boxGeometry args={[10, 10, 10]} />
+          <meshBasicMaterial color="#38bdf8" wireframe />
+        </mesh>
+      )}
+      {geometry && (
+        <mesh geometry={geometry} material={material} castShadow receiveShadow />
+      )}
+    </group>
+  );
+};
+
 const CanvasContent: React.FC = () => {
   const document = useCADStore((state) => state.document);
   const selectedFeatureId = useCADStore((state) => state.selectedFeatureId);
   const setSelectedFeatureId = useCADStore((state) => state.setSelectedFeatureId);
-  const { featureTree, rollbackIndex } = document;
+
+  const featureTree = document?.featureTree ?? [];
+  const rollbackIndex = document?.rollbackIndex ?? 0;
+  const planes = document?.planes ?? {};
 
   useEffect(() => {
     solidEngine.init().catch((err) => {
@@ -409,14 +380,14 @@ const CanvasContent: React.FC = () => {
     });
   }, []);
 
-  // 1. 常駐三大基準面 (Front, Top, Right)
+  // 1. 常駐三大預設基準面 (Front, Top, Right)
   const defaultPlanes = useMemo(() => {
     return [
-      document.planes['datum-front'] || DatumFrontPlane,
-      document.planes['datum-top'] || DatumTopPlane,
-      document.planes['datum-right'] || DatumRightPlane,
+      planes['datum-front'] || DatumFrontPlane,
+      planes['datum-top'] || DatumTopPlane,
+      planes['datum-right'] || DatumRightPlane,
     ];
-  }, [document.planes]);
+  }, [planes]);
 
   const renderDefaultPlanes = useMemo(() => {
     return defaultPlanes.map((plane) => (
@@ -437,7 +408,7 @@ const CanvasContent: React.FC = () => {
     const defaultPlaneIds = new Set(['datum-front', 'datum-top', 'datum-right']);
 
     return activeTreeSlice.map((feature) => {
-      if (feature.suppressed) return null;
+      if (!feature || feature.suppressed) return null;
 
       if (feature.type === 'DATUM_PLANE') {
         const datumFeature = feature as DatumPlaneFeature;
@@ -460,40 +431,6 @@ const CanvasContent: React.FC = () => {
     });
   }, [featureTree, rollbackIndex, selectedFeatureId, setSelectedFeatureId]);
 
-  // 3. 實體長料與特徵渲染保持 (ExtrudeFeature)
-  const renderSolidFeatures = useMemo(() => {
-    const activeTreeSlice = featureTree.slice(0, Math.max(0, rollbackIndex));
-    const validFeaturesMap = new Map<string, typeof activeTreeSlice[number]>();
-    activeTreeSlice.forEach((f) => {
-      if (!f.suppressed) {
-        validFeaturesMap.set(f.id, f);
-      }
-    });
-
-    return activeTreeSlice.map((feature) => {
-      if (feature.suppressed) return null;
-
-      if (feature.type === 'EXTRUDE') {
-        const extrude = feature as ExtrudeFeature;
-        const parentSketch = validFeaturesMap.get(extrude.sketchId);
-
-        if (!parentSketch || parentSketch.type !== 'SKETCH') {
-          return null;
-        }
-
-        return (
-          <SolidFeatureMesh
-            key={extrude.id}
-            feature={extrude}
-            sketch={parentSketch as SketchFeature}
-          />
-        );
-      }
-
-      return null;
-    });
-  }, [featureTree, rollbackIndex]);
-
   return (
     <>
       <color attach="background" args={['#1e293b']} />
@@ -506,7 +443,7 @@ const CanvasContent: React.FC = () => {
       <OrbitControls makeDefault minDistance={1} maxDistance={5000} />
       {renderDefaultPlanes}
       {renderDatumPlaneFeatures}
-      {renderSolidFeatures}
+      <CumulativePartMesh />
       <Grid
         position={[0, -0.01, 0]}
         args={[2000, 2000]}

@@ -3,6 +3,7 @@ import {
   SolidTaskResponse,
   MeshResult,
   ExtrudeProfileResponseData,
+  FeatureEvalOp,
 } from './SolidEngine.types';
 import type { SketchProfile } from '../../types/cad';
 
@@ -77,6 +78,11 @@ class SolidEngine {
   public async extrudeProfiles(profiles: SketchProfile[], depth: number): Promise<MeshResult> {
     await this.init();
     return this.dispatch<MeshResult>('EXTRUDE_PROFILES', { profiles, depth });
+  }
+
+  public async evaluateFeatureTree(operations: FeatureEvalOp[]): Promise<MeshResult> {
+    await this.init();
+    return this.dispatch<MeshResult>('EVALUATE_FEATURE_TREE', { operations });
   }
 
   public async extrudeProfile(profile: SketchProfile, depth: number): Promise<ExtrudeProfileResponseData> {
