@@ -1,9 +1,9 @@
-import React, { useMemo, useRef, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Environment } from '@react-three/drei';
 import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
-import { ExtrudeFeature, SketchFeature, SketchProfile } from '../types/cad';
+import { ExtrudeFeature, SketchFeature } from '../types/cad';
 import { solidEngine } from '../core/3d/SolidEngine';
 
 interface SolidFeatureMeshProps {
@@ -12,11 +12,12 @@ interface SolidFeatureMeshProps {
 }
 
 const SolidFeatureMesh: React.FC<SolidFeatureMeshProps> = ({ feature, sketch }) => {
-  const [geometries, setGeometries] = useState<THREE.BufferGeometry[]>([]);
+  const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let active = true;
+    let currentGeom: THREE.BufferGeometry | null = null;
 
     const computeMeshes = async () => {
       setLoading(true);
@@ -28,29 +29,38 @@ const SolidFeatureMesh: React.FC<SolidFeatureMeshProps> = ({ feature, sketch }) 
           ? sketch.profiles.filter(p => feature.profileIds.includes(p.id))
           : sketch.profiles;
 
-        const depth = feature.direction === 'mid-plane' ? feature.depth / 2 : feature.depth;
-        const generatedGeometries: THREE.BufferGeometry[] = [];
-
-        for (const profile of profilesToExtrude) {
-          const meshData = await solidEngine.extrudeProfile(profile, depth);
-          
-          if (!active) return;
-          
-          const geometry = new THREE.BufferGeometry();
-          geometry.setAttribute('position', new THREE.BufferAttribute(meshData.vertices, 3));
-          geometry.setAttribute('normal', new THREE.BufferAttribute(meshData.normals, 3));
-          geometry.setIndex(new THREE.BufferAttribute(meshData.indices, 1));
-          
-          if (feature.direction === 'mid-plane' || feature.direction === 'reversed') {
-            geometry.translate(0, 0, -depth);
+        if (profilesToExtrude.length === 0) {
+          if (active) {
+            setGeometry(null);
+            setLoading(false);
           }
-          
-          generatedGeometries.push(geometry);
+          return;
         }
 
+        const depth = feature.direction === 'mid-plane' ? feature.depth / 2 : feature.depth;
+        const meshData = await solidEngine.extrudeProfiles(profilesToExtrude, depth);
+        
+        if (!active) return;
+        
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.BufferAttribute(meshData.vertices, 3));
+        geom.setAttribute('normal', new THREE.BufferAttribute(meshData.normals, 3));
+        geom.setIndex(new THREE.BufferAttribute(meshData.indices, 1));
+        
+        if (feature.direction === 'mid-plane' || feature.direction === 'reversed') {
+          geom.translate(0, 0, -depth);
+        }
+
+        currentGeom = geom;
+
         if (active) {
-          setGeometries(generatedGeometries);
+          setGeometry((prev) => {
+            prev?.dispose();
+            return geom;
+          });
           setLoading(false);
+        } else {
+          geom.dispose();
         }
       } catch (error) {
         console.error("Failed to generate solid mesh", error);
@@ -62,42 +72,50 @@ const SolidFeatureMesh: React.FC<SolidFeatureMeshProps> = ({ feature, sketch }) 
 
     return () => {
       active = false;
-      // Cleanup geometries on unmount or re-run
-      geometries.forEach(g => g.dispose());
+      if (currentGeom) {
+        currentGeom.dispose();
+      }
     };
   }, [feature, sketch]);
 
-  const quaternion = useMemo(() => {
-    const q = new THREE.Quaternion();
-    const up = new THREE.Vector3(0, 0, 1);
+  const matrix = useMemo(() => {
+    const m = new THREE.Matrix4();
+    const xAxis = new THREE.Vector3(
+      sketch.plane.xAxis.x,
+      sketch.plane.xAxis.y,
+      sketch.plane.xAxis.z
+    );
+    const yAxis = new THREE.Vector3(
+      sketch.plane.yAxis.x,
+      sketch.plane.yAxis.y,
+      sketch.plane.yAxis.z
+    );
     const normal = new THREE.Vector3(
       sketch.plane.normal.x,
       sketch.plane.normal.y,
       sketch.plane.normal.z
     );
-    q.setFromUnitVectors(up, normal.normalize());
-    return q;
-  }, [sketch.plane]);
-
-  const position = useMemo(() => {
-    return new THREE.Vector3(
+    const origin = new THREE.Vector3(
       sketch.plane.origin.x,
       sketch.plane.origin.y,
       sketch.plane.origin.z
     );
+
+    m.makeBasis(xAxis, yAxis, normal);
+    m.setPosition(origin);
+    return m;
   }, [sketch.plane]);
 
   return (
-    <group position={position} quaternion={quaternion}>
+    <group matrix={matrix} matrixAutoUpdate={false}>
       {loading ? (
-        // Simple loading indicator / wireframe
         <mesh>
           <boxGeometry args={[10, 10, 10]} />
           <meshBasicMaterial color="#ef4444" wireframe />
         </mesh>
       ) : (
-        geometries.map((geom, idx) => (
-          <mesh key={`${feature.id}-${idx}`} geometry={geom}>
+        geometry && (
+          <mesh geometry={geometry}>
             <meshStandardMaterial 
               color="#cbd5e1" 
               metalness={0.2} 
@@ -105,7 +123,7 @@ const SolidFeatureMesh: React.FC<SolidFeatureMeshProps> = ({ feature, sketch }) 
               side={THREE.DoubleSide} 
             />
           </mesh>
-        ))
+        )
       )}
     </group>
   );
