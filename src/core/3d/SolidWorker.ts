@@ -26,6 +26,20 @@ async function initWorker(wasmBuffer?: ArrayBuffer) {
     const jsUrl = `${baseUrl}occ/opencascade.wasm.js`;
     const wasmUrl = `${baseUrl}occ/opencascade.wasm.wasm`;
 
+    // 由於 Vite 可能使用 Module Worker，不支援 importScripts，因此改用 fetch + Function 執行全域腳本
+    try {
+      (self as any).importScripts(jsUrl);
+    } catch (e) {
+      console.warn("importScripts failed (likely Module Worker). Falling back to fetch+eval.");
+      const scriptRes = await fetch(jsUrl);
+      if (!scriptRes.ok) {
+        throw new Error(`Failed to fetch OCC JS: ${scriptRes.status}`);
+      }
+      const scriptText = await scriptRes.text();
+      // 在 Worker 全域作用域內執行腳本，使其成功註冊 self.initOpenCascade
+      (new Function(scriptText))();
+    }
+
     let activeWasmBuffer = wasmBuffer;
     if (!activeWasmBuffer) {
       const wasmRes = await fetch(wasmUrl);
@@ -39,19 +53,7 @@ async function initWorker(wasmBuffer?: ArrayBuffer) {
       wasmBinary: activeWasmBuffer,
     };
 
-    if (typeof (self as any).importScripts === 'function') {
-      (self as any).importScripts(jsUrl);
-      oc = await (self as any).initOpenCascade((self as any).opencascade);
-    } else {
-      const response = await fetch(jsUrl);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch OpenCASCADE JS from ${jsUrl}`);
-      }
-      const text = await response.text();
-      // eslint-disable-next-line no-eval
-      eval(text);
-      oc = await (self as any).initOpenCascade((self as any).opencascade);
-    }
+    oc = await (self as any).initOpenCascade((self as any).opencascade);
   }
 }
 
