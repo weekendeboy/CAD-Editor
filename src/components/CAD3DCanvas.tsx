@@ -9,8 +9,6 @@ import {
   DatumTopPlane,
   DatumRightPlane,
   DatumPlaneFeature,
-  ExtrudeFeature,
-  SketchFeature,
 } from '../types/cad';
 import { solidEngine } from '../core/3d/SolidEngine';
 import { buildFeatureEvalOps } from '../core/3d/FeaturePipelineAdapter';
@@ -42,7 +40,7 @@ class ThreeErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryStat
   public render() {
     if (this.state.hasError) {
       return (
-        <div className="w-full h-full flex flex-col items-center justify-center bg-slate-900 text-slate-300 p-6">
+        <div className="w-full h-full flex flex-col items-center justify-center bg-slate-900 text-slate-300 p-6" id="three-error-boundary-fallback">
           <div className="bg-slate-800 border border-red-500/50 rounded-lg p-6 max-w-md text-center shadow-xl">
             <h3 className="text-lg font-bold text-red-400 mb-2">3D 視圖載入異常</h3>
             <p className="text-sm text-slate-400 mb-4">
@@ -51,6 +49,7 @@ class ThreeErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryStat
             <button
               onClick={() => this.setState({ hasError: false, error: null })}
               className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-sm font-semibold transition-colors"
+              id="retry-three-rendering-btn"
             >
               重新嘗試載入
             </button>
@@ -465,7 +464,7 @@ const CanvasContent: React.FC = () => {
 const CAD3DCanvas: React.FC = () => {
   return (
     <ThreeErrorBoundary>
-      <div className="w-full h-full absolute inset-0 z-0 bg-slate-900">
+      <div className="w-full h-full absolute inset-0 z-0 bg-slate-900" id="cad-3d-canvas-container">
         <Canvas
           gl={{ logarithmicDepthBuffer: true, antialias: true }}
           camera={{
@@ -474,6 +473,7 @@ const CAD3DCanvas: React.FC = () => {
             near: 0.1,
             far: 50000,
           }}
+          id="cad-3d-fiber-canvas"
         >
           <Suspense fallback={null}>
             <CanvasContent />

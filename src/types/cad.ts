@@ -206,10 +206,10 @@ export type FeatureType =
 export interface BaseCADFeature {
   id: string;
   name: string;
-  type: FeatureType;
+  type: FeatureType | string;
   dependencies: string[]; // 所依賴的父特徵 ID 清單
   suppressed: boolean;   // 是否被抑制（跳過運算）
-  visible?: boolean;      // 視圖可見度
+  visible?: boolean;     // 視圖可見度（可選布林）
   error?: string | null; // 重算錯誤或警告訊息
   isDirty?: boolean;     // 資料是否變更需重新運算
   createdAt?: number;
@@ -265,9 +265,6 @@ export interface DatumPlaneFeature extends BaseCADFeature {
   offsetDistance: number;       // 偏移距離 (mm)
   rotationAngle?: number;       // 旋轉角度 (弧度)
   plane: CustomPlane;           // 計算後的空間姿態
-  dependencies: string[];       // 依賴的特徵 ID 清單 [referencePlaneId]
-  suppressed: boolean;
-  visible: boolean;
 }
 
 export interface Fillet3DFeature extends BaseCADFeature {
@@ -357,6 +354,7 @@ export const DEFAULT_CAD_LAYERS: Record<string, CADLayer> = {
 };
 
 export function createEmptyCADDocument(): CADDocument {
+  const featureTree: CADFeature[] = [];
   return {
     id: 'doc-' + Date.now().toString(),
     title: 'Untitled Document',
@@ -401,8 +399,8 @@ export function createEmptyCADDocument(): CADDocument {
       'datum-top': DatumTopPlane,
       'datum-right': DatumRightPlane,
     },
-    featureTree: [],
-    rollbackIndex: 0,
+    featureTree,
+    rollbackIndex: featureTree.length,
     activeSketchId: null,
     blocks: {},
   };

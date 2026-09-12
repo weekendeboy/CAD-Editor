@@ -7,7 +7,7 @@ import {
 } from './SolidEngine.types';
 import type { SketchProfile } from '../../types/cad';
 
-class SolidEngine {
+export class SolidEngine {
   private worker: Worker | null = null;
   private resolvers: Map<string, { resolve: (val: any) => void; reject: (err: any) => void }> = new Map();
   private initPromise: Promise<void> | null = null;

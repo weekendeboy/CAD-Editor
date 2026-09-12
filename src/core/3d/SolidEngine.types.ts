@@ -5,12 +5,7 @@ export interface FeatureEvalOp {
   type: 'EXTRUDE' | 'CUT_EXTRUDE';
   operation: 'JOIN' | 'CUT';
   profiles: SketchProfile[];
-  plane: {
-    origin: { x: number; y: number; z: number };
-    xAxis: { x: number; y: number; z: number };
-    yAxis: { x: number; y: number; z: number };
-    normal: { x: number; y: number; z: number };
-  };
+  plane: CustomPlane; // 來源草圖的基準面
   depth: number;
   direction: 'normal' | 'reversed' | 'mid-plane';
   throughAll?: boolean;

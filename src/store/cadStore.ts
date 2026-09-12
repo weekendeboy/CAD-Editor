@@ -157,9 +157,9 @@ function pushUndoState(state: CADState): Partial<CADState> {
 }
 
 /**
-  * Helper to check if a feature tree ordering satisfies DAG dependencies.
-  * In a feature tree, upstream features MUST precede downstream dependent features.
-  */
+ * Helper to check if a feature tree ordering satisfies DAG dependencies.
+ * In a feature tree, upstream features MUST precede downstream dependent features.
+ */
 function checkDAGOrderValid(features: CADFeature[]): boolean {
   const posMap = new Map<string, number>();
   features.forEach((f, idx) => posMap.set(f.id, idx));
@@ -309,6 +309,10 @@ export const useCADStore = create<CADState>((set, get) => ({
       newRollbackIndex = Math.min(newRollbackIndex, updatedTree.length);
     }
 
+    const nextActiveSketchId = state.activeSketchId === id
+      ? (updatedTree.find((f) => f.type === 'SKETCH')?.id || null)
+      : state.activeSketchId;
+
     return {
       ...pushUndoState(state),
       document: {
@@ -317,7 +321,7 @@ export const useCADStore = create<CADState>((set, get) => ({
         rollbackIndex: newRollbackIndex,
       },
       selectedFeatureId: state.selectedFeatureId === id ? null : state.selectedFeatureId,
-      activeSketchId: state.activeSketchId === id ? null : state.activeSketchId,
+      activeSketchId: nextActiveSketchId,
     };
   }),
 
@@ -340,8 +344,12 @@ export const useCADStore = create<CADState>((set, get) => ({
       };
     });
 
+    const targetFeature = finalTree.find((f) => f.id === id);
+    const nextActiveSketchId = (targetFeature && targetFeature.type === 'SKETCH') ? id : state.activeSketchId;
+
     return {
       ...pushUndoState(state),
+      activeSketchId: nextActiveSketchId,
       document: {
         ...state.document,
         featureTree: finalTree,
@@ -353,14 +361,20 @@ export const useCADStore = create<CADState>((set, get) => ({
     const feature = state.document.featureTree.find((f) => f.id === id);
     if (!feature) return state;
 
+    const newSuppressed = !feature.suppressed;
     const updatedTree = state.document.featureTree.map((f) =>
-      f.id === id ? { ...f, suppressed: !f.suppressed, isDirty: true } : f
+      f.id === id ? { ...f, suppressed: newSuppressed, isDirty: true } : f
     );
 
     const dirtyTree = markDownstreamDirty(updatedTree, id);
 
+    const nextActiveSketchId = (feature.type === 'SKETCH' && newSuppressed && state.activeSketchId === id)
+      ? (dirtyTree.find((f) => f.type === 'SKETCH' && !f.suppressed)?.id || null)
+      : (feature.type === 'SKETCH' && !newSuppressed ? id : state.activeSketchId);
+
     return {
       ...pushUndoState(state),
+      activeSketchId: nextActiveSketchId,
       document: {
         ...state.document,
         featureTree: dirtyTree,
@@ -419,7 +433,19 @@ export const useCADStore = create<CADState>((set, get) => ({
   setRollbackIndex: (index) => set((state) => {
     const clamped = Math.max(0, Math.min(index, state.document.featureTree.length));
     if (state.document.rollbackIndex === clamped) return state;
+
+    const activeFeatures = state.document.featureTree.slice(0, clamped);
+    let nextActiveSketchId = state.activeSketchId;
+    if (nextActiveSketchId) {
+      const activeSketchInRollback = activeFeatures.find((f) => f.id === nextActiveSketchId && f.type === 'SKETCH');
+      if (!activeSketchInRollback) {
+        const lastSketch = [...activeFeatures].reverse().find((f) => f.type === 'SKETCH');
+        nextActiveSketchId = lastSketch ? lastSketch.id : null;
+      }
+    }
+
     return {
+      activeSketchId: nextActiveSketchId,
       document: {
         ...state.document,
         rollbackIndex: clamped,
