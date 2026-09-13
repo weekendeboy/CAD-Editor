@@ -28,17 +28,16 @@ async function initWorker(wasmBuffer?: ArrayBuffer) {
     const jsUrl = `${baseUrl}occ/opencascade.wasm.js`;
     const wasmUrl = `${baseUrl}occ/opencascade.wasm.wasm`;
 
-    // 由於 Vite 可能使用 Module Worker，不支援 importScripts，因此改用 fetch + Function 執行全域腳本
+    // 由於我們現在使用 classic worker (?worker)，可以直接使用 importScripts
     try {
       (self as any).importScripts(jsUrl);
     } catch (e) {
-      console.warn("importScripts failed (likely Module Worker). Falling back to fetch+eval.");
+      console.warn("importScripts failed, falling back to fetch+eval.", e);
       const scriptRes = await fetch(jsUrl);
       if (!scriptRes.ok) {
         throw new Error(`Failed to fetch OCC JS: ${scriptRes.status}`);
       }
       const scriptText = await scriptRes.text();
-      // 在 Worker 全域作用域內執行腳本，使其成功註冊 self.initOpenCascade
       (new Function(scriptText))();
     }
 
@@ -315,6 +314,7 @@ function transformFaceTo3D(
   const origin = plane?.origin || { x: 0, y: 0, z: 0 };
   const normal = plane?.normal || { x: 0, y: 0, z: 1 };
   const xAxis = plane?.xAxis || { x: 1, y: 0, z: 0 };
+  const yAxis = plane?.yAxis || { x: 0, y: 1, z: 0 };
 
   const fromOrig = new occ.gp_Pnt_3(0, 0, 0);
   const fromNorm = new occ.gp_Dir_4(0, 0, 1);
@@ -325,6 +325,16 @@ function transformFaceTo3D(
   const toNorm = new occ.gp_Dir_4(normal.x, normal.y, normal.z);
   const toXDir = new occ.gp_Dir_4(xAxis.x, xAxis.y, xAxis.z);
   const toAx = new occ.gp_Ax3_3(toOrig, toNorm, toXDir);
+  
+  const calcY = {
+    x: normal.y * xAxis.z - normal.z * xAxis.y,
+    y: normal.z * xAxis.x - normal.x * xAxis.z,
+    z: normal.x * xAxis.y - normal.y * xAxis.x
+  };
+  const dot = calcY.x * yAxis.x + calcY.y * yAxis.y + calcY.z * yAxis.z;
+  if (dot < 0) {
+    toAx.YReverse();
+  }
 
   const alignTrsf = new occ.gp_Trsf_1();
   alignTrsf.SetDisplacement(fromAx, toAx);
@@ -445,13 +455,14 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
   const origin = plane.origin || { x: 0, y: 0, z: 0 };
   const normal = plane.normal || { x: 0, y: 0, z: 1 };
   const xAxis = plane.xAxis || { x: 1, y: 0, z: 0 };
+  const yAxis = plane.yAxis || { x: 0, y: 1, z: 0 };
 
   for (const profile of op.profiles) {
     const localFace = createFaceFromProfile(profile, occ);
 
     if (isRevolve) {
       // 1. Transform local 2D face to 3D datum plane position
-      const transformedFace = transformFaceTo3D(localFace, { origin, normal, xAxis }, occ);
+      const transformedFace = transformFaceTo3D(localFace, { origin, normal, xAxis, yAxis }, occ);
       localFace.delete();
 
       // 2. Setup 3D Axis of Revolution
@@ -528,6 +539,16 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
       const toNorm = new occ.gp_Dir_4(normal.x, normal.y, normal.z);
       const toXDir = new occ.gp_Dir_4(xAxis.x, xAxis.y, xAxis.z);
       const toAx = new occ.gp_Ax3_3(toOrig, toNorm, toXDir);
+
+      const calcY = {
+        x: normal.y * xAxis.z - normal.z * xAxis.y,
+        y: normal.z * xAxis.x - normal.x * xAxis.z,
+        z: normal.x * xAxis.y - normal.y * xAxis.x
+      };
+      const dot = calcY.x * yAxis.x + calcY.y * yAxis.y + calcY.z * yAxis.z;
+      if (dot < 0) {
+        toAx.YReverse();
+      }
 
       const alignTrsf = new occ.gp_Trsf_1();
       alignTrsf.SetDisplacement(fromAx, toAx);
@@ -701,13 +722,14 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         // 維護特徵獨立實體字典 (Per-Feature Solid Cache)
         const featureSolids = new Map<string, any>();
 
-        for (const op of operations) {
-          if (
-            op.type === 'EXTRUDE' ||
-            op.type === 'CUT_EXTRUDE' ||
-            op.type === 'REVOLVE' ||
-            op.type === 'REVOLVE_CUT'
-          ) {
+        try {
+          for (const op of operations) {
+            if (
+              op.type === 'EXTRUDE' ||
+              op.type === 'CUT_EXTRUDE' ||
+              op.type === 'REVOLVE' ||
+              op.type === 'REVOLVE_CUT'
+            ) {
             const featureSolid = createFeatureSolid(op, occ);
             if (!featureSolid || featureSolid.IsNull()) {
               continue;
@@ -933,16 +955,31 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           ) {
             // 從 featureSolids 取得目標特徵實體（若未指定或找不到，退化取 currentSolid 作為母體）
             let sourceSolid: any = null;
+            let shouldDeleteSourceSolid = false;
             if (op.targetFeatureIds && op.targetFeatureIds.length > 0) {
+              const sources: any[] = [];
               for (const tid of op.targetFeatureIds) {
                 if (featureSolids.has(tid)) {
-                  sourceSolid = featureSolids.get(tid);
-                  break;
+                  sources.push(featureSolids.get(tid));
                 }
+              }
+              if (sources.length === 1) {
+                sourceSolid = sources[0];
+              } else if (sources.length > 1) {
+                const builder = new occ.BRep_Builder();
+                const compound = new occ.TopoDS_Compound();
+                builder.MakeCompound(compound);
+                for (const s of sources) {
+                  builder.Add(compound, s);
+                }
+                builder.delete();
+                sourceSolid = compound;
+                shouldDeleteSourceSolid = true;
               }
             }
             if (!sourceSolid || sourceSolid.IsNull()) {
               sourceSolid = currentSolid;
+              shouldDeleteSourceSolid = false;
             }
 
             if (!sourceSolid || sourceSolid.IsNull()) {
@@ -1091,6 +1128,10 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 dir.delete();
                 pnt.delete();
               }
+            }
+
+            if (shouldDeleteSourceSolid && sourceSolid) {
+              sourceSolid.delete();
             }
 
             if (op.featureId && currentSolid) {
@@ -1360,18 +1401,19 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             }
           }
         }
-
-        // Clean up per-feature solid cache
-        for (const [, s] of featureSolids) {
-          if (s && s !== currentSolid && typeof s.delete === 'function') {
-            try {
-              if (!s.IsNull()) {
-                s.delete();
-              }
-            } catch (_) {}
+        } finally {
+          // Clean up per-feature solid cache
+          for (const [, s] of featureSolids) {
+            if (s && s !== currentSolid && typeof s.delete === 'function') {
+              try {
+                if (!s.IsNull()) {
+                  s.delete();
+                }
+              } catch (_) {}
+            }
           }
+          featureSolids.clear();
         }
-        featureSolids.clear();
 
         if (currentSolid) {
           const meshData = tessellateSolid(currentSolid, occ);

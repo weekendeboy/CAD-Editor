@@ -20,6 +20,7 @@ export function getDirectDependencies(feature: CADFeature): string[] {
     case 'EXTRUDE':
     case 'CUT_EXTRUDE':
     case 'REVOLVE':
+    case 'REVOLVE_CUT':
       if (feature.sketchId) {
         deps.add(feature.sketchId);
       }
@@ -28,16 +29,50 @@ export function getDirectDependencies(feature: CADFeature): string[] {
       if (feature.referenceFeatureId) {
         deps.add(feature.referenceFeatureId);
       }
+      if (feature.referencePlaneId) {
+        deps.add(feature.referencePlaneId);
+      }
       break;
     case 'FILLET_3D':
     case 'CHAMFER_3D':
+    case 'SHELL_3D':
       if (feature.targetFeatureId) {
         deps.add(feature.targetFeatureId);
+      }
+      break;
+    case 'LINEAR_PATTERN':
+    case 'CIRCULAR_PATTERN':
+      if (feature.targetFeatureIds) {
+        for (const id of feature.targetFeatureIds) deps.add(id);
+      }
+      break;
+    case 'MIRROR_3D':
+      if (feature.targetFeatureIds) {
+        for (const id of feature.targetFeatureIds) deps.add(id);
+      }
+      if (feature.mirrorPlaneFeatureId) {
+        deps.add(feature.mirrorPlaneFeatureId);
+      }
+      break;
+    case 'SWEEP':
+      if (feature.profileSketchId) {
+        deps.add(feature.profileSketchId);
+      }
+      if (feature.pathSketchId) {
+        deps.add(feature.pathSketchId);
+      }
+      break;
+    case 'LOFT':
+      if (feature.sketchIds) {
+        for (const id of feature.sketchIds) deps.add(id);
       }
       break;
     case 'SKETCH':
       if (feature.plane?.parentFeatureId) {
         deps.add(feature.plane.parentFeatureId);
+      }
+      if (feature.planeFeatureId) {
+        deps.add(feature.planeFeatureId);
       }
       break;
   }

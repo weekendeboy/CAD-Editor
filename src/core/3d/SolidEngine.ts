@@ -6,6 +6,7 @@ import {
   FeatureEvalOp,
 } from './SolidEngine.types';
 import type { SketchProfile } from '../../types/cad';
+import SolidWorker from './SolidWorker.ts?worker';
 
 export class SolidEngine {
   private worker: Worker | null = null;
@@ -19,7 +20,7 @@ export class SolidEngine {
   private getWorker(): Worker | null {
     if (!this.worker && typeof window !== 'undefined' && typeof Worker !== 'undefined') {
       try {
-        this.worker = new Worker(new URL('./SolidWorker.ts', import.meta.url), { type: 'module' });
+        this.worker = new SolidWorker();
         this.worker.onmessage = this.handleMessage.bind(this);
         this.worker.onerror = (err) => {
           console.error('SolidWorker error:', err);
