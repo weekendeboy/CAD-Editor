@@ -1,14 +1,100 @@
-import type { SketchProfile, CustomPlane } from '../../types/cad';
+import type { SketchProfile } from '../../types/cad';
 
 export interface FeatureEvalOp {
   featureId: string;
-  type: 'EXTRUDE' | 'CUT_EXTRUDE';
-  operation: 'JOIN' | 'CUT';
-  profiles: SketchProfile[];
-  plane: CustomPlane; // 來源草圖的基準面
-  depth: number;
-  direction: 'normal' | 'reversed' | 'mid-plane';
+  type:
+    | 'EXTRUDE'
+    | 'CUT_EXTRUDE'
+    | 'REVOLVE'
+    | 'REVOLVE_CUT'
+    | 'LINEAR_PATTERN'
+    | 'CIRCULAR_PATTERN'
+    | 'MIRROR_3D'
+    | 'SWEEP'
+    | 'LOFT'
+    | 'FILLET_3D'
+    | 'CHAMFER_3D'
+    | 'SHELL_3D';
+  operation: 'JOIN' | 'CUT'; // JOIN: 長料 (Fuse); CUT: 除料 (Cut)
+  targetFeatureIds?: string[]; // 要複製或鏡射的目標特徵 ID 清單
+  profiles?: SketchProfile[]; // 該特徵引用的 2D 閉環輪廓
+  plane?: {
+    origin: { x: number; y: number; z: number };
+    xAxis: { x: number; y: number; z: number };
+    yAxis: { x: number; y: number; z: number };
+    normal: { x: number; y: number; z: number };
+  };
+  // 拉伸專用參數 (Extrude / Cut Extrude)
+  depth?: number;
+  direction?: 'normal' | 'reversed' | 'mid-plane';
   throughAll?: boolean;
+  // 旋轉專用參數 (Revolve / Revolve Cut)
+  axis?: {
+    origin: { x: number; y: number; z: number };   // 3D 空間軸起點
+    direction: { x: number; y: number; z: number };// 3D 空間軸單位方向向量
+  };
+  angle?: number; // 旋轉弧度
+  // 線性陣列 (Linear Pattern)
+  patternLinear?: {
+    dir1: { x: number; y: number; z: number };
+    count1: number;
+    spacing1: number;
+    dir2?: { x: number; y: number; z: number };
+    count2?: number;
+    spacing2?: number;
+  };
+  // 環狀陣列 (Circular Pattern)
+  patternCircular?: {
+    axis: {
+      origin: { x: number; y: number; z: number };
+      direction: { x: number; y: number; z: number };
+    };
+    count: number;
+    totalAngle: number;
+    equalSpacing: boolean;
+  };
+  // 3D 鏡射 (3D Mirror)
+  mirrorPlane?: {
+    origin: { x: number; y: number; z: number };
+    normal: { x: number; y: number; z: number };
+  };
+  // 掃出運算規格 (Sweep)
+  sweepData?: {
+    pathSegments: {
+      type: 'line' | 'arc';
+      start: { x: number; y: number; z: number };
+      end: { x: number; y: number; z: number };
+      center?: { x: number; y: number; z: number };
+      radius?: number;
+    }[];
+  };
+  // 疊層拉伸運算規格 (Loft)
+  loftData?: {
+    sections: {
+      profiles: SketchProfile[];
+      plane: {
+        origin: { x: number; y: number; z: number };
+        xAxis: { x: number; y: number; z: number };
+        yAxis: { x: number; y: number; z: number };
+        normal: { x: number; y: number; z: number };
+      };
+    }[];
+    isSolid: boolean;
+    ruled: boolean;
+  };
+  // 3D 圓角/倒角/薄殼規格
+  fillet3D?: {
+    radius: number;
+    edgeSelectionMode: 'all' | 'vertical' | 'horizontal';
+  };
+  chamfer3D?: {
+    distance: number;
+    edgeSelectionMode: 'all' | 'vertical' | 'horizontal';
+  };
+  shell3D?: {
+    thickness: number;
+    direction: 'inside' | 'outside';
+  };
 }
 
 export type SolidTaskType =

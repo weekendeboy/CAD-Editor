@@ -13,11 +13,23 @@ export class SolidEngine {
   private initPromise: Promise<void> | null = null;
 
   constructor() {
-    this.worker = new Worker(new URL('./SolidWorker.ts', import.meta.url), { type: 'module' });
-    this.worker.onmessage = this.handleMessage.bind(this);
-    this.worker.onerror = (err) => {
-      console.error('SolidWorker error:', err);
-    };
+    // Lazy worker creation to prevent module evaluation crashes in constrained environments
+  }
+
+  private getWorker(): Worker | null {
+    if (!this.worker && typeof window !== 'undefined' && typeof Worker !== 'undefined') {
+      try {
+        this.worker = new Worker(new URL('./SolidWorker.ts', import.meta.url), { type: 'module' });
+        this.worker.onmessage = this.handleMessage.bind(this);
+        this.worker.onerror = (err) => {
+          console.error('SolidWorker error:', err);
+        };
+      } catch (err) {
+        console.error('Failed to initialize SolidWorker:', err);
+        this.worker = null;
+      }
+    }
+    return this.worker;
   }
 
   private handleMessage(e: MessageEvent<SolidTaskResponse>) {
@@ -37,7 +49,16 @@ export class SolidEngine {
 
   private dispatch<T>(type: SolidTaskRequest['type'], payload?: any, transfer?: Transferable[]): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      const taskId = crypto.randomUUID();
+      const worker = this.getWorker();
+      if (!worker) {
+        return reject(new Error('Worker is not available or failed to initialize'));
+      }
+
+      const taskId =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `task_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
       this.resolvers.set(taskId, { resolve, reject });
 
       const req: SolidTaskRequest = {
@@ -46,15 +67,15 @@ export class SolidEngine {
         payload: { ...payload, taskId },
       };
 
-      if (this.worker) {
+      try {
         if (transfer && transfer.length > 0) {
-          this.worker.postMessage(req, transfer);
+          worker.postMessage(req, transfer);
         } else {
-          this.worker.postMessage(req);
+          worker.postMessage(req);
         }
-      } else {
+      } catch (postErr) {
         this.resolvers.delete(taskId);
-        reject(new Error('Worker is not initialized'));
+        reject(postErr);
       }
     });
   }

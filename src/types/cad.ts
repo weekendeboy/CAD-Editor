@@ -199,9 +199,16 @@ export type FeatureType =
   | 'EXTRUDE' 
   | 'CUT_EXTRUDE' 
   | 'REVOLVE' 
+  | 'REVOLVE_CUT' 
   | 'DATUM_PLANE' 
   | 'FILLET_3D' 
-  | 'CHAMFER_3D';
+  | 'CHAMFER_3D'
+  | 'SHELL_3D'
+  | 'LINEAR_PATTERN'
+  | 'CIRCULAR_PATTERN'
+  | 'MIRROR_3D'
+  | 'SWEEP'
+  | 'LOFT';
 
 export interface BaseCADFeature {
   id: string;
@@ -251,8 +258,16 @@ export interface RevolveFeature extends BaseCADFeature {
   type: 'REVOLVE';
   sketchId: string;
   profileIds: string[];
-  axisEntityId: string; // 草圖內的旋轉軸線
-  angle: number; // 旋轉角度，預設 2*Math.PI
+  axisEntityId: string; // 草圖內作為旋轉軸的直線圖元 ID
+  angle: number;        // 旋轉弧度 (預設為 2 * Math.PI, 即 360°)
+}
+
+export interface RevolveCutFeature extends BaseCADFeature {
+  type: 'REVOLVE_CUT';
+  sketchId: string;
+  profileIds: string[];
+  axisEntityId: string;
+  angle: number;
 }
 
 export type DatumPlaneType = 'offset' | 'angle' | 'three-point' | 'face_reference';
@@ -269,17 +284,66 @@ export interface DatumPlaneFeature extends BaseCADFeature {
 
 export interface Fillet3DFeature extends BaseCADFeature {
   type: 'FILLET_3D';
-  targetFeatureId: string;
-  radius: number;
-  edgeIndices?: number[];
+  radius: number;                       // 圓角半徑 (mm, 預設 2.0)
+  edgeSelectionMode?: 'all' | 'vertical' | 'horizontal'; // 邊界篩選模式 (預設 'all')
+  targetFeatureId?: string;             // 作用目標特徵 ID (選填，若無則作用於全域累進母體)
+  edgeIndices?: number[];               // 作用邊緣索引（向下相容）
 }
 
 export interface Chamfer3DFeature extends BaseCADFeature {
   type: 'CHAMFER_3D';
-  targetFeatureId: string;
-  distance: number;
-  angle?: number;
-  edgeIndices?: number[];
+  distance: number;                     // 倒角距離 (mm, 預設 2.0)
+  edgeSelectionMode?: 'all' | 'vertical' | 'horizontal'; // 邊界篩選模式 (預設 'all')
+  targetFeatureId?: string;             // 作用目標特徵 ID (選填)
+  angle?: number;                       // 倒角角度（向下相容）
+  edgeIndices?: number[];               // 作用邊緣索引（向下相容）
+}
+
+export interface Shell3DFeature extends BaseCADFeature {
+  type: 'SHELL_3D';
+  thickness: number;                    // 殼厚度 (mm, 預設 1.5)
+  direction: 'inside' | 'outside';      // 向內或向外薄殼
+  targetFeatureId?: string;             // 作用目標特徵 ID (選填)
+}
+
+export interface LinearPatternFeature extends BaseCADFeature {
+  type: 'LINEAR_PATTERN';
+  targetFeatureIds: string[]; // 要複製的特徵 ID 清單
+  dir1: Point3D;              // 方向 1 向量 (3D 空間方向)
+  count1: number;             // 方向 1 實例總數 (包含原件，>= 2)
+  spacing1: number;           // 方向 1 間距 (mm)
+  dir2?: Point3D;             // 方向 2 向量 (選填)
+  count2?: number;            // 方向 2 實例總數 (選填，>= 1)
+  spacing2?: number;          // 方向 2 間距 (選填)
+}
+
+export interface CircularPatternFeature extends BaseCADFeature {
+  type: 'CIRCULAR_PATTERN';
+  targetFeatureIds: string[]; // 要複製的特徵 ID 清單
+  axisOrigin: Point3D;        // 旋轉中心軸起點
+  axisDirection: Point3D;     // 旋轉中心軸單位方向向量
+  count: number;              // 實例總數 (>= 2)
+  totalAngle: number;         // 填滿總角度 (弧度，例如 2 * Math.PI)
+  equalSpacing: boolean;      // 是否等間距排列
+}
+
+export interface Mirror3DFeature extends BaseCADFeature {
+  type: 'MIRROR_3D';
+  targetFeatureIds: string[];     // 要鏡射的特徵 ID 清單
+  mirrorPlaneFeatureId: string;   // 參照的 DatumPlane 特徵 ID
+}
+
+export interface SweepFeature extends BaseCADFeature {
+  type: 'SWEEP';
+  profileSketchId: string; // 截面草圖 ID
+  pathSketchId: string;    // 導引路徑草圖 ID
+}
+
+export interface LoftFeature extends BaseCADFeature {
+  type: 'LOFT';
+  sketchIds: string[];     // 依序排列的 2 個以上斷面草圖 ID 清單
+  isSolid: boolean;        // 是否封閉為實體 (預設 true)
+  ruled: boolean;          // 是否為直紋面 (ruled: true 直線過渡; false: B-Spline 平滑過渡)
 }
 
 export type CADFeature = 
@@ -287,9 +351,16 @@ export type CADFeature =
   | ExtrudeFeature 
   | CutExtrudeFeature 
   | RevolveFeature 
+  | RevolveCutFeature 
   | DatumPlaneFeature 
   | Fillet3DFeature 
-  | Chamfer3DFeature;
+  | Chamfer3DFeature
+  | Shell3DFeature
+  | LinearPatternFeature
+  | CircularPatternFeature
+  | Mirror3DFeature
+  | SweepFeature
+  | LoftFeature;
 
 export type FeatureNode = CADFeature;
 

@@ -7,7 +7,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useCADStore } from './store/cadStore';
 import { useCadShortcuts } from './hooks/useCadShortcuts';
 import { CADSketchCanvas } from './components/CADSketchCanvas';
-import CAD3DCanvas from './components/CAD3DCanvas';
+const CAD3DCanvas = React.lazy(() => import('./components/CAD3DCanvas'));
 import { SketchFeature, BoundingBox2D, CADEntity2D } from './types/cad';
 import { OsnapSettingsModal } from './components/OsnapSettingsModal';
 import { PolarSettingsModal } from './components/PolarSettingsModal';
@@ -15,6 +15,9 @@ import { LayerControlBar } from './components/LayerControlBar';
 import { LayerManagerModal } from './components/LayerManagerModal';
 import { FeatureTreePanel } from './components/FeatureTreePanel';
 import { ExtrudeFeatureModal } from './components/ExtrudeFeatureModal';
+import { RevolveFeatureModal } from './components/RevolveFeatureModal';
+import { PatternMirrorModal } from './components/PatternMirrorModal';
+import { SweepLoftModal } from './components/SweepLoftModal';
 import { exportSketchToDxf, downloadDxfFile } from './core/dxf/DxfWriter';
 import { parseDxfContent } from './core/dxf/DxfParser';
 import { solidEngine } from './core/3d/SolidEngine';
@@ -45,6 +48,7 @@ import {
   Move,
   Scaling,
   RotateCw,
+  RotateCcw,
   Orbit,
   LayoutGrid,
   SquareSlash,
@@ -53,6 +57,8 @@ import {
   FileUp,
   CheckCircle2,
   Box,
+  Route,
+  Layers,
 } from 'lucide-react';
 
 /**
@@ -125,6 +131,33 @@ export default function App() {
   }>({
     isOpen: false,
     mode: 'EXTRUDE',
+  });
+
+  // 旋轉長料 (Revolve Boss) / 旋轉除料 (Revolve Cut) 參數設定彈窗狀態
+  const [revolveModalConfig, setRevolveModalConfig] = useState<{
+    isOpen: boolean;
+    mode: 'REVOLVE' | 'REVOLVE_CUT';
+  }>({
+    isOpen: false,
+    mode: 'REVOLVE',
+  });
+
+  // 3D 陣列與鏡射 (Linear / Circular / Mirror 3D) 參數設定彈窗狀態
+  const [patternModalConfig, setPatternModalConfig] = useState<{
+    isOpen: boolean;
+    mode: 'LINEAR_PATTERN' | 'CIRCULAR_PATTERN' | 'MIRROR_3D';
+  }>({
+    isOpen: false,
+    mode: 'LINEAR_PATTERN',
+  });
+
+  // 掃出 (Sweep Boss) / 疊層拉伸 (Loft Boss) 參數設定彈窗狀態
+  const [sweepLoftModalConfig, setSweepLoftModalConfig] = useState<{
+    isOpen: boolean;
+    mode: 'SWEEP' | 'LOFT';
+  }>({
+    isOpen: false,
+    mode: 'SWEEP',
   });
 
   const {
@@ -864,7 +897,7 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-3">
-          {/* 3D Extrude Boss / Extrude Cut 特徵建立按鈕 */}
+          {/* 3D Extrude & Revolve Feature Creation Buttons */}
           {showExtrudeButtons && (
             <div className="flex items-center gap-1.5 bg-neutral-900 p-1 rounded-md border border-neutral-800">
               <button
@@ -882,6 +915,62 @@ export default function App() {
               >
                 <Scissors size={15} className="text-amber-400" />
                 <span>伸長除料</span>
+              </button>
+              <button
+                onClick={() => setRevolveModalConfig({ isOpen: true, mode: 'REVOLVE' })}
+                className="bg-purple-600/20 hover:bg-purple-600/30 text-purple-400 border border-purple-500/40 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                title="旋轉長料 (Revolve Boss)"
+              >
+                <RotateCw size={15} className="text-purple-400" />
+                <span>旋轉長料</span>
+              </button>
+              <button
+                onClick={() => setRevolveModalConfig({ isOpen: true, mode: 'REVOLVE_CUT' })}
+                className="bg-rose-600/20 hover:bg-rose-600/30 text-rose-400 border border-rose-500/40 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                title="旋轉除料 (Revolve Cut)"
+              >
+                <RotateCcw size={15} className="text-rose-400" />
+                <span>旋轉除料</span>
+              </button>
+              <button
+                onClick={() => setSweepLoftModalConfig({ isOpen: true, mode: 'SWEEP' })}
+                className="bg-teal-600/20 hover:bg-teal-600/30 text-teal-400 border border-teal-500/40 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                title="掃出長料 (Sweep Boss)"
+              >
+                <Route size={15} className="text-teal-400" />
+                <span>掃出</span>
+              </button>
+              <button
+                onClick={() => setSweepLoftModalConfig({ isOpen: true, mode: 'LOFT' })}
+                className="bg-violet-600/20 hover:bg-violet-600/30 text-violet-400 border border-violet-500/40 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                title="疊層拉伸 (Loft Boss)"
+              >
+                <Layers size={15} className="text-violet-400" />
+                <span>疊層拉伸</span>
+              </button>
+              <button
+                onClick={() => setPatternModalConfig({ isOpen: true, mode: 'LINEAR_PATTERN' })}
+                className="bg-sky-600/20 hover:bg-sky-600/30 text-sky-400 border border-sky-500/40 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                title="線性陣列 (Linear Pattern)"
+              >
+                <LayoutGrid size={15} className="text-sky-400" />
+                <span>線性陣列</span>
+              </button>
+              <button
+                onClick={() => setPatternModalConfig({ isOpen: true, mode: 'CIRCULAR_PATTERN' })}
+                className="bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-400 border border-indigo-500/40 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                title="環狀陣列 (Circular Pattern)"
+              >
+                <Orbit size={15} className="text-indigo-400" />
+                <span>環狀陣列</span>
+              </button>
+              <button
+                onClick={() => setPatternModalConfig({ isOpen: true, mode: 'MIRROR_3D' })}
+                className="bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/40 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                title="3D 鏡射 (3D Mirror)"
+              >
+                <FlipHorizontal size={15} className="text-emerald-400" />
+                <span>3D 鏡射</span>
               </button>
             </div>
           )}
@@ -1045,7 +1134,15 @@ export default function App() {
 
           {viewMode === '3D' && (
             <div className="absolute inset-0 w-full h-full z-10">
-              <CAD3DCanvas />
+              <React.Suspense
+                fallback={
+                  <div className="w-full h-full flex items-center justify-center bg-slate-900 text-sky-400 font-mono text-xs">
+                    載入 3D 視圖與 CAD 運算核心中...
+                  </div>
+                }
+              >
+                <CAD3DCanvas />
+              </React.Suspense>
             </div>
           )}
         </div>
@@ -1059,6 +1156,21 @@ export default function App() {
         isOpen={extrudeModalConfig.isOpen}
         mode={extrudeModalConfig.mode}
         onClose={() => setExtrudeModalConfig((prev) => ({ ...prev, isOpen: false }))}
+      />
+      <RevolveFeatureModal
+        isOpen={revolveModalConfig.isOpen}
+        mode={revolveModalConfig.mode}
+        onClose={() => setRevolveModalConfig((prev) => ({ ...prev, isOpen: false }))}
+      />
+      <PatternMirrorModal
+        isOpen={patternModalConfig.isOpen}
+        mode={patternModalConfig.mode}
+        onClose={() => setPatternModalConfig((prev) => ({ ...prev, isOpen: false }))}
+      />
+      <SweepLoftModal
+        isOpen={sweepLoftModalConfig.isOpen}
+        mode={sweepLoftModalConfig.mode}
+        onClose={() => setSweepLoftModalConfig((prev) => ({ ...prev, isOpen: false }))}
       />
     </div>
   );
