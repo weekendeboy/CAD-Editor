@@ -751,7 +751,7 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
       trsf.delete();
 
       const triangleArray = tri.Triangles();
-      const faceOrientation = face.Orientation();
+      const faceOrientation = (face as any).Orientation_1 ? (face as any).Orientation_1() : (face as any).Orientation();
       const reverse = faceOrientation === occ.TopAbs_Orientation.TopAbs_REVERSED;
 
       for (let i = 1; i <= numTriangles; i++) {

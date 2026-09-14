@@ -395,8 +395,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
                     </label>
                     <input
                       type="number"
-                      step="1"
-                      min="0.1"
+                      step="any"
                       value={spacing1}
                       onChange={(e) => setSpacing1(Number(e.target.value))}
                       className="w-full px-3 py-1.5 bg-neutral-950 border border-neutral-800 rounded text-white font-mono focus:outline-none focus:border-blue-500"
@@ -408,8 +407,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
                     </label>
                     <input
                       type="number"
-                      step="1"
-                      min="2"
+                      step="any"
                       value={count1}
                       onChange={(e) => setCount1(Number(e.target.value))}
                       className="w-full px-3 py-1.5 bg-neutral-950 border border-neutral-800 rounded text-white font-mono focus:outline-none focus:border-blue-500 font-bold"
@@ -480,8 +478,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
                         </label>
                         <input
                           type="number"
-                          step="1"
-                          min="0.1"
+                          step="any"
                           value={spacing2}
                           onChange={(e) => setSpacing2(Number(e.target.value))}
                           className="w-full px-3 py-1.5 bg-neutral-950 border border-neutral-800 rounded text-white font-mono focus:outline-none focus:border-blue-500"
@@ -493,8 +490,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
                         </label>
                         <input
                           type="number"
-                          step="1"
-                          min="1"
+                          step="any"
                           value={count2}
                           onChange={(e) => setCount2(Number(e.target.value))}
                           className="w-full px-3 py-1.5 bg-neutral-950 border border-neutral-800 rounded text-white font-mono focus:outline-none focus:border-blue-500 font-bold"
@@ -563,6 +559,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
                     <span className="text-[10px] text-neutral-400 font-mono block">X:</span>
                     <input
                       type="number"
+                      step="any"
                       value={axisOrigin[0]}
                       onChange={(e) => setAxisOrigin([Number(e.target.value), axisOrigin[1], axisOrigin[2]])}
                       className="w-full px-2 py-1 bg-neutral-950 border border-neutral-800 rounded text-white font-mono text-xs focus:outline-none focus:border-purple-500"
@@ -572,6 +569,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
                     <span className="text-[10px] text-neutral-400 font-mono block">Y:</span>
                     <input
                       type="number"
+                      step="any"
                       value={axisOrigin[1]}
                       onChange={(e) => setAxisOrigin([axisOrigin[0], Number(e.target.value), axisOrigin[2]])}
                       className="w-full px-2 py-1 bg-neutral-950 border border-neutral-800 rounded text-white font-mono text-xs focus:outline-none focus:border-purple-500"
@@ -581,6 +579,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
                     <span className="text-[10px] text-neutral-400 font-mono block">Z:</span>
                     <input
                       type="number"
+                      step="any"
                       value={axisOrigin[2]}
                       onChange={(e) => setAxisOrigin([axisOrigin[0], axisOrigin[1], Number(e.target.value)])}
                       className="w-full px-2 py-1 bg-neutral-950 border border-neutral-800 rounded text-white font-mono text-xs focus:outline-none focus:border-purple-500"
@@ -597,8 +596,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
                   </label>
                   <input
                     type="number"
-                    step="1"
-                    min="2"
+                    step="any"
                     value={circCount}
                     onChange={(e) => setCircCount(Number(e.target.value))}
                     className="w-full px-3 py-1.5 bg-neutral-900 border border-neutral-800 rounded text-white font-mono font-bold focus:outline-none focus:border-purple-500"
@@ -610,7 +608,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
                   </label>
                   <input
                     type="number"
-                    step="1"
+                    step="any"
                     value={angleDeg}
                     onChange={(e) => setAngleDeg(Number(e.target.value))}
                     className="w-full px-3 py-1.5 bg-neutral-900 border border-neutral-800 rounded text-white font-mono focus:outline-none focus:border-purple-500"

@@ -237,8 +237,7 @@ export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
             <div className="relative flex items-center">
               <input
                 type="number"
-                step="0.5"
-                min="0.1"
+                step="any"
                 disabled={!isBoss && throughAll}
                 value={depth}
                 onChange={(e) => setDepth(Number(e.target.value))}

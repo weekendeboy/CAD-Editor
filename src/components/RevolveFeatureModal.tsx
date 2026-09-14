@@ -297,9 +297,7 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
             <div className="relative flex items-center">
               <input
                 type="number"
-                step="1"
-                min="0.1"
-                max="360"
+                step="any"
                 value={angleDeg}
                 onChange={(e) => setAngleDeg(Number(e.target.value))}
                 className="w-full px-3 py-2 bg-neutral-900 border border-neutral-800 rounded-lg text-white font-mono font-bold focus:outline-none focus:border-purple-500/80 transition-colors"
