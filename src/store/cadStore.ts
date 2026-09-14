@@ -1854,6 +1854,10 @@ export const useCADStore = create<CADState>((set, get) => ({
     }
   })),
 
+  clearOtrackAnchors: () => {
+    // 全域提供 OTrack 追蹤點清空介面，可在需要時供組件或繪圖狀態機呼叫
+  },
+
   setPolarModalOpen: (open) => set({ isPolarModalOpen: open }),
   togglePolarTracking: () => set((state) => ({ polarTrackingEnabled: !state.polarTrackingEnabled })),
   setPolarAngleStep: (step) => set({ polarAngleStep: step }),

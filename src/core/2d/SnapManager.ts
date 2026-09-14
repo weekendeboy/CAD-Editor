@@ -1,13 +1,31 @@
 import { CADEntity2D, Point2D } from '../../types/cad';
 import { findAllIntersections, isAngleOnArc } from './IntersectionEngine';
 
-export type SnapType = 'endpoint' | 'midpoint' | 'center' | 'quadrant' | 'intersection' | 'extension' | 'perpendicular' | 'tangent' | 'parallel';
+export type SnapType =
+  | 'endpoint'
+  | 'midpoint'
+  | 'center'
+  | 'quadrant'
+  | 'intersection'
+  | 'extension'
+  | 'perpendicular'
+  | 'tangent'
+  | 'parallel'
+  | 'nearest';
 
 export interface SnapResult {
   point: Point2D;
   type: SnapType;
   entityId: string;
   pointIndex?: number;
+}
+
+interface SnapCandidate {
+  point: Point2D;
+  type: SnapType;
+  entityId: string;
+  pointIndex?: number;
+  distance: number;
 }
 
 function getDistance(p1: Point2D, p2: Point2D): number {
@@ -23,16 +41,17 @@ function getMidpoint(p1: Point2D, p2: Point2D): Point2D {
   };
 }
 
-const typePriority: Record<SnapType, number> = {
-  intersection: 9,
-  endpoint: 8,
-  extension: 7, // 提升至高優先級
-  quadrant: 6,
-  midpoint: 5,
-  center: 4,
-  perpendicular: 3,
-  tangent: 2,
-  parallel: 1, // 平行鎖點放在最低
+export const SNAP_PRIORITY: Record<SnapType, number> = {
+  endpoint: 1,
+  center: 2,
+  midpoint: 3,
+  quadrant: 4,
+  intersection: 5,
+  perpendicular: 6,
+  tangent: 7,
+  extension: 8,
+  parallel: 9,
+  nearest: 10,
 };
 
 export function findSnapPoint(
@@ -44,8 +63,7 @@ export function findSnapPoint(
   activeModes?: Record<string, boolean>
 ): SnapResult | null {
   const worldThreshold = screenThreshold / scale;
-  let closestSnap: SnapResult | null = null;
-  let minDistance = worldThreshold;
+  const candidates: SnapCandidate[] = [];
 
   const checkSnap = (
     point: Point2D,
@@ -66,24 +84,13 @@ export function findSnapPoint(
       return;
     }
 
-    if (!closestSnap) {
-      closestSnap = { point, type, entityId, pointIndex };
-      minDistance = dist;
-      return;
-    }
-
-    const currentPriority = typePriority[closestSnap.type];
-    const newPriority = typePriority[type];
-
-    if (newPriority > currentPriority) {
-      closestSnap = { point, type, entityId, pointIndex };
-      minDistance = dist;
-    } else if (newPriority === currentPriority) {
-      if (dist < minDistance) {
-        closestSnap = { point, type, entityId, pointIndex };
-        minDistance = dist;
-      }
-    }
+    candidates.push({
+      point,
+      type,
+      entityId,
+      pointIndex,
+      distance: dist,
+    });
   };
 
   for (const entity of entities) {
@@ -435,6 +442,26 @@ export function findSnapPoint(
     checkSnap(inter.point, 'intersection', inter.entityAId);
   }
 
-  return closestSnap;
-}
+  if (candidates.length === 0) {
+    return null;
+  }
 
+  // Dual-sorting: priority first (smaller value = higher priority), then distance (closer = higher priority)
+  candidates.sort((a, b) => {
+    const priorityA = SNAP_PRIORITY[a.type] ?? 10;
+    const priorityB = SNAP_PRIORITY[b.type] ?? 10;
+
+    if (priorityA !== priorityB) {
+      return priorityA - priorityB;
+    }
+    return a.distance - b.distance;
+  });
+
+  const best = candidates[0];
+  return {
+    point: best.point,
+    type: best.type,
+    entityId: best.entityId,
+    pointIndex: best.pointIndex,
+  };
+}

@@ -60,7 +60,8 @@ export interface CADActions {
   addExtrudeFeature: (feature: Omit<ExtrudeFeature, 'id' | 'type'>) => void;
   updateExtrudeFeature: (id: string, updates: Partial<ExtrudeFeature>) => void;
 
-  // 鎖點 (Osnap) 控制與設定
+  // 鎖點 (Osnap) 與 OTrack 追蹤控制設定
+  clearOtrackAnchors: () => void;
   setOsnapModalOpen: (open: boolean) => void;
   toggleOsnapMode: (mode: OsnapMode) => void;
   setAllOsnapModes: (enabled: boolean) => void;

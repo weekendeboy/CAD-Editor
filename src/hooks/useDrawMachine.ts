@@ -454,6 +454,17 @@ export function useDrawMachine() {
   const [otrackAnchors, setOtrackAnchors] = useState<TrackAnchor[]>([]);
   const [otrackGuideLines, setOtrackGuideLines] = useState<TrackGuideLine[]>([]);
 
+  const storeClearOtrackAnchors = useCADStore((state) => state.clearOtrackAnchors);
+
+  const clearOtrackAnchors = useCallback(() => {
+    otrackManagerRef.current?.reset();
+    setOtrackAnchors([]);
+    setOtrackGuideLines([]);
+    if (typeof storeClearOtrackAnchors === 'function') {
+      storeClearOtrackAnchors();
+    }
+  }, [storeClearOtrackAnchors]);
+
   // 取得目前草圖內的 entities
   let currentEntities: CADEntity2D[] = [];
   if (activeSketchId) {
@@ -535,10 +546,8 @@ export function useDrawMachine() {
     setPolarExtensionIntersection(null);
 
     // Reset OTrack states
-    otrackManagerRef.current?.reset();
-    setOtrackAnchors([]);
-    setOtrackGuideLines([]);
-  }, []);
+    clearOtrackAnchors();
+  }, [clearOtrackAnchors]);
 
   // Toggling Polyline mode with smooth degradation logic
   const togglePolylineMode = useCallback(() => {
@@ -2757,6 +2766,9 @@ export function useDrawMachine() {
           });
         }
       }
+
+      // 每次落筆點擊後清空 OTrack 追蹤錨點與延伸輔助線
+      clearOtrackAnchors();
     },
     [
       activeSketchId,
@@ -2818,6 +2830,7 @@ export function useDrawMachine() {
       polarTracking,
       otrackGuideLines,
       deferredTangent,
+      clearOtrackAnchors,
     ]
   );
 
@@ -3067,6 +3080,7 @@ export function useDrawMachine() {
         setStartSnap(null);
       }
 
+      clearOtrackAnchors();
       return true;
     },
     [
@@ -3099,6 +3113,7 @@ export function useDrawMachine() {
       rotateSourceIds,
       rotateBasePoint,
       rotateEntities,
+      clearOtrackAnchors,
     ]
   );
 
@@ -3269,6 +3284,7 @@ export function useDrawMachine() {
     polarTracking,
     polarExtensionIntersection,
     // OTrack exports
+    clearOtrackAnchors,
     otrackAnchors,
     otrackGuideLines,
     deferredTangent,
