@@ -3,7 +3,7 @@ import { useCADStore } from '../store/cadStore';
 import { Point2D, LineEntity, CircleEntity, ArcEntity, PolylineEntity, SketchFeature, CADEntity2D } from '../types/cad';
 import { DrawSession, createInitialDrawSession } from '../types/sketchInteraction';
 import { findSnapPoint, SnapResult } from '../core/2d/SnapManager';
-import { calculate3PointArc, calculatePolygonVertices } from '../core/2d/GeometryMath';
+import { calculate3PointArc, calculatePolygonVertices, calculateTTRCircle, calculate3TCircle } from '../core/2d/GeometryMath';
 import { isAngleOnArc, normalizeAngle, findAllIntersections } from '../core/2d/IntersectionEngine';
 import { calculateExtend } from '../core/2d/ExtendManager';
 import { calculateOffsetEntity } from '../core/2d/OffsetEngine';
@@ -64,6 +64,17 @@ function getDistanceToEntity(p: Point2D, entity: CADEntity2D): number {
   } else if (entity.type === 'circle') {
     const distToCenter = Math.hypot(p.x - entity.center.x, p.y - entity.center.y);
     return Math.abs(distToCenter - entity.radius);
+  } else if (entity.type === 'polyline' && entity.points && entity.points.length >= 2) {
+    let minDist = Infinity;
+    const pts = entity.points;
+    const count = entity.closed ? pts.length : pts.length - 1;
+    for (let i = 0; i < count; i++) {
+      const p1 = pts[i];
+      const p2 = pts[(i + 1) % pts.length];
+      const d = getDistanceToLineSegment(p, p1, p2);
+      if (d < minDist) minDist = d;
+    }
+    return minDist;
   }
   return Infinity;
 }
@@ -402,7 +413,7 @@ export function useDrawMachine() {
   const [offsetPreviewEntity, setOffsetPreviewEntity] = useState<CADEntity2D | null>(null);
 
   // Mirror state
-  const [mirrorStep, setMirrorStep] = useState<'PICK_SOURCE' | 'PICK_AXIS'>('PICK_SOURCE');
+  const [mirrorStep, setMirrorStep] = useState<'PICK_SOURCE' | 'PICK_P1' | 'PICK_P2'>('PICK_SOURCE');
   const [mirrorSourceIds, setMirrorSourceIds] = useState<string[]>([]);
   const [mirrorPreviewEntities, setMirrorPreviewEntities] = useState<CADEntity2D[] | null>(null);
 
@@ -435,6 +446,27 @@ export function useDrawMachine() {
 
   // Rectangular Array state
   const [rectArraySourceIds, setRectArraySourceIds] = useState<string[]>([]);
+
+  // TTR Circle (相切、相切、半徑) state
+  const [ttrFirstEntityId, setTtrFirstEntityId] = useState<string | null>(null);
+  const [ttrFirstPickPoint, setTtrFirstPickPoint] = useState<Point2D | null>(null);
+  const [ttrSecondEntityId, setTtrSecondEntityId] = useState<string | null>(null);
+  const [ttrSecondPickPoint, setTtrSecondPickPoint] = useState<Point2D | null>(null);
+  const [ttrRadius, setTtrRadius] = useState<number>(25);
+  const [ttrStep, setTtrStep] = useState<'PICK_ENT1' | 'PICK_ENT2' | 'SPECIFY_RADIUS'>('PICK_ENT1');
+  const [ttrPreviewCircle, setTtrPreviewCircle] = useState<CircleEntity | null>(null);
+  const [ttrError, setTtrError] = useState<string | null>(null);
+
+  // 3T Circle (三相切) state
+  const [circle3TFirstEntityId, setCircle3TFirstEntityId] = useState<string | null>(null);
+  const [circle3TFirstPickPoint, setCircle3TFirstPickPoint] = useState<Point2D | null>(null);
+  const [circle3TSecondEntityId, setCircle3TSecondEntityId] = useState<string | null>(null);
+  const [circle3TSecondPickPoint, setCircle3TSecondPickPoint] = useState<Point2D | null>(null);
+  const [circle3TThirdEntityId, setCircle3TThirdEntityId] = useState<string | null>(null);
+  const [circle3TThirdPickPoint, setCircle3TThirdPickPoint] = useState<Point2D | null>(null);
+  const [circle3TStep, setCircle3TStep] = useState<'PICK_ENT1' | 'PICK_ENT2' | 'PICK_ENT3'>('PICK_ENT1');
+  const [circle3TPreviewCircle, setCircle3TPreviewCircle] = useState<CircleEntity | null>(null);
+  const [circle3TError, setCircle3TError] = useState<string | null>(null);
 
   // Polyline internal states
   const [polylineMode, setPolylineMode] = useState<'LINE' | 'ARC'>('LINE');
@@ -540,6 +572,27 @@ export function useDrawMachine() {
 
     // Reset rectangular array states
     setRectArraySourceIds([]);
+
+    // Reset TTR circle states
+    setTtrFirstEntityId(null);
+    setTtrFirstPickPoint(null);
+    setTtrSecondEntityId(null);
+    setTtrSecondPickPoint(null);
+    setTtrRadius(25);
+    setTtrStep('PICK_ENT1');
+    setTtrPreviewCircle(null);
+    setTtrError(null);
+
+    // Reset 3T circle states
+    setCircle3TFirstEntityId(null);
+    setCircle3TFirstPickPoint(null);
+    setCircle3TSecondEntityId(null);
+    setCircle3TSecondPickPoint(null);
+    setCircle3TThirdEntityId(null);
+    setCircle3TThirdPickPoint(null);
+    setCircle3TStep('PICK_ENT1');
+    setCircle3TPreviewCircle(null);
+    setCircle3TError(null);
 
     // Reset polar tracking
     setPolarTracking(null);
@@ -668,18 +721,8 @@ export function useDrawMachine() {
     if (currentTool === 'MIRROR') {
       const initialSelection = useCADStore.getState().selectedEntityIds;
       if (initialSelection && initialSelection.length > 0) {
-        // 若先前選取的圖元中恰好只有一條直線，不要自動跳入 PICK_AXIS，避免將該直線誤當作唯一來源圖元。
-        const isSingleLine =
-          initialSelection.length === 1 &&
-          currentEntities.find((e) => e.id === initialSelection[0])?.type === 'line';
-
-        if (isSingleLine) {
-          setMirrorSourceIds(initialSelection);
-          setMirrorStep('PICK_SOURCE'); // Stay at PICK_SOURCE so they can select more or clear
-        } else {
-          setMirrorSourceIds(initialSelection);
-          setMirrorStep('PICK_AXIS');
-        }
+        setMirrorSourceIds(initialSelection);
+        setMirrorStep('PICK_P1');
       } else {
         setMirrorStep('PICK_SOURCE');
         setMirrorSourceIds([]);
@@ -779,8 +822,8 @@ export function useDrawMachine() {
           finishPolyline(true);
         }
       } else if (e.key === 'Enter' && currentTool === 'MIRROR') {
-        if (mirrorStep === 'PICK_SOURCE') {
-          setMirrorStep('PICK_AXIS');
+        if (mirrorStep === 'PICK_SOURCE' && mirrorSourceIds.length > 0) {
+          setMirrorStep('PICK_P1');
         }
       } else if (e.key === 'Enter' && (currentTool === 'MOVE' || currentTool === 'COPY')) {
         if (moveStep === 'PICK_OBJECTS' && moveSourceIds.length > 0) {
@@ -1302,42 +1345,25 @@ export function useDrawMachine() {
       }
 
       if (currentTool === 'MIRROR') {
-        if (mirrorStep === 'PICK_AXIS' && mirrorSourceIds.length > 0) {
-          const threshold = 15 / scale;
-          let closestAxis: CADEntity2D | null = null;
-          let minDistance = threshold;
-          for (const entity of currentEntities) {
-            if (entity.type === 'line') {
-              const dist = getDistanceToEntity(worldPt, entity);
-              if (dist < minDistance) {
-                minDistance = dist;
-                closestAxis = entity;
-              }
-            }
-          }
-          if (closestAxis && closestAxis.type === 'line') {
-            // 自動排除自身鏡射重疊防呆
-            const filteredSources = mirrorSourceIds.filter((id) => id !== closestAxis!.id);
-            if (filteredSources.length > 0) {
-              const result = calculateMirror(
-                currentEntities.filter((e) => filteredSources.includes(e.id)),
-                closestAxis
-              );
-              const previewEntities = result
-                ? result.mirroredEntities.map((ent) => {
-                    if (ent.type === 'polyline') {
-                      return {
-                        ...ent,
-                        bulges: ent.bulges ? ent.bulges.map((b) => -b) : undefined,
-                      } as PolylineEntity;
-                    }
-                    return ent;
-                  })
-                : null;
-              setMirrorPreviewEntities(previewEntities);
-            } else {
-              setMirrorPreviewEntities(null);
-            }
+        if (mirrorStep === 'PICK_P2' && drawSession.isDrawing && drawSession.startPoint && mirrorSourceIds.length > 0) {
+          const p1 = drawSession.startPoint;
+          const p2 = res.point;
+          const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+          if (dist > 1e-4) {
+            const sources = currentEntities.filter((e) => mirrorSourceIds.includes(e.id));
+            const result = calculateMirror(sources, p1, p2);
+            const previewEntities = result
+              ? result.mirroredEntities.map((ent) => {
+                  if (ent.type === 'polyline') {
+                    return {
+                      ...ent,
+                      bulges: ent.bulges ? ent.bulges.map((b) => -b) : undefined,
+                    } as PolylineEntity;
+                  }
+                  return ent;
+                })
+              : null;
+            setMirrorPreviewEntities(previewEntities);
           } else {
             setMirrorPreviewEntities(null);
           }
@@ -1591,6 +1617,53 @@ export function useDrawMachine() {
       } else {
         setArrayPreviewEntities(null);
       }
+
+      // CIRCLE_TTR 即時動態切圓預覽
+      if (currentTool === 'CIRCLE_TTR') {
+        if (ttrStep === 'SPECIFY_RADIUS' && ttrFirstEntityId && ttrSecondEntityId && ttrFirstPickPoint && ttrSecondPickPoint) {
+          const refPt = ttrSecondPickPoint;
+          const liveRadius = Math.max(0.1, Math.hypot(res.point.x - refPt.x, res.point.y - refPt.y));
+          const ent1 = currentEntities.find((e) => e.id === ttrFirstEntityId);
+          const ent2 = currentEntities.find((e) => e.id === ttrSecondEntityId);
+          if (ent1 && ent2) {
+            const preview = calculateTTRCircle(ent1, ent2, liveRadius, ttrFirstPickPoint, ttrSecondPickPoint);
+            setTtrPreviewCircle(preview);
+          }
+        } else {
+          setTtrPreviewCircle(null);
+        }
+      } else if (currentTool === 'CIRCLE_3T') {
+        // CIRCLE_3T 即時動態切圓預覽
+        if (circle3TStep === 'PICK_ENT3' && circle3TFirstEntityId && circle3TSecondEntityId && circle3TFirstPickPoint && circle3TSecondPickPoint) {
+          const threshold = 30 / scale;
+          let hoveredEnt: CADEntity2D | null = null;
+          let minD = threshold;
+          for (const entity of currentEntities) {
+            if (entity.type === 'line' || entity.type === 'arc' || entity.type === 'circle' || entity.type === 'polyline') {
+              const dist = getDistanceToEntity(res.point, entity);
+              if (dist < minD) {
+                minD = dist;
+                hoveredEnt = entity;
+              }
+            }
+          }
+          if (hoveredEnt) {
+            const ent1 = currentEntities.find((e) => e.id === circle3TFirstEntityId);
+            const ent2 = currentEntities.find((e) => e.id === circle3TSecondEntityId);
+            if (ent1 && ent2) {
+              const preview = calculate3TCircle(ent1, ent2, hoveredEnt, circle3TFirstPickPoint, circle3TSecondPickPoint, res.point);
+              setCircle3TPreviewCircle(preview);
+            }
+          } else {
+            setCircle3TPreviewCircle(null);
+          }
+        } else {
+          setCircle3TPreviewCircle(null);
+        }
+      } else {
+        setTtrPreviewCircle(null);
+        setCircle3TPreviewCircle(null);
+      }
     },
     [
       resolveEffectiveCursor,
@@ -1614,6 +1687,16 @@ export function useDrawMachine() {
       arraySourceIds,
       drawSession.isDrawing,
       deferredTangent,
+      ttrStep,
+      ttrFirstEntityId,
+      ttrSecondEntityId,
+      ttrFirstPickPoint,
+      ttrSecondPickPoint,
+      circle3TStep,
+      circle3TFirstEntityId,
+      circle3TSecondEntityId,
+      circle3TFirstPickPoint,
+      circle3TSecondPickPoint,
     ]
   );
 
@@ -2103,17 +2186,46 @@ export function useDrawMachine() {
           const vertices = calculatePolygonVertices(drawSession.startPoint, clickPt, sides, method);
           const dist = Math.hypot(clickPt.x - drawSession.startPoint.x, clickPt.y - drawSession.startPoint.y);
 
-          if (dist > 0.01) {
-            const newPolygon: PolylineEntity = {
-              id: crypto.randomUUID(),
-              layerId: activeLayerId || '0',
-              visible: true,
-              locked: false,
-              type: 'polyline',
-              points: vertices,
-              closed: true,
-            };
-            addEntity(newPolygon);
+          if (dist > 0.01 && vertices.length >= 3) {
+            const n = vertices.length;
+            const lines: LineEntity[] = [];
+
+            // 1. 根據頂點陣列，生成 n 條獨立的 LineEntity，確保最後一條直線連接回第一條直線起點
+            for (let i = 0; i < n; i++) {
+              const startPt = vertices[i];
+              const endPt = vertices[(i + 1) % n];
+              const line: LineEntity = {
+                id: crypto.randomUUID(),
+                layerId: activeLayerId || '0',
+                visible: true,
+                locked: false,
+                type: 'line',
+                start: { ...startPt },
+                end: { ...endPt },
+              };
+              lines.push(line);
+              addEntity(line);
+            }
+
+            // 2. 自動注入相鄰端點重合約束 (Coincident): Line[i] 終點 (index 1) 與 Line[(i+1)%n] 起點 (index 0)
+            for (let i = 0; i < n; i++) {
+              const nextIdx = (i + 1) % n;
+              addConstraint({
+                id: crypto.randomUUID(),
+                type: 'coincident',
+                entityIds: [lines[i].id, lines[nextIdx].id],
+                pointIndices: [1, 0],
+              });
+            }
+
+            // 3. 建立等長約束 (Equal Length)，綁定所有邊長維持正多邊形特性
+            for (let i = 0; i < n - 1; i++) {
+              addConstraint({
+                id: crypto.randomUUID(),
+                type: 'equal_length',
+                entityIds: [lines[i].id, lines[i + 1].id],
+              });
+            }
           }
 
           cancelDrawing();
@@ -2625,24 +2737,24 @@ export function useDrawMachine() {
               }
             });
           }
-        } else if (mirrorStep === 'PICK_AXIS') {
-          let closestAxis: CADEntity2D | null = null;
-          let minDistance = threshold;
-          for (const entity of currentEntities) {
-            if (entity.type === 'line') {
-              const dist = getDistanceToEntity(clickPt, entity);
-              if (dist < minDistance) {
-                minDistance = dist;
-                closestAxis = entity;
-              }
-            }
+        } else if (mirrorStep === 'PICK_P1') {
+          if (mirrorSourceIds.length > 0) {
+            setMirrorStep('PICK_P2');
+            setDrawSession({
+              isDrawing: true,
+              startPoint: clickPt,
+              currentCursor: clickPt,
+              step: 1,
+              inferredConstraint: null,
+            });
+            setStartSnap(res.snap);
           }
-          if (closestAxis && closestAxis.type === 'line' && mirrorSourceIds.length > 0) {
-            // 自動剔除對稱軸自身，防止自我鏡射產生重疊幽靈幾何
-            const finalSources = mirrorSourceIds.filter((id) => id !== closestAxis!.id);
-            if (finalSources.length > 0) {
-              mirrorEntities(finalSources, closestAxis.id);
-            }
+        } else if (mirrorStep === 'PICK_P2') {
+          const p1 = drawSession.startPoint;
+          const p2 = clickPt;
+          const dist = p1 ? Math.hypot(p2.x - p1.x, p2.y - p1.y) : 0;
+          if (p1 && dist > 1e-4 && mirrorSourceIds.length > 0) {
+            mirrorEntities(mirrorSourceIds, p1, p2);
             cancelDrawing();
           }
         }
@@ -2847,6 +2959,165 @@ export function useDrawMachine() {
             }
           });
         }
+      } else if (currentTool === 'CIRCLE_TTR') {
+        const threshold = 20 / scale;
+        let closestEntity: CADEntity2D | null = null;
+        let minDistance = threshold;
+
+        for (const entity of currentEntities) {
+          if (entity.type === 'line' || entity.type === 'arc' || entity.type === 'circle' || entity.type === 'polyline') {
+            const dist = getDistanceToEntity(clickPt, entity);
+            if (dist < minDistance) {
+              minDistance = dist;
+              closestEntity = entity;
+            }
+          }
+        }
+
+        if (ttrStep === 'PICK_ENT1') {
+          if (closestEntity) {
+            setTtrFirstEntityId(closestEntity.id);
+            setTtrFirstPickPoint(clickPt);
+            setTtrStep('PICK_ENT2');
+            setTtrError(null);
+            setDrawSession({
+              isDrawing: true,
+              startPoint: clickPt,
+              currentCursor: clickPt,
+              step: 1,
+            });
+          }
+        } else if (ttrStep === 'PICK_ENT2') {
+          if (closestEntity) {
+            setTtrSecondEntityId(closestEntity.id);
+            setTtrSecondPickPoint(clickPt);
+            setTtrStep('SPECIFY_RADIUS');
+            setTtrError(null);
+            setDrawSession({
+              isDrawing: true,
+              startPoint: clickPt,
+              currentCursor: clickPt,
+              step: 2,
+            });
+          }
+        } else if (ttrStep === 'SPECIFY_RADIUS') {
+          const refPt = ttrSecondPickPoint || ttrFirstPickPoint || clickPt;
+          const userRadius = Math.hypot(clickPt.x - refPt.x, clickPt.y - refPt.y);
+          const effectiveRadius = userRadius > 0.5 ? userRadius : ttrRadius;
+
+          if (ttrFirstEntityId && ttrSecondEntityId && ttrFirstPickPoint && ttrSecondPickPoint) {
+            const ent1 = currentEntities.find((e) => e.id === ttrFirstEntityId);
+            const ent2 = currentEntities.find((e) => e.id === ttrSecondEntityId);
+            if (ent1 && ent2) {
+              const circle = calculateTTRCircle(ent1, ent2, effectiveRadius, ttrFirstPickPoint, ttrSecondPickPoint);
+              if (circle) {
+                circle.layerId = activeLayerId || '0';
+                addEntity(circle);
+                addConstraint({
+                  id: crypto.randomUUID(),
+                  type: 'tangent',
+                  entityIds: [circle.id, ent1.id],
+                });
+                addConstraint({
+                  id: crypto.randomUUID(),
+                  type: 'tangent',
+                  entityIds: [circle.id, ent2.id],
+                });
+                cancelDrawing();
+                return;
+              } else {
+                setTtrError('無法在此半徑下計算出相切圓，請調整半徑或點選位置');
+              }
+            }
+          }
+        }
+      } else if (currentTool === 'CIRCLE_3T') {
+        const threshold = 20 / scale;
+        let closestEntity: CADEntity2D | null = null;
+        let minDistance = threshold;
+
+        for (const entity of currentEntities) {
+          if (entity.type === 'line' || entity.type === 'arc' || entity.type === 'circle' || entity.type === 'polyline') {
+            const dist = getDistanceToEntity(clickPt, entity);
+            if (dist < minDistance) {
+              minDistance = dist;
+              closestEntity = entity;
+            }
+          }
+        }
+
+        if (circle3TStep === 'PICK_ENT1') {
+          if (closestEntity) {
+            setCircle3TFirstEntityId(closestEntity.id);
+            setCircle3TFirstPickPoint(clickPt);
+            setCircle3TStep('PICK_ENT2');
+            setCircle3TError(null);
+            setDrawSession({
+              isDrawing: true,
+              startPoint: clickPt,
+              currentCursor: clickPt,
+              step: 1,
+            });
+          }
+        } else if (circle3TStep === 'PICK_ENT2') {
+          if (closestEntity) {
+            setCircle3TSecondEntityId(closestEntity.id);
+            setCircle3TSecondPickPoint(clickPt);
+            setCircle3TStep('PICK_ENT3');
+            setCircle3TError(null);
+            setDrawSession({
+              isDrawing: true,
+              startPoint: clickPt,
+              currentCursor: clickPt,
+              step: 2,
+            });
+          }
+        } else if (circle3TStep === 'PICK_ENT3') {
+          if (closestEntity) {
+            const ent3 = closestEntity;
+            const pickPt3 = clickPt;
+            setCircle3TThirdEntityId(ent3.id);
+            setCircle3TThirdPickPoint(pickPt3);
+
+            if (circle3TFirstEntityId && circle3TSecondEntityId && circle3TFirstPickPoint && circle3TSecondPickPoint) {
+              const ent1 = currentEntities.find((e) => e.id === circle3TFirstEntityId);
+              const ent2 = currentEntities.find((e) => e.id === circle3TSecondEntityId);
+              if (ent1 && ent2) {
+                const circle = calculate3TCircle(
+                  ent1,
+                  ent2,
+                  ent3,
+                  circle3TFirstPickPoint,
+                  circle3TSecondPickPoint,
+                  pickPt3
+                );
+                if (circle) {
+                  circle.layerId = activeLayerId || '0';
+                  addEntity(circle);
+                  addConstraint({
+                    id: crypto.randomUUID(),
+                    type: 'tangent',
+                    entityIds: [circle.id, ent1.id],
+                  });
+                  addConstraint({
+                    id: crypto.randomUUID(),
+                    type: 'tangent',
+                    entityIds: [circle.id, ent2.id],
+                  });
+                  addConstraint({
+                    id: crypto.randomUUID(),
+                    type: 'tangent',
+                    entityIds: [circle.id, ent3.id],
+                  });
+                  cancelDrawing();
+                  return;
+                } else {
+                  setCircle3TError('無法在此三個實體間計算出相切圓，請調整選取物件或點選位置');
+                }
+              }
+            }
+          }
+        }
       }
 
       // 每次落筆點擊後清空 OTrack 追蹤錨點與延伸輔助線
@@ -2913,6 +3184,11 @@ export function useDrawMachine() {
       otrackGuideLines,
       deferredTangent,
       clearOtrackAnchors,
+      circle3TStep,
+      circle3TFirstEntityId,
+      circle3TSecondEntityId,
+      circle3TFirstPickPoint,
+      circle3TSecondPickPoint,
     ]
   );
 
@@ -2985,12 +3261,43 @@ export function useDrawMachine() {
         currentTool !== 'LINE' &&
         currentTool !== 'POLYLINE' &&
         currentTool !== 'CIRCLE' &&
+        currentTool !== 'CIRCLE_TTR' &&
         currentTool !== 'POLYGON' &&
         currentTool !== 'MOVE' &&
         currentTool !== 'COPY' &&
         currentTool !== 'SCALE' &&
         currentTool !== 'ROTATE'
       ) {
+        return false;
+      }
+
+      if (currentTool === 'CIRCLE_TTR') {
+        if (ttrFirstEntityId && ttrSecondEntityId && ttrFirstPickPoint && ttrSecondPickPoint && length > 0) {
+          const ent1 = currentEntities.find((e) => e.id === ttrFirstEntityId);
+          const ent2 = currentEntities.find((e) => e.id === ttrSecondEntityId);
+          if (ent1 && ent2) {
+            const circle = calculateTTRCircle(ent1, ent2, length, ttrFirstPickPoint, ttrSecondPickPoint);
+            if (circle) {
+              circle.layerId = activeLayerId || '0';
+              addEntity(circle);
+              addConstraint({
+                id: crypto.randomUUID(),
+                type: 'tangent',
+                entityIds: [circle.id, ent1.id],
+              });
+              addConstraint({
+                id: crypto.randomUUID(),
+                type: 'tangent',
+                entityIds: [circle.id, ent2.id],
+              });
+              cancelDrawing();
+              return true;
+            } else {
+              setTtrError(`無法以半徑 ${length} 繪製相切圓`);
+              return false;
+            }
+          }
+        }
         return false;
       }
 
@@ -3065,16 +3372,49 @@ export function useDrawMachine() {
         const sides = useCADStore.getState().polygonSides || 5;
         const method = useCADStore.getState().polygonMethod || 'inscribed';
         const vertices = calculatePolygonVertices(startPoint, exactEndPt, sides, method);
-        const newPolygon: PolylineEntity = {
-          id: crypto.randomUUID(),
-          layerId: activeLayerId || '0',
-          visible: true,
-          locked: false,
-          type: 'polyline',
-          points: vertices,
-          closed: true,
-        };
-        addEntity(newPolygon);
+
+        if (vertices.length >= 3) {
+          const n = vertices.length;
+          const lines: LineEntity[] = [];
+
+          // 1. 根據頂點陣列，生成 n 條獨立的 LineEntity，確保最後一條直線連接回第一條直線起點
+          for (let i = 0; i < n; i++) {
+            const startPt = vertices[i];
+            const endPt = vertices[(i + 1) % n];
+            const line: LineEntity = {
+              id: crypto.randomUUID(),
+              layerId: activeLayerId || '0',
+              visible: true,
+              locked: false,
+              type: 'line',
+              start: { ...startPt },
+              end: { ...endPt },
+            };
+            lines.push(line);
+            addEntity(line);
+          }
+
+          // 2. 自動注入相鄰端點重合約束 (Coincident): Line[i] 終點 (index 1) 與 Line[(i+1)%n] 起點 (index 0)
+          for (let i = 0; i < n; i++) {
+            const nextIdx = (i + 1) % n;
+            addConstraint({
+              id: crypto.randomUUID(),
+              type: 'coincident',
+              entityIds: [lines[i].id, lines[nextIdx].id],
+              pointIndices: [1, 0],
+            });
+          }
+
+          // 3. 建立等長約束 (Equal Length)，綁定所有邊長維持正多邊形特性
+          for (let i = 0; i < n - 1; i++) {
+            addConstraint({
+              id: crypto.randomUUID(),
+              type: 'equal_length',
+              entityIds: [lines[i].id, lines[i + 1].id],
+            });
+          }
+        }
+
         cancelDrawing();
         return true;
       }
@@ -3424,6 +3764,28 @@ export function useDrawMachine() {
     setRectArraySourceIds,
     rectArrayPreviewEntities,
     executeRectArray,
+    // TTR Circle exports
+    ttrStep,
+    setTtrStep,
+    ttrFirstEntityId,
+    ttrFirstPickPoint,
+    ttrSecondEntityId,
+    ttrSecondPickPoint,
+    ttrRadius,
+    setTtrRadius,
+    ttrPreviewCircle,
+    ttrError,
+    // 3T Circle exports
+    circle3TStep,
+    setCircle3TStep,
+    circle3TFirstEntityId,
+    circle3TFirstPickPoint,
+    circle3TSecondEntityId,
+    circle3TSecondPickPoint,
+    circle3TThirdEntityId,
+    circle3TThirdPickPoint,
+    circle3TPreviewCircle,
+    circle3TError,
     // Polar Tracking exports
     polarTracking,
     polarExtensionIntersection,

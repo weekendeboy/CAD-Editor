@@ -20,6 +20,13 @@ export interface RubberbandPreviewProps {
   movePreviewEntities?: CADEntity2D[] | null;
   scalePreviewEntities?: CADEntity2D[] | null;
   rotatePreviewEntities?: CADEntity2D[] | null;
+  ttrPreviewCircle?: CircleEntity | null;
+  ttrPickPoint1?: Point2D | null;
+  ttrPickPoint2?: Point2D | null;
+  circle3TPreviewCircle?: CircleEntity | null;
+  circle3TPickPoint1?: Point2D | null;
+  circle3TPickPoint2?: Point2D | null;
+  circle3TPickPoint3?: Point2D | null;
 }
 
 export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
@@ -35,6 +42,13 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
   movePreviewEntities,
   scalePreviewEntities,
   rotatePreviewEntities,
+  ttrPreviewCircle,
+  ttrPickPoint1,
+  ttrPickPoint2,
+  circle3TPreviewCircle,
+  circle3TPickPoint1,
+  circle3TPickPoint2,
+  circle3TPickPoint3,
 }) => {
   if (!session.isDrawing || !session.startPoint || !session.currentCursor) {
     return null;
@@ -1277,6 +1291,235 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
 
         {/* 中心點標記 */}
         <circle cx={startScreen.x} cy={startScreen.y} r={3.5} fill={strokeColor} />
+      </g>
+    );
+  }
+
+  if (tool === 'MIRROR') {
+    const accentColor = '#c084fc';
+    const markerColor = '#a855f7';
+
+    return (
+      <g className="pointer-events-none select-none">
+        {/* 鏡射軸橡皮筋虛線 (Mirror Axis Preview: Point 1 to Cursor) */}
+        <line
+          x1={startScreen.x}
+          y1={startScreen.y}
+          x2={cursorScreen.x}
+          y2={cursorScreen.y}
+          stroke={accentColor}
+          strokeWidth={1.5}
+          strokeDasharray="5,4"
+          fill="none"
+        />
+
+        {/* 鏡射軸第一點 (P1) 十字與同心圓標記 */}
+        <circle
+          cx={startScreen.x}
+          cy={startScreen.y}
+          r={5.5}
+          fill="none"
+          stroke={markerColor}
+          strokeWidth={1.5}
+        />
+        <circle
+          cx={startScreen.x}
+          cy={startScreen.y}
+          r={2}
+          fill={markerColor}
+        />
+        <line
+          x1={startScreen.x - 8}
+          y1={startScreen.y}
+          x2={startScreen.x + 8}
+          y2={startScreen.y}
+          stroke={markerColor}
+          strokeWidth={1.2}
+        />
+        <line
+          x1={startScreen.x}
+          y1={startScreen.y - 8}
+          x2={startScreen.x}
+          y2={startScreen.y + 8}
+          stroke={markerColor}
+          strokeWidth={1.2}
+        />
+
+        {/* 當前游標端點指示標記 */}
+        <circle
+          cx={cursorScreen.x}
+          cy={cursorScreen.y}
+          r={3.5}
+          fill={markerColor}
+          opacity={0.9}
+        />
+      </g>
+    );
+  }
+
+  if (tool === 'CIRCLE_TTR') {
+    const pt1Screen = ttrPickPoint1 ? worldToScreen(ttrPickPoint1) : null;
+    const pt2Screen = ttrPickPoint2 ? worldToScreen(ttrPickPoint2) : null;
+    const circleCenterScreen = ttrPreviewCircle ? worldToScreen(ttrPreviewCircle.center) : null;
+    const screenRadius = ttrPreviewCircle ? ttrPreviewCircle.radius * scale : null;
+
+    return (
+      <g className="pointer-events-none select-none">
+        {/* 第一切點標記 */}
+        {pt1Screen && (
+          <g>
+            <circle cx={pt1Screen.x} cy={pt1Screen.y} r={7} fill="none" stroke="#10b981" strokeWidth={1.5} />
+            <line x1={pt1Screen.x - 9} y1={pt1Screen.y - 7} x2={pt1Screen.x + 9} y2={pt1Screen.y - 7} stroke="#10b981" strokeWidth={1.5} />
+            <circle cx={pt1Screen.x} cy={pt1Screen.y} r={2.5} fill="#10b981" />
+            <text x={pt1Screen.x + 10} y={pt1Screen.y - 5} fill="#10b981" fontSize="10" fontFamily="monospace" fontWeight="bold">tan 1</text>
+          </g>
+        )}
+
+        {/* 第二切點標記 */}
+        {pt2Screen && (
+          <g>
+            <circle cx={pt2Screen.x} cy={pt2Screen.y} r={7} fill="none" stroke="#10b981" strokeWidth={1.5} />
+            <line x1={pt2Screen.x - 9} y1={pt2Screen.y - 7} x2={pt2Screen.x + 9} y2={pt2Screen.y - 7} stroke="#10b981" strokeWidth={1.5} />
+            <circle cx={pt2Screen.x} cy={pt2Screen.y} r={2.5} fill="#10b981" />
+            <text x={pt2Screen.x + 10} y={pt2Screen.y - 5} fill="#10b981" fontSize="10" fontFamily="monospace" fontWeight="bold">tan 2</text>
+          </g>
+        )}
+
+        {/* 預覽圓 */}
+        {circleCenterScreen && screenRadius && screenRadius > 0 && (
+          <g>
+            <circle
+              cx={circleCenterScreen.x}
+              cy={circleCenterScreen.y}
+              r={screenRadius}
+              stroke={strokeColor}
+              strokeWidth={strokeWidth}
+              strokeDasharray={strokeDasharray}
+              fill="rgba(245, 158, 11, 0.08)"
+            />
+            <circle cx={circleCenterScreen.x} cy={circleCenterScreen.y} r={3.5} fill={strokeColor} />
+            <line
+              x1={circleCenterScreen.x}
+              y1={circleCenterScreen.y}
+              x2={cursorScreen.x}
+              y2={cursorScreen.y}
+              stroke={strokeColor}
+              strokeWidth={1}
+              strokeDasharray="3,3"
+              opacity={0.6}
+            />
+          </g>
+        )}
+
+        {/* 第二點至游標的連線 */}
+        {session.step === 2 && pt2Screen && (
+          <line
+            x1={pt2Screen.x}
+            y1={pt2Screen.y}
+            x2={cursorScreen.x}
+            y2={cursorScreen.y}
+            stroke={strokeColor}
+            strokeWidth={1}
+            strokeDasharray="4,4"
+            opacity={0.8}
+          />
+        )}
+      </g>
+    );
+  }
+
+  if (tool === 'CIRCLE_3T') {
+    const pt1Screen = circle3TPickPoint1 ? worldToScreen(circle3TPickPoint1) : null;
+    const pt2Screen = circle3TPickPoint2 ? worldToScreen(circle3TPickPoint2) : null;
+    const pt3Screen = circle3TPickPoint3 ? worldToScreen(circle3TPickPoint3) : null;
+    const circleCenterScreen = circle3TPreviewCircle ? worldToScreen(circle3TPreviewCircle.center) : null;
+    const screenRadius = circle3TPreviewCircle ? circle3TPreviewCircle.radius * scale : null;
+
+    return (
+      <g className="pointer-events-none select-none">
+        {/* 第一切點標記 */}
+        {pt1Screen && (
+          <g>
+            <circle cx={pt1Screen.x} cy={pt1Screen.y} r={7} fill="none" stroke="#10b981" strokeWidth={1.5} />
+            <line x1={pt1Screen.x - 9} y1={pt1Screen.y - 7} x2={pt1Screen.x + 9} y2={pt1Screen.y - 7} stroke="#10b981" strokeWidth={1.5} />
+            <circle cx={pt1Screen.x} cy={pt1Screen.y} r={2.5} fill="#10b981" />
+            <text x={pt1Screen.x + 10} y={pt1Screen.y - 5} fill="#10b981" fontSize="10" fontFamily="monospace" fontWeight="bold">tan 1</text>
+          </g>
+        )}
+
+        {/* 第二切點標記 */}
+        {pt2Screen && (
+          <g>
+            <circle cx={pt2Screen.x} cy={pt2Screen.y} r={7} fill="none" stroke="#10b981" strokeWidth={1.5} />
+            <line x1={pt2Screen.x - 9} y1={pt2Screen.y - 7} x2={pt2Screen.x + 9} y2={pt2Screen.y - 7} stroke="#10b981" strokeWidth={1.5} />
+            <circle cx={pt2Screen.x} cy={pt2Screen.y} r={2.5} fill="#10b981" />
+            <text x={pt2Screen.x + 10} y={pt2Screen.y - 5} fill="#10b981" fontSize="10" fontFamily="monospace" fontWeight="bold">tan 2</text>
+          </g>
+        )}
+
+        {/* 第三切點標記 (若有) */}
+        {pt3Screen && (
+          <g>
+            <circle cx={pt3Screen.x} cy={pt3Screen.y} r={7} fill="none" stroke="#10b981" strokeWidth={1.5} />
+            <line x1={pt3Screen.x - 9} y1={pt3Screen.y - 7} x2={pt3Screen.x + 9} y2={pt3Screen.y - 7} stroke="#10b981" strokeWidth={1.5} />
+            <circle cx={pt3Screen.x} cy={pt3Screen.y} r={2.5} fill="#10b981" />
+            <text x={pt3Screen.x + 10} y={pt3Screen.y - 5} fill="#10b981" fontSize="10" fontFamily="monospace" fontWeight="bold">tan 3</text>
+          </g>
+        )}
+
+        {/* 預覽圓 */}
+        {circleCenterScreen && screenRadius && screenRadius > 0 && (
+          <g>
+            <circle
+              cx={circleCenterScreen.x}
+              cy={circleCenterScreen.y}
+              r={screenRadius}
+              stroke={strokeColor}
+              strokeWidth={strokeWidth}
+              strokeDasharray={strokeDasharray}
+              fill="rgba(245, 158, 11, 0.08)"
+            />
+            <circle cx={circleCenterScreen.x} cy={circleCenterScreen.y} r={3.5} fill={strokeColor} />
+            <line
+              x1={circleCenterScreen.x}
+              y1={circleCenterScreen.y}
+              x2={cursorScreen.x}
+              y2={cursorScreen.y}
+              stroke={strokeColor}
+              strokeWidth={1}
+              strokeDasharray="3,3"
+              opacity={0.6}
+            />
+          </g>
+        )}
+
+        {/* 第一點至游標連線 (步驟 1) */}
+        {session.step === 1 && pt1Screen && (
+          <line
+            x1={pt1Screen.x}
+            y1={pt1Screen.y}
+            x2={cursorScreen.x}
+            y2={cursorScreen.y}
+            stroke={strokeColor}
+            strokeWidth={1}
+            strokeDasharray="4,4"
+            opacity={0.8}
+          />
+        )}
+
+        {/* 第二點至游標連線 (步驟 2) */}
+        {session.step === 2 && pt2Screen && (
+          <line
+            x1={pt2Screen.x}
+            y1={pt2Screen.y}
+            x2={cursorScreen.x}
+            y2={cursorScreen.y}
+            stroke={strokeColor}
+            strokeWidth={1}
+            strokeDasharray="4,4"
+            opacity={0.8}
+          />
+        )}
       </g>
     );
   }

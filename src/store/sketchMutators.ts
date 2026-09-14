@@ -469,35 +469,22 @@ export function applyOffsetToSketch(
 export function applyMirrorToSketch(
   sketch: SketchFeature,
   sourceEntityIds: string[],
-  axisLineId: string
+  p1: Point2D,
+  p2: Point2D
 ): SketchFeature {
   const sourceEntities = sketch.entities.filter((e) => sourceEntityIds.includes(e.id));
-  const axisLine = sketch.entities.find(
-    (e) => e.id === axisLineId && e.type === 'line'
-  ) as LineEntity | undefined;
-
-  if (!axisLine || sourceEntities.length === 0) {
+  if (sourceEntities.length === 0) {
     return sketch;
   }
 
-  const result = calculateMirror(sourceEntities, axisLine);
+  const result = calculateMirror(sourceEntities, p1, p2);
   if (!result) {
     return sketch;
   }
 
-  const mirroredEntities = result.mirroredEntities.map((ent) => {
-    if (ent.type === 'polyline') {
-      return {
-        ...ent,
-        bulges: ent.bulges ? ent.bulges.map((b) => -b) : undefined,
-      } as PolylineEntity;
-    }
-    return ent;
-  });
-
   const updatedSketch: SketchFeature = {
     ...sketch,
-    entities: [...sketch.entities, ...mirroredEntities],
+    entities: [...sketch.entities, ...result.mirroredEntities],
     constraints: [...sketch.constraints, ...result.generatedConstraints],
   };
 

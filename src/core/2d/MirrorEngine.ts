@@ -63,11 +63,28 @@ export function mirrorVectorAcrossLine(v: Point2D, axisDir: Point2D): Point2D {
  * 主函式：計算對稱圖元與其對應的約束關係
  *
  * @param sourceEntities 來源圖元陣列
- * @param axisLine 鏡射軸線（直線圖元）
+ * @param p1OrAxis 鏡射軸線起點或直線圖元
+ * @param p2 鏡射軸線終點（若 p1OrAxis 為點）
  * @returns 鏡射結果物件，若軸線退化或無效則回傳 null
  */
-export function calculateMirror(sourceEntities: CADEntity2D[], axisLine: LineEntity): MirrorResult | null {
-  const { start: axisStart, end: axisEnd } = axisLine;
+export function calculateMirror(
+  sourceEntities: CADEntity2D[],
+  p1OrAxis: Point2D | LineEntity,
+  p2?: Point2D
+): MirrorResult | null {
+  let axisStart: Point2D;
+  let axisEnd: Point2D;
+
+  if ('start' in p1OrAxis && 'end' in p1OrAxis) {
+    axisStart = p1OrAxis.start;
+    axisEnd = p1OrAxis.end;
+  } else if (p2) {
+    axisStart = p1OrAxis;
+    axisEnd = p2;
+  } else {
+    return null;
+  }
+
   const dx = axisEnd.x - axisStart.x;
   const dy = axisEnd.y - axisStart.y;
   const axisLength = Math.hypot(dx, dy);
@@ -199,6 +216,7 @@ export function calculateMirror(sourceEntities: CADEntity2D[], axisLine: LineEnt
           ...entity,
           id: newId,
           points: mirroredPoints,
+          bulges: entity.bulges ? entity.bulges.map((b) => -b) : undefined,
           closed: entity.closed,
           isConstruction: entity.isConstruction,
           layerId: entity.layerId,

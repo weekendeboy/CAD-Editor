@@ -18,6 +18,8 @@ export type CADTool =
   | 'LINE'
   | 'RECTANGLE'
   | 'CIRCLE'
+  | 'CIRCLE_TTR'
+  | 'CIRCLE_3T'
   | 'ARC'
   | 'ARC_3P'
   | 'ARC_CENTER'
@@ -135,7 +137,7 @@ export interface CADActions {
   applyFillet: (entityId1: string, entityId2: string, radius: number) => void;
   applyChamfer: (entityId1: string, entityId2: string, distance: number) => void;
   offsetEntity: (entityId: string, distance: number, sidePoint: Point2D) => void;
-  mirrorEntities: (sourceEntityIds: string[], axisLineId: string) => void;
+  mirrorEntities: (sourceEntityIds: string[], p1: Point2D, p2: Point2D) => void;
   moveEntities: (entityIds: string[], basePoint: Point2D, targetPoint: Point2D) => void;
   copyEntities: (entityIds: string[], basePoint: Point2D, targetPoint: Point2D) => void;
   scaleEntities: (entityIds: string[], basePoint: Point2D, factor: number) => void;

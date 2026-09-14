@@ -244,6 +244,58 @@ export function solveConstraints(
             }
           }
         }
+      } else if (c.type === 'equal_length' && c.entityIds.length >= 2) {
+        const entA = workingEntities[c.entityIds[0]];
+        const entB = workingEntities[c.entityIds[1]];
+        if (entA && entB && entA.type === 'line' && entB.type === 'line') {
+          const dxA = entA.end.x - entA.start.x;
+          const dyA = entA.end.y - entA.start.y;
+          const lenA = Math.hypot(dxA, dyA);
+          const dxB = entB.end.x - entB.start.x;
+          const dyB = entB.end.y - entB.start.y;
+          const lenB = Math.hypot(dxB, dyB);
+          const diff = Math.abs(lenA - lenB);
+          maxDisp = Math.max(maxDisp, diff);
+          if (diff > SOLVER_TOLERANCE && (lenA > 1e-6 || lenB > 1e-6)) {
+            const avgLen = (lenA + lenB) / 2;
+            const isFixedA0 = fixedPoints.has(`${entA.id}_0`);
+            const isFixedA1 = fixedPoints.has(`${entA.id}_1`);
+            const isFixedB0 = fixedPoints.has(`${entB.id}_0`);
+            const isFixedB1 = fixedPoints.has(`${entB.id}_1`);
+            if (lenA > 1e-6) {
+              const scaleA = avgLen / lenA;
+              if (isFixedA0 && !isFixedA1) {
+                workingEntities[entA.id] = { ...entA, end: { x: entA.start.x + dxA * scaleA, y: entA.start.y + dyA * scaleA } };
+              } else if (!isFixedA0 && isFixedA1) {
+                workingEntities[entA.id] = { ...entA, start: { x: entA.end.x - dxA * scaleA, y: entA.end.y - dyA * scaleA } };
+              } else {
+                const midX = (entA.start.x + entA.end.x) / 2;
+                const midY = (entA.start.y + entA.end.y) / 2;
+                workingEntities[entA.id] = {
+                  ...entA,
+                  start: { x: midX - (dxA * scaleA) / 2, y: midY - (dyA * scaleA) / 2 },
+                  end: { x: midX + (dxA * scaleA) / 2, y: midY + (dyA * scaleA) / 2 },
+                };
+              }
+            }
+            if (lenB > 1e-6) {
+              const scaleB = avgLen / lenB;
+              if (isFixedB0 && !isFixedB1) {
+                workingEntities[entB.id] = { ...entB, end: { x: entB.start.x + dxB * scaleB, y: entB.start.y + dyB * scaleB } };
+              } else if (!isFixedB0 && isFixedB1) {
+                workingEntities[entB.id] = { ...entB, start: { x: entB.end.x - dxB * scaleB, y: entB.end.y - dyB * scaleB } };
+              } else {
+                const midX = (entB.start.x + entB.end.x) / 2;
+                const midY = (entB.start.y + entB.end.y) / 2;
+                workingEntities[entB.id] = {
+                  ...entB,
+                  start: { x: midX - (dxB * scaleB) / 2, y: midY - (dyB * scaleB) / 2 },
+                  end: { x: midX + (dxB * scaleB) / 2, y: midY + (dyB * scaleB) / 2 },
+                };
+              }
+            }
+          }
+        }
       } else if (c.type === 'equal_radius' && c.entityIds.length >= 2) {
         const entA = workingEntities[c.entityIds[0]];
         const entB = workingEntities[c.entityIds[1]];

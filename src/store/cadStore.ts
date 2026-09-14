@@ -1650,7 +1650,7 @@ export const useCADStore = create<CADState>((set, get) => ({
     };
   }),
 
-  mirrorEntities: (sourceEntityIds, axisLineId) => set((state) => {
+  mirrorEntities: (sourceEntityIds, p1, p2) => set((state) => {
     if (!state.activeSketchId) return state;
 
     const sketch = state.document.featureTree.find(
@@ -1659,7 +1659,7 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!sketch) return state;
 
-    const updatedSketch = applyMirrorToSketch(sketch, sourceEntityIds, axisLineId);
+    const updatedSketch = applyMirrorToSketch(sketch, sourceEntityIds, p1, p2);
     if (updatedSketch === sketch) return state;
 
     const updatedDocument: CADDocument = {

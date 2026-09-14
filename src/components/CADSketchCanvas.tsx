@@ -190,6 +190,26 @@ export const CADSketchCanvas: React.FC = () => {
     rectArraySourceIds,
     setRectArraySourceIds,
     rectArrayPreviewEntities,
+    ttrStep,
+    setTtrStep,
+    ttrFirstEntityId,
+    ttrFirstPickPoint,
+    ttrSecondEntityId,
+    ttrSecondPickPoint,
+    ttrRadius,
+    setTtrRadius,
+    ttrPreviewCircle,
+    ttrError,
+    circle3TStep,
+    setCircle3TStep,
+    circle3TFirstEntityId,
+    circle3TFirstPickPoint,
+    circle3TSecondEntityId,
+    circle3TSecondPickPoint,
+    circle3TThirdEntityId,
+    circle3TThirdPickPoint,
+    circle3TPreviewCircle,
+    circle3TError,
     polarTracking,
     polarExtensionIntersection,
     otrackAnchors,
@@ -235,7 +255,17 @@ export const CADSketchCanvas: React.FC = () => {
 
       const isDrawingActive = drawSession.isDrawing;
       const isTrackingActive = !drawSession.isDrawing && (otrackGuideLines.length > 0 || !!polarTracking);
-      const isEligibleTool = (currentTool === 'LINE' || currentTool === 'POLYLINE' || currentTool === 'CIRCLE' || currentTool === 'POLYGON' || currentTool === 'MOVE' || currentTool === 'COPY' || currentTool === 'SCALE' || currentTool === 'ROTATE');
+      const isEligibleTool = (
+        currentTool === 'LINE' ||
+        currentTool === 'POLYLINE' ||
+        currentTool === 'CIRCLE' ||
+        currentTool === 'CIRCLE_TTR' ||
+        currentTool === 'POLYGON' ||
+        currentTool === 'MOVE' ||
+        currentTool === 'COPY' ||
+        currentTool === 'SCALE' ||
+        currentTool === 'ROTATE'
+      );
 
       if (isEligibleTool && (isDrawingActive || isTrackingActive)) {
         if (/^[0-9.-]$/.test(e.key)) {
@@ -909,6 +939,13 @@ export const CADSketchCanvas: React.FC = () => {
             movePreviewEntities={movePreviewEntities}
             scalePreviewEntities={scalePreviewEntities}
             rotatePreviewEntities={rotatePreviewEntities}
+            ttrPreviewCircle={ttrPreviewCircle}
+            ttrPickPoint1={ttrFirstPickPoint}
+            ttrPickPoint2={ttrSecondPickPoint}
+            circle3TPreviewCircle={circle3TPreviewCircle}
+            circle3TPickPoint1={circle3TFirstPickPoint}
+            circle3TPickPoint2={circle3TSecondPickPoint}
+            circle3TPickPoint3={circle3TThirdPickPoint}
           />
 
           {/* 夾點渲染元件 (GripRenderer): 包裹於 pointerEvents: 'all' 以防被父級阻斷 */}
@@ -1021,6 +1058,60 @@ export const CADSketchCanvas: React.FC = () => {
             if (!entity) return null;
             return renderEntityPreview(entity, 'chamfer-first-overlay', {
               stroke: '#a855f7',
+              strokeWidth: 3.5,
+              strokeDasharray: '6,4',
+              fill: 'none',
+            });
+          })()}
+
+          {/* TTR 切線圖元選取高亮層 */}
+          {currentTool === 'CIRCLE_TTR' && ttrFirstEntityId && (() => {
+            const entity = currentEntities.find((e) => e.id === ttrFirstEntityId);
+            if (!entity) return null;
+            return renderEntityPreview(entity, 'ttr-first-overlay', {
+              stroke: '#10b981',
+              strokeWidth: 3.5,
+              strokeDasharray: '6,4',
+              fill: 'none',
+            });
+          })()}
+          {currentTool === 'CIRCLE_TTR' && ttrSecondEntityId && (() => {
+            const entity = currentEntities.find((e) => e.id === ttrSecondEntityId);
+            if (!entity) return null;
+            return renderEntityPreview(entity, 'ttr-second-overlay', {
+              stroke: '#10b981',
+              strokeWidth: 3.5,
+              strokeDasharray: '6,4',
+              fill: 'none',
+            });
+          })()}
+
+          {/* CIRCLE_3T 切線圖元選取高亮層 */}
+          {currentTool === 'CIRCLE_3T' && circle3TFirstEntityId && (() => {
+            const entity = currentEntities.find((e) => e.id === circle3TFirstEntityId);
+            if (!entity) return null;
+            return renderEntityPreview(entity, 'circle3t-first-overlay', {
+              stroke: '#10b981',
+              strokeWidth: 3.5,
+              strokeDasharray: '6,4',
+              fill: 'none',
+            });
+          })()}
+          {currentTool === 'CIRCLE_3T' && circle3TSecondEntityId && (() => {
+            const entity = currentEntities.find((e) => e.id === circle3TSecondEntityId);
+            if (!entity) return null;
+            return renderEntityPreview(entity, 'circle3t-second-overlay', {
+              stroke: '#10b981',
+              strokeWidth: 3.5,
+              strokeDasharray: '6,4',
+              fill: 'none',
+            });
+          })()}
+          {currentTool === 'CIRCLE_3T' && circle3TThirdEntityId && (() => {
+            const entity = currentEntities.find((e) => e.id === circle3TThirdEntityId);
+            if (!entity) return null;
+            return renderEntityPreview(entity, 'circle3t-third-overlay', {
+              stroke: '#10b981',
               strokeWidth: 3.5,
               strokeDasharray: '6,4',
               fill: 'none',
@@ -1376,6 +1467,85 @@ export const CADSketchCanvas: React.FC = () => {
           );
         })()}
 
+      {/* AutoCAD style Direct Distance Entry (HUD Radius Input) for CIRCLE_TTR */}
+      {(currentTool === 'CIRCLE_TTR' &&
+        ttrStep === 'SPECIFY_RADIUS' &&
+        ttrSecondPickPoint &&
+        drawSession.currentCursor) && (() => {
+          const refPt = ttrSecondPickPoint;
+          const cursor = drawSession.currentCursor;
+          const midPointWorld = {
+            x: (refPt.x + cursor.x) / 2,
+            y: (refPt.y + cursor.y) / 2,
+          };
+          const midPointScreen = worldToScreen(midPointWorld);
+          const currentRadius = Math.max(0.1, Math.hypot(cursor.x - refPt.x, cursor.y - refPt.y));
+
+          const displayValue = isHudFocused 
+            ? hudInputLength 
+            : `R: ${currentRadius.toFixed(1)} mm`;
+
+          return (
+            <div
+              style={{
+                position: 'absolute',
+                left: `${midPointScreen.x}px`,
+                top: `${midPointScreen.y}px`,
+                transform: 'translate(-50%, -140%)',
+              }}
+              className="z-50 px-3 py-1 bg-neutral-950/90 border border-amber-500/80 focus-within:border-amber-400 text-amber-400 font-mono text-xs rounded-full shadow-2xl flex items-center gap-1"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {isHudFocused && (
+                <span className="text-amber-400 font-bold mr-0.5 select-none font-mono">Radius:</span>
+              )}
+              <input
+                ref={hudRef}
+                type="text"
+                className={`${isHudFocused ? 'w-16 text-center' : 'w-28 text-center'} text-amber-400 focus:text-white bg-transparent border-none focus:outline-none focus:ring-0 font-bold font-mono p-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
+                value={displayValue}
+                onChange={(e) => {
+                  setHudInputLength(e.target.value);
+                  setIsHudFocused(true);
+                }}
+                onFocus={() => {
+                  setIsHudFocused(true);
+                  if (!hudInputLength) {
+                    setHudInputLength(currentRadius.toFixed(1));
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const typedVal = hudInputLength || currentRadius.toFixed(1);
+                    const num = parseFloat(typedVal);
+                    if (!isNaN(num) && num > 0) {
+                      submitExactLength(num);
+                    }
+                    setHudInputLength('');
+                    setIsHudFocused(false);
+                    hudRef.current?.blur();
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    if (hudInputLength) {
+                      setHudInputLength('');
+                      setIsHudFocused(false);
+                      hudRef.current?.blur();
+                    } else {
+                      cancelDrawing();
+                    }
+                  }
+                }}
+              />
+              {isHudFocused && (
+                <span className="text-neutral-500 font-bold ml-0.5 select-none">mm</span>
+              )}
+            </div>
+          );
+        })()}
+
       {/* AutoCAD style Direct Scale Factor Entry for SCALE */}
       {(currentTool === 'SCALE' &&
         drawSession.isDrawing &&
@@ -1685,21 +1855,25 @@ export const CADSketchCanvas: React.FC = () => {
             <button
               onClick={() => {
                 if (mirrorSourceIds.length > 0) {
-                  setMirrorStep('PICK_AXIS');
+                  setMirrorStep('PICK_P1');
                 }
               }}
               disabled={mirrorSourceIds.length === 0}
               className={`px-3 py-1 rounded-full text-xs font-bold transition-colors ${
-                mirrorStep === 'PICK_AXIS'
+                mirrorStep === 'PICK_P1' || mirrorStep === 'PICK_P2'
                   ? 'bg-purple-500 text-neutral-950 shadow-sm'
                   : 'text-neutral-400 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed'
               }`}
             >
-              2. Pick Axis
+              {mirrorStep === 'PICK_P2' ? '2. Specify Point 2' : '2. Specify Point 1'}
             </button>
           </div>
           <span className="text-neutral-400 text-xs font-bold">
-            (Enter to proceed)
+            {mirrorStep === 'PICK_SOURCE'
+              ? '(Enter to confirm selection)'
+              : mirrorStep === 'PICK_P1'
+              ? '(Click 1st point of mirror axis)'
+              : '(Click 2nd point of mirror axis)'}
           </span>
         </div>
       )}
@@ -1841,9 +2015,105 @@ export const CADSketchCanvas: React.FC = () => {
         />
       )}
 
+      {/* TTR 畫圓步驟與引導膠囊框 */}
+      {currentTool === 'CIRCLE_TTR' && (
+        <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-40 px-4 py-2 bg-neutral-900/90 border border-amber-500/50 text-neutral-200 font-mono text-xs rounded-full shadow-2xl flex items-center gap-3 select-none">
+          <span className="text-amber-400 font-bold tracking-wider">Circle TTR:</span>
+          <div className="flex bg-neutral-950 rounded-full p-0.5 border border-neutral-800">
+            <span
+              className={`px-3 py-1 rounded-full text-xs font-bold transition-colors ${
+                ttrStep === 'PICK_ENT1'
+                  ? 'bg-amber-500 text-neutral-950 shadow-sm'
+                  : ttrFirstEntityId
+                  ? 'text-emerald-400'
+                  : 'text-neutral-400'
+              }`}
+            >
+              1. {ttrFirstEntityId ? '切線 1 ✓' : '點選第 1 相切物件'}
+            </span>
+            <span
+              className={`px-3 py-1 rounded-full text-xs font-bold transition-colors ${
+                ttrStep === 'PICK_ENT2'
+                  ? 'bg-amber-500 text-neutral-950 shadow-sm'
+                  : ttrSecondEntityId
+                  ? 'text-emerald-400'
+                  : 'text-neutral-400'
+              }`}
+            >
+              2. {ttrSecondEntityId ? '切線 2 ✓' : '點選第 2 相切物件'}
+            </span>
+            <span
+              className={`px-3 py-1 rounded-full text-xs font-bold transition-colors ${
+                ttrStep === 'SPECIFY_RADIUS'
+                  ? 'bg-amber-500 text-neutral-950 shadow-sm'
+                  : 'text-neutral-400'
+              }`}
+            >
+              3. 指定半徑
+            </span>
+          </div>
+          <span className="text-neutral-400 text-xs">
+            {ttrStep === 'PICK_ENT1'
+              ? '(點選直線、圓或圓弧)'
+              : ttrStep === 'PICK_ENT2'
+              ? '(點選第二個相切物件)'
+              : '(點擊指定半徑或於 HUD 輸入數值後按 Enter)'}
+          </span>
+        </div>
+      )}
+
+      {/* 3T 畫圓步驟與引導膠囊框 */}
+      {currentTool === 'CIRCLE_3T' && (
+        <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-40 px-4 py-2 bg-neutral-900/90 border border-amber-500/50 text-neutral-200 font-mono text-xs rounded-full shadow-2xl flex items-center gap-3 select-none">
+          <span className="text-amber-400 font-bold tracking-wider">Circle 3T:</span>
+          <div className="flex bg-neutral-950 rounded-full p-0.5 border border-neutral-800">
+            <span
+              className={`px-3 py-1 rounded-full text-xs font-bold transition-colors ${
+                circle3TStep === 'PICK_ENT1'
+                  ? 'bg-amber-500 text-neutral-950 shadow-sm'
+                  : circle3TFirstEntityId
+                  ? 'text-emerald-400'
+                  : 'text-neutral-400'
+              }`}
+            >
+              1. {circle3TFirstEntityId ? '切線 1 ✓' : '點選第 1 相切物件'}
+            </span>
+            <span
+              className={`px-3 py-1 rounded-full text-xs font-bold transition-colors ${
+                circle3TStep === 'PICK_ENT2'
+                  ? 'bg-amber-500 text-neutral-950 shadow-sm'
+                  : circle3TSecondEntityId
+                  ? 'text-emerald-400'
+                  : 'text-neutral-400'
+              }`}
+            >
+              2. {circle3TSecondEntityId ? '切線 2 ✓' : '點選第 2 相切物件'}
+            </span>
+            <span
+              className={`px-3 py-1 rounded-full text-xs font-bold transition-colors ${
+                circle3TStep === 'PICK_ENT3'
+                  ? 'bg-amber-500 text-neutral-950 shadow-sm'
+                  : circle3TThirdEntityId
+                  ? 'text-emerald-400'
+                  : 'text-neutral-400'
+              }`}
+            >
+              3. {circle3TThirdEntityId ? '切線 3 ✓' : '點選第 3 相切物件'}
+            </span>
+          </div>
+          <span className="text-neutral-400 text-xs">
+            {circle3TStep === 'PICK_ENT1'
+              ? '(點選直線、圓或圓弧)'
+              : circle3TStep === 'PICK_ENT2'
+              ? '(點選第二個相切物件)'
+              : '(點選第三個相切物件立即生成圓)'}
+          </span>
+        </div>
+      )}
+
       {/* AutoCAD 風格狀態列 */}
       <div className="absolute bottom-0 right-0 m-4 px-4 py-2 bg-black bg-opacity-70 text-green-400 font-mono text-sm rounded pointer-events-none select-none flex gap-6 items-center">
-        <div className={(filletError || chamferError || offsetRadiusError || polylineWarning) ? "text-red-400 font-bold animate-pulse" : ""}>
+        <div className={(filletError || chamferError || offsetRadiusError || polylineWarning || ttrError || circle3TError) ? "text-red-400 font-bold animate-pulse" : ""}>
           {filletError
             ? filletError
             : chamferError
@@ -1852,8 +2122,24 @@ export const CADSketchCanvas: React.FC = () => {
             ? offsetRadiusError
             : polylineWarning
             ? polylineWarning
+            : ttrError
+            ? ttrError
+            : circle3TError
+            ? circle3TError
             : activeGrip
             ? `Grip Editing: Dragging ${activeGrip.grip.type} grip`
+            : currentTool === 'CIRCLE_TTR'
+            ? (ttrStep === 'PICK_ENT1'
+                ? 'Circle TTR: Pick 1st tangent entity (Line, Arc, Circle)'
+                : ttrStep === 'PICK_ENT2'
+                ? 'Circle TTR: Pick 2nd tangent entity'
+                : 'Circle TTR: Click to specify radius or type radius in HUD')
+            : currentTool === 'CIRCLE_3T'
+            ? (circle3TStep === 'PICK_ENT1'
+                ? 'Circle 3T: Pick 1st tangent entity (Line, Arc, Circle)'
+                : circle3TStep === 'PICK_ENT2'
+                ? 'Circle 3T: Pick 2nd tangent entity'
+                : 'Circle 3T: Pick 3rd tangent entity to create circle')
             : currentTool === 'TRIM'
             ? 'Trim: Click intersecting edge to cut'
             : currentTool === 'EXTEND'

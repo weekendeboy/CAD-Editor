@@ -552,9 +552,39 @@ export default function App() {
                     ? 'bg-neutral-800 text-blue-400'
                     : 'text-neutral-400 hover:text-white'
                 }`}
-                title="Circle (C)"
+                title="Circle: Center-Radius (C)"
               >
                 <Circle size={18} />
+              </button>
+              <button
+                id="btn-tool-circle-ttr"
+                onClick={() => setTool('CIRCLE_TTR')}
+                className={`p-1.5 rounded transition-colors ${
+                  currentTool === 'CIRCLE_TTR'
+                    ? 'bg-neutral-800 text-amber-400 border border-amber-500/40 shadow-sm'
+                    : 'text-neutral-400 hover:text-white'
+                }`}
+                title="Circle: Tangent, Tangent, Radius (TTR - 相切、相切、半徑)"
+              >
+                <div className="relative flex items-center justify-center">
+                  <Circle size={18} />
+                  <span className="absolute -bottom-1 -right-1 text-[8px] font-black font-mono text-amber-400 leading-none">T</span>
+                </div>
+              </button>
+              <button
+                id="btn-tool-circle-3t"
+                onClick={() => setTool('CIRCLE_3T')}
+                className={`p-1.5 rounded transition-colors ${
+                  currentTool === 'CIRCLE_3T'
+                    ? 'bg-neutral-800 text-emerald-400 border border-emerald-500/40 shadow-sm'
+                    : 'text-neutral-400 hover:text-white'
+                }`}
+                title="Circle: 3-Tangent (3T - 三相切畫圓)"
+              >
+                <div className="relative flex items-center justify-center">
+                  <Circle size={18} />
+                  <span className="absolute -bottom-1 -right-1 text-[8px] font-black font-mono text-emerald-400 leading-none">3T</span>
+                </div>
               </button>
               <button
                 onClick={() => setTool('ARC_3P')}
