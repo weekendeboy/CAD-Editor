@@ -93,6 +93,18 @@ export function findSnapPoint(
     });
   };
 
+  // 原點 (0, 0) 無條件作為鎖點候選（endpoint 類型，具備最高捕捉優先級）
+  const originPt: Point2D = { x: 0, y: 0 };
+  const originDist = getDistance(mouseWorld, originPt);
+  if (originDist <= worldThreshold) {
+    candidates.push({
+      point: originPt,
+      type: 'endpoint',
+      entityId: 'origin',
+      distance: originDist,
+    });
+  }
+
   for (const entity of entities) {
     if (entity.visible === false) {
       continue;

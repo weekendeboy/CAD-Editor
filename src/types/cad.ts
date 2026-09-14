@@ -87,7 +87,9 @@ export type ConstraintType =
   | 'fix'
   | 'equal_length'
   | 'equal_radius'
-  | 'angle';
+  | 'angle'
+  | 'radius'
+  | 'diameter';
 
 export interface Constraint {
   id: string;
@@ -95,6 +97,7 @@ export interface Constraint {
   entityIds: string[];
   pointIndices?: number[];
   value?: number;
+  targetVal?: number;
 }
 
 export interface Dimension {

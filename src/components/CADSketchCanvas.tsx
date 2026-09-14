@@ -106,6 +106,7 @@ export const CADSketchCanvas: React.FC = () => {
     selectEntity,
     clearSelection,
     updateConstraintValue,
+    updateDimensionValue,
     updateEntity,
     updateEntities,
     orthoEnabled,
@@ -355,7 +356,10 @@ export const CADSketchCanvas: React.FC = () => {
   }, [currentTool, filletFirstEntityId, chamferFirstEntityId]);
 
   // 處理雙擊編輯尺寸標註事件
-  const handleEditDimension = useCallback((dim: Dimension) => {
+  const handleEditDimension = useCallback((dim: Dimension, e?: React.MouseEvent) => {
+    if (e) {
+      e.stopPropagation();
+    }
     const sketch = document.featureTree.find(
       (f) => f.id === activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
@@ -366,9 +370,9 @@ export const CADSketchCanvas: React.FC = () => {
 
     if (dim.type === 'radial') {
       const isDiameter = !!dim.isDiameter;
-      if (linkedConstraint?.value !== undefined) {
-        // linkedConstraint value is radius, diameter is radius * 2
-        initialVal = isDiameter ? linkedConstraint.value * 2 : linkedConstraint.value;
+      if (linkedConstraint?.targetVal !== undefined || linkedConstraint?.value !== undefined) {
+        const val = linkedConstraint.targetVal !== undefined ? linkedConstraint.targetVal : linkedConstraint.value!;
+        initialVal = isDiameter ? val * 2 : val;
       } else {
         let r = 0;
         if (dim.entityIds && dim.entityIds.length > 0) {
@@ -385,8 +389,8 @@ export const CADSketchCanvas: React.FC = () => {
         initialVal = isDiameter ? r * 2 : r;
       }
     } else if (dim.type === 'angular') {
-      if (linkedConstraint?.value !== undefined) {
-        initialVal = linkedConstraint.value;
+      if (linkedConstraint?.targetVal !== undefined || linkedConstraint?.value !== undefined) {
+        initialVal = linkedConstraint.targetVal !== undefined ? linkedConstraint.targetVal : linkedConstraint.value!;
       } else if (dim.points && dim.points.length >= 4) {
         const d1x = dim.points[1].x - dim.points[0].x;
         const d1y = dim.points[1].y - dim.points[0].y;
@@ -401,12 +405,32 @@ export const CADSketchCanvas: React.FC = () => {
         }
       }
     } else {
-      // Linear dimension
-      if (linkedConstraint?.value !== undefined) {
-        initialVal = linkedConstraint.value;
+      // Linear dimension (point-to-point, two lines, two circles, single line)
+      if (linkedConstraint?.targetVal !== undefined || linkedConstraint?.value !== undefined) {
+        initialVal = linkedConstraint.targetVal !== undefined ? linkedConstraint.targetVal : linkedConstraint.value!;
       } else if (dim.points && dim.points.length >= 2) {
-        const p1 = dim.points[0];
-        const p2 = dim.points[1];
+        let p1 = dim.points[0];
+        let p2 = dim.points[1];
+        if (dim.entityIds && dim.entityIds.length >= 2 && sketch) {
+          const e1 = sketch.entities.find((e) => e.id === dim.entityIds![0]);
+          const e2 = sketch.entities.find((e) => e.id === dim.entityIds![1]);
+          const idx1 = dim.pointIndices?.[0] ?? 0;
+          const idx2 = dim.pointIndices?.[1] ?? 0;
+          const getPt = (ent: CADEntity2D, idx: number) => {
+            if (ent.type === 'line') return idx === 1 ? ent.end : ent.start;
+            if (ent.type === 'circle' || ent.type === 'arc') return ent.center;
+            if (ent.type === 'polyline') return ent.points[idx] || ent.points[0];
+            return null;
+          };
+          if (e1 && e2) {
+            const pt1 = getPt(e1, idx1);
+            const pt2 = getPt(e2, idx2);
+            if (pt1 && pt2) {
+              p1 = pt1;
+              p2 = pt2;
+            }
+          }
+        }
         initialVal = dim.dimType === 'horizontal'
           ? Math.abs(p2.x - p1.x)
           : dim.dimType === 'vertical'
@@ -430,19 +454,7 @@ export const CADSketchCanvas: React.FC = () => {
     const value = parseFloat(currentValue);
     
     if (!isNaN(value) && value > 0) {
-      if (dimension.constraintId) {
-        updateConstraintValue(dimension.constraintId, value);
-      } else if (dimension.entityIds && dimension.entityIds.length > 0) {
-        const entId = dimension.entityIds[0];
-        const sketch = document.featureTree.find(
-          (f) => f.id === activeSketchId && f.type === 'SKETCH'
-        ) as SketchFeature | undefined;
-        const ent = sketch?.entities.find((e) => e.id === entId);
-        if (ent && (ent.type === 'circle' || ent.type === 'arc')) {
-          const newRadius = dimension.isDiameter ? value / 2 : value;
-          updateEntity(entId, { radius: newRadius });
-        }
-      }
+      updateDimensionValue(dimension.id, value);
     }
     setEditingDimension(null);
   };
@@ -2247,6 +2259,9 @@ export const CADSketchCanvas: React.FC = () => {
             transform: 'translate(-50%, -50%)',
           }}
           onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
         >
           <input
             type="text"

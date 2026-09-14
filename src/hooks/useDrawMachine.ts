@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useCADStore } from '../store/cadStore';
-import { Point2D, LineEntity, CircleEntity, ArcEntity, PolylineEntity, SketchFeature, CADEntity2D } from '../types/cad';
+import { Point2D, LineEntity, CircleEntity, ArcEntity, PolylineEntity, SketchFeature, CADEntity2D, ConstraintType } from '../types/cad';
 import { DrawSession, createInitialDrawSession } from '../types/sketchInteraction';
 import { findSnapPoint, SnapResult } from '../core/2d/SnapManager';
 import { calculate3PointArc, calculatePolygonVertices, calculateTTRCircle, calculate3TCircle } from '../core/2d/GeometryMath';
@@ -297,6 +297,8 @@ export function useDrawMachine() {
   const polarAngleStep = useCADStore((state) => state.polarAngleStep);
   const customPolarAngles = useCADStore((state) => state.customPolarAngles);
   const activeLayerId = useCADStore((state) => state.activeLayerId);
+  const lastRadius = useCADStore((state) => state.lastRadius);
+  const setLastRadius = useCADStore((state) => state.setLastRadius);
 
   const [drawSession, setDrawSession] = useState<DrawSession>(createInitialDrawSession());
   const [currentSnap, setCurrentSnap] = useState<SnapResult | null>(null);
@@ -496,6 +498,48 @@ export function useDrawMachine() {
       storeClearOtrackAnchors();
     }
   }, [storeClearOtrackAnchors]);
+
+  // AutoCAD 提示詞 / HUD 提示（記憶上一次半徑，例如 Radius <${lastRadius}>:）
+  const hudPrompt = useMemo(() => {
+    if (currentTool === 'CIRCLE' && drawSession.isDrawing && drawSession.startPoint) {
+      return `Radius <${lastRadius}>:`;
+    }
+    if (
+      (currentTool === 'ARC' || currentTool === 'ARC_CENTER' || currentTool === 'ARC_3P') &&
+      drawSession.isDrawing &&
+      drawSession.startPoint
+    ) {
+      return `Radius <${lastRadius}>:`;
+    }
+    if (currentTool === 'CIRCLE_TTR' && ttrStep === 'SPECIFY_RADIUS') {
+      return `Radius <${lastRadius}>:`;
+    }
+    return null;
+  }, [currentTool, drawSession.isDrawing, drawSession.startPoint, ttrStep, lastRadius]);
+
+  // 當 CIRCLE 或 ARC 工具進入動態輸入 (HUD / DDE) 階段時，在 HUD / 命令列提示中加入預設值顯示（例如 Radius <${lastRadius}>:）
+  useEffect(() => {
+    if (!hudPrompt || typeof window === 'undefined') return;
+
+    // 尋找繪圖 HUD 輸入框與狀態列元素，動態注入 AutoCAD 風格提示
+    const hudInputs = window.document.querySelectorAll<HTMLInputElement>('input');
+    hudInputs.forEach((input) => {
+      if (
+        input.className.includes('text-emerald-400') ||
+        input.className.includes('font-mono') ||
+        input.closest('.z-50')
+      ) {
+        input.placeholder = `<${lastRadius}>`;
+        input.setAttribute('data-hud-prompt', hudPrompt);
+        input.title = hudPrompt;
+      }
+    });
+
+    const statusEl = window.document.querySelector('[data-command-line]');
+    if (statusEl) {
+      statusEl.textContent = hudPrompt;
+    }
+  }, [hudPrompt, lastRadius]);
 
   // 取得目前草圖內的 entities
   let currentEntities: CADEntity2D[] = [];
@@ -799,20 +843,134 @@ export function useDrawMachine() {
     cancelDrawing();
   }, [rectArraySourceIds, cancelDrawing]);
 
-  // 監聽鍵盤按鍵：Escape 清除暫態，M 切換 POLYLINE 模式，Enter 確認鏡射、移動複製或縮放/旋轉/陣列來源選取
+  // 監聽鍵盤按鍵：Escape 清除暫態，M 切換 POLYLINE 模式，Enter 確認鏡射、移動複製或縮放/旋轉/陣列來源選取或套用預設半徑
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      if (
+      const isInput =
         target.tagName === 'INPUT' ||
         target.tagName === 'TEXTAREA' ||
-        target.isContentEditable
-      ) {
+        target.isContentEditable;
+
+      // 攔截鍵盤 Enter 事件：若在輸入框中且為圓形/圓弧工具且輸入為空或 0，套用 lastRadius
+      if (isInput) {
+        if (
+          e.key === 'Enter' &&
+          (currentTool === 'CIRCLE' ||
+            currentTool === 'ARC' ||
+            currentTool === 'ARC_CENTER' ||
+            currentTool === 'ARC_3P' ||
+            currentTool === 'CIRCLE_TTR') &&
+          drawSession.isDrawing &&
+          drawSession.startPoint
+        ) {
+          const inputEl = target as HTMLInputElement;
+          const val = inputEl.value ? inputEl.value.trim() : '';
+          const cleanVal = val.replace(/[^0-9.-]/g, '');
+          const num = parseFloat(cleanVal);
+          if (!val || val === '0' || isNaN(num) || num <= 0) {
+            e.preventDefault();
+            e.stopPropagation();
+            const r = useCADStore.getState().lastRadius || 10;
+            submitExactLength(r);
+            inputEl.blur();
+            return;
+          }
+        }
         return;
       }
 
       if (e.key === 'Escape') {
         cancelDrawing();
+      } else if (e.key === 'Enter' && currentTool === 'CIRCLE' && drawSession.isDrawing && drawSession.startPoint) {
+        // 直接按下 Enter 套用 lastRadius
+        e.preventDefault();
+        e.stopPropagation();
+        const r = useCADStore.getState().lastRadius || 10;
+        const newCircle: CircleEntity = {
+          id: crypto.randomUUID(),
+          layerId: activeLayerId || '0',
+          visible: true,
+          locked: false,
+          type: 'circle',
+          center: drawSession.startPoint,
+          radius: r,
+        };
+        addEntity(newCircle);
+        setLastRadius(r);
+        cancelDrawing();
+        return;
+      } else if (
+        e.key === 'Enter' &&
+        (currentTool === 'ARC' || currentTool === 'ARC_CENTER' || currentTool === 'ARC_3P') &&
+        drawSession.isDrawing &&
+        drawSession.startPoint
+      ) {
+        // 直接按下 Enter 套用 lastRadius
+        e.preventDefault();
+        e.stopPropagation();
+        const r = useCADStore.getState().lastRadius || 10;
+        const center = drawSession.startPoint;
+        let startAngle = 0;
+        let endAngle = Math.PI;
+        if (drawSession.secondPoint) {
+          startAngle = Math.atan2(drawSession.secondPoint.y - center.y, drawSession.secondPoint.x - center.x);
+          const cur = drawSession.currentCursor || drawSession.secondPoint;
+          endAngle = Math.atan2(cur.y - center.y, cur.x - center.x);
+          if (Math.abs(endAngle - startAngle) < 1e-4) {
+            endAngle = startAngle + Math.PI / 2;
+          }
+        } else if (drawSession.currentCursor) {
+          const dx = drawSession.currentCursor.x - center.x;
+          const dy = drawSession.currentCursor.y - center.y;
+          if (Math.hypot(dx, dy) > 1e-4) {
+            startAngle = Math.atan2(dy, dx);
+            endAngle = startAngle + Math.PI / 2;
+          }
+        }
+        const newArc: ArcEntity = {
+          id: crypto.randomUUID(),
+          layerId: activeLayerId || '0',
+          visible: true,
+          locked: false,
+          type: 'arc',
+          center,
+          radius: r,
+          startAngle,
+          endAngle,
+        };
+        addEntity(newArc);
+        setLastRadius(r);
+        cancelDrawing();
+        return;
+      } else if (e.key === 'Enter' && currentTool === 'CIRCLE_TTR' && ttrStep === 'SPECIFY_RADIUS') {
+        e.preventDefault();
+        e.stopPropagation();
+        const r = useCADStore.getState().lastRadius || 10;
+        if (ttrFirstEntityId && ttrSecondEntityId && ttrFirstPickPoint && ttrSecondPickPoint) {
+          const ent1 = currentEntities.find((e) => e.id === ttrFirstEntityId);
+          const ent2 = currentEntities.find((e) => e.id === ttrSecondEntityId);
+          if (ent1 && ent2) {
+            const circle = calculateTTRCircle(ent1, ent2, r, ttrFirstPickPoint, ttrSecondPickPoint);
+            if (circle) {
+              circle.layerId = activeLayerId || '0';
+              addEntity(circle);
+              setLastRadius(r);
+              addConstraint({
+                id: crypto.randomUUID(),
+                type: 'tangent',
+                entityIds: [circle.id, ent1.id],
+              });
+              addConstraint({
+                id: crypto.randomUUID(),
+                type: 'tangent',
+                entityIds: [circle.id, ent2.id],
+              });
+              cancelDrawing();
+              return;
+            }
+          }
+        }
       } else if ((e.key === 'm' || e.key === 'M') && currentTool === 'POLYLINE') {
         togglePolylineMode();
       } else if (e.key === 'Enter' && currentTool === 'POLYLINE') {
@@ -848,7 +1006,7 @@ export function useDrawMachine() {
       }
     };
 
-    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, true);
 
     const handlePolylineKeypress = (e: Event) => {
       const customEvent = e as CustomEvent<{ key: string }>;
@@ -859,13 +1017,25 @@ export function useDrawMachine() {
     window.addEventListener('cad-polyline-keypress', handlePolylineKeypress);
 
     return () => {
-      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keydown', handleKeyDown, true);
       window.removeEventListener('cad-polyline-keypress', handlePolylineKeypress);
     };
   }, [
     cancelDrawing,
     togglePolylineMode,
+    finishPolyline,
     currentTool,
+    drawSession,
+    activeLayerId,
+    addEntity,
+    setLastRadius,
+    ttrStep,
+    ttrFirstEntityId,
+    ttrSecondEntityId,
+    ttrFirstPickPoint,
+    ttrSecondPickPoint,
+    currentEntities,
+    addConstraint,
     mirrorStep,
     moveStep,
     moveSourceIds.length,
@@ -1891,6 +2061,7 @@ export function useDrawMachine() {
               endAngle: arcData.endAngle,
             };
             addEntity(newArc);
+            setLastRadius(arcData.radius);
             newEntityId = newArc.id;
 
             const newTangent = getSegmentEndTangent(newArc, arcData.isStartPointMatchingPStart);
@@ -2056,6 +2227,7 @@ export function useDrawMachine() {
               radius: radius,
             };
             addEntity(newCircle);
+            setLastRadius(radius);
           }
 
           cancelDrawing();
@@ -2273,6 +2445,7 @@ export function useDrawMachine() {
             };
 
             addEntity(newArc);
+            setLastRadius(arcData.radius);
 
             const arcStart = {
               x: newArc.center.x + newArc.radius * Math.cos(newArc.startAngle),
@@ -2355,6 +2528,7 @@ export function useDrawMachine() {
             };
 
             addEntity(newArc);
+            setLastRadius(radius);
 
             if (snapCenter) {
               addConstraint({
@@ -2471,9 +2645,10 @@ export function useDrawMachine() {
             };
             const newConstraint = {
               id: constraintId,
-              type: 'distance' as const,
+              type: 'radius' as const,
               entityIds: [dimTarget.id],
               value: dimTarget.radius,
+              targetVal: dimTarget.radius,
             };
             addDimension(newDimension, newConstraint);
             cancelDrawing();
@@ -2518,6 +2693,10 @@ export function useDrawMachine() {
             }
 
             const dimType = determineLinearDimType(p1, p2, textPosition);
+            
+            let constraintType: ConstraintType = 'distance';
+            if (dimType === 'horizontal') constraintType = 'distance_x';
+            else if (dimType === 'vertical') constraintType = 'distance_y';
 
             const newDimension = {
               id: dimensionId,
@@ -2527,30 +2706,38 @@ export function useDrawMachine() {
               textPosition: textPosition,
               constraintId: constraintId,
               entityIds: entityIds,
+              pointIndices: dimSnap1 && dimSnap2 ? [dimSnap1.pointIndex ?? 0, dimSnap2.pointIndex ?? 0] : undefined,
             };
 
             let newConstraint;
+            let cValue = physicalLen;
+            if (constraintType === 'distance_x') cValue = Math.abs(p2.x - p1.x);
+            else if (constraintType === 'distance_y') cValue = Math.abs(p2.y - p1.y);
+
             if (dimSelectedLineId) {
               newConstraint = {
                 id: constraintId,
-                type: 'length' as const,
+                type: constraintType === 'distance' ? 'length' : constraintType,
                 entityIds: [dimSelectedLineId],
-                value: physicalLen,
+                value: cValue,
+                targetVal: cValue,
               };
             } else if (dimSnap1 && dimSnap2) {
               newConstraint = {
                 id: constraintId,
-                type: 'distance' as const,
+                type: constraintType,
                 entityIds: [dimSnap1.entityId, dimSnap2.entityId],
                 pointIndices: [dimSnap1.pointIndex ?? 0, dimSnap2.pointIndex ?? 0],
-                value: physicalLen,
+                value: cValue,
+                targetVal: cValue,
               };
             } else {
               newConstraint = {
                 id: constraintId,
-                type: 'distance' as const,
+                type: constraintType,
                 entityIds: [],
-                value: physicalLen,
+                value: cValue,
+                targetVal: cValue,
               };
             }
 
@@ -2574,10 +2761,25 @@ export function useDrawMachine() {
               entityIds: [line1.id, line2.id],
             };
 
+            const d1x = line1.end.x - line1.start.x;
+            const d1y = line1.end.y - line1.start.y;
+            const d2x = line2.end.x - line2.start.x;
+            const d2y = line2.end.y - line2.start.y;
+            const dot = d1x * d2x + d1y * d2y;
+            const len1 = Math.hypot(d1x, d1y);
+            const len2 = Math.hypot(d2x, d2y);
+            let angle = 0;
+            if (len1 > 1e-6 && len2 > 1e-6) {
+              const cosA = Math.max(-1, Math.min(1, dot / (len1 * len2)));
+              angle = (Math.acos(cosA) * 180) / Math.PI;
+            }
+
             const newConstraint = {
               id: constraintId,
               type: 'angle' as const,
               entityIds: [line1.id, line2.id],
+              value: angle,
+              targetVal: angle,
             };
 
             addDimension(newDimension, newConstraint);
@@ -3013,6 +3215,7 @@ export function useDrawMachine() {
               if (circle) {
                 circle.layerId = activeLayerId || '0';
                 addEntity(circle);
+                setLastRadius(effectiveRadius);
                 addConstraint({
                   id: crypto.randomUUID(),
                   type: 'tangent',
@@ -3094,6 +3297,7 @@ export function useDrawMachine() {
                 if (circle) {
                   circle.layerId = activeLayerId || '0';
                   addEntity(circle);
+                  setLastRadius(circle.radius);
                   addConstraint({
                     id: crypto.randomUUID(),
                     type: 'tangent',
@@ -3193,7 +3397,7 @@ export function useDrawMachine() {
   );
 
   const submitExactLength = useCallback(
-    (length: number): boolean => {
+    (length?: number): boolean => {
       if (!activeSketchId) return false;
       if (!drawSession.isDrawing || !drawSession.startPoint) {
         if (
@@ -3218,7 +3422,7 @@ export function useDrawMachine() {
             angleRad = (polarTracking.angleDeg * Math.PI) / 180;
           }
 
-          if (anchor && angleRad !== null && length > 0) {
+          if (anchor && angleRad !== null && length !== undefined && length > 0) {
             const newStartPoint: Point2D = {
               x: anchor.x + length * Math.cos(angleRad),
               y: anchor.y + length * Math.sin(angleRad),
@@ -3262,6 +3466,9 @@ export function useDrawMachine() {
         currentTool !== 'POLYLINE' &&
         currentTool !== 'CIRCLE' &&
         currentTool !== 'CIRCLE_TTR' &&
+        currentTool !== 'ARC' &&
+        currentTool !== 'ARC_CENTER' &&
+        currentTool !== 'ARC_3P' &&
         currentTool !== 'POLYGON' &&
         currentTool !== 'MOVE' &&
         currentTool !== 'COPY' &&
@@ -3272,14 +3479,19 @@ export function useDrawMachine() {
       }
 
       if (currentTool === 'CIRCLE_TTR') {
-        if (ttrFirstEntityId && ttrSecondEntityId && ttrFirstPickPoint && ttrSecondPickPoint && length > 0) {
+        const radiusToUse =
+          length !== undefined && !isNaN(length) && length > 0
+            ? length
+            : (useCADStore.getState().lastRadius || 10);
+        if (ttrFirstEntityId && ttrSecondEntityId && ttrFirstPickPoint && ttrSecondPickPoint) {
           const ent1 = currentEntities.find((e) => e.id === ttrFirstEntityId);
           const ent2 = currentEntities.find((e) => e.id === ttrSecondEntityId);
           if (ent1 && ent2) {
-            const circle = calculateTTRCircle(ent1, ent2, length, ttrFirstPickPoint, ttrSecondPickPoint);
+            const circle = calculateTTRCircle(ent1, ent2, radiusToUse, ttrFirstPickPoint, ttrSecondPickPoint);
             if (circle) {
               circle.layerId = activeLayerId || '0';
               addEntity(circle);
+              setLastRadius(radiusToUse);
               addConstraint({
                 id: crypto.randomUUID(),
                 type: 'tangent',
@@ -3293,7 +3505,7 @@ export function useDrawMachine() {
               cancelDrawing();
               return true;
             } else {
-              setTtrError(`無法以半徑 ${length} 繪製相切圓`);
+              setTtrError(`無法以半徑 ${radiusToUse} 繪製相切圓`);
               return false;
             }
           }
@@ -3302,7 +3514,7 @@ export function useDrawMachine() {
       }
 
       if (currentTool === 'ROTATE') {
-        if (rotateStep === 'PICK_ANGLE' && rotateBasePoint && rotateSourceIds.length > 0) {
+        if (rotateStep === 'PICK_ANGLE' && rotateBasePoint && rotateSourceIds.length > 0 && length !== undefined) {
           const angleRad = (length * Math.PI) / 180;
           rotateEntities(rotateSourceIds, rotateBasePoint, angleRad);
           cancelDrawing();
@@ -3311,10 +3523,8 @@ export function useDrawMachine() {
         return false;
       }
 
-      if (length <= 0) return false;
-
       if (currentTool === 'SCALE') {
-        if (scaleStep === 'PICK_FACTOR' && scaleBasePoint && scaleSourceIds.length > 0) {
+        if (scaleStep === 'PICK_FACTOR' && scaleBasePoint && scaleSourceIds.length > 0 && length !== undefined && length > 0) {
           scaleEntities(scaleSourceIds, scaleBasePoint, length);
           cancelDrawing();
           return true;
@@ -3323,6 +3533,10 @@ export function useDrawMachine() {
       }
 
       if (currentTool === 'CIRCLE') {
+        const radiusToUse =
+          length !== undefined && !isNaN(length) && length > 0
+            ? length
+            : (useCADStore.getState().lastRadius || 10);
         const newCircle: CircleEntity = {
           id: crypto.randomUUID(),
           layerId: activeLayerId || '0',
@@ -3330,12 +3544,55 @@ export function useDrawMachine() {
           locked: false,
           type: 'circle',
           center: drawSession.startPoint,
-          radius: length,
+          radius: radiusToUse,
         };
         addEntity(newCircle);
+        setLastRadius(radiusToUse);
         cancelDrawing();
         return true;
       }
+
+      if (currentTool === 'ARC' || currentTool === 'ARC_CENTER' || currentTool === 'ARC_3P') {
+        const radiusToUse =
+          length !== undefined && !isNaN(length) && length > 0
+            ? length
+            : (useCADStore.getState().lastRadius || 10);
+        const center = drawSession.startPoint;
+        let startAngle = 0;
+        let endAngle = Math.PI;
+        if (drawSession.secondPoint) {
+          startAngle = Math.atan2(drawSession.secondPoint.y - center.y, drawSession.secondPoint.x - center.x);
+          const cur = drawSession.currentCursor || drawSession.secondPoint;
+          endAngle = Math.atan2(cur.y - center.y, cur.x - center.x);
+          if (Math.abs(endAngle - startAngle) < 1e-4) {
+            endAngle = startAngle + Math.PI / 2;
+          }
+        } else if (drawSession.currentCursor) {
+          const dx = drawSession.currentCursor.x - center.x;
+          const dy = drawSession.currentCursor.y - center.y;
+          if (Math.hypot(dx, dy) > 1e-4) {
+            startAngle = Math.atan2(dy, dx);
+            endAngle = startAngle + Math.PI / 2;
+          }
+        }
+        const newArc: ArcEntity = {
+          id: crypto.randomUUID(),
+          layerId: activeLayerId || '0',
+          visible: true,
+          locked: false,
+          type: 'arc',
+          center,
+          radius: radiusToUse,
+          startAngle,
+          endAngle,
+        };
+        addEntity(newArc);
+        setLastRadius(radiusToUse);
+        cancelDrawing();
+        return true;
+      }
+
+      if (length === undefined || length <= 0) return false;
 
       const startPoint = drawSession.startPoint;
       const currentCursor = drawSession.currentCursor;
@@ -3598,6 +3855,7 @@ export function useDrawMachine() {
       rotateEntities,
       clearOtrackAnchors,
       otrackGuideLines,
+      setLastRadius,
     ]
   );
 
@@ -3795,6 +4053,12 @@ export function useDrawMachine() {
     otrackGuideLines,
     deferredTangent,
     submitExactLength,
+    // AutoCAD 記憶半徑與 HUD 提示
+    lastRadius,
+    setLastRadius,
+    hudPrompt,
+    commandPrompt: hudPrompt,
+    radiusPrompt: hudPrompt,
     // Dimension text drag exports
     isDraggingDimText: !!draggingDimInfo,
     draggingDimId: draggingDimInfo?.dimId ?? null,

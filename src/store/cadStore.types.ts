@@ -125,6 +125,7 @@ export interface CADActions {
   removeConstraint: (constraintId: string) => void;
   removeDimension: (dimensionId: string) => void;
   updateConstraintValue: (constraintId: string, value: number) => void;
+  updateDimensionValue: (dimensionId: string, newValue: number) => void;
 
   // 控制點拖曳 Actions
   dragVertexStart: () => void;
@@ -153,6 +154,9 @@ export interface CADActions {
   redo: () => void;
   canUndo: () => boolean;
   canRedo: () => boolean;
+
+  // 上一次使用半徑 (AutoCAD 風格)
+  setLastRadius: (r: number) => void;
 }
 
 export interface CADState extends CADActions {
@@ -194,6 +198,9 @@ export interface CADState extends CADActions {
   polygonSides: number;
   polygonMethod: 'inscribed' | 'circumscribed';
 
+  // 記憶上一次使用半徑 (AutoCAD 風格)
+  lastRadius: number;
+
   // 圖層狀態與管理
   activeLayerId: string;
   isLayerModalOpen: boolean;
@@ -201,3 +208,6 @@ export interface CADState extends CADActions {
   undoStack: CADDocument[];
   redoStack: CADDocument[];
 }
+
+export type CADStore = CADState;
+

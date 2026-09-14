@@ -13,6 +13,8 @@ import {
   ExtrudeFeature,
   DatumPlaneFeature,
   CustomPlane,
+  Constraint,
+  ConstraintType,
 } from '../types/cad';
 import { createOffsetPlane } from '../core/3d/DatumPlaneEngine';
 import {
@@ -239,6 +241,10 @@ export const useCADStore = create<CADState>((set, get) => ({
   polygonMethod: 'inscribed',
   setPolygonSides: (sides) => set({ polygonSides: Math.max(3, Math.min(1024, Math.round(sides))) }),
   setPolygonMethod: (method) => set({ polygonMethod: method }),
+
+  // 記憶上一次半徑 (AutoCAD 風格，預設 10)
+  lastRadius: 10,
+  setLastRadius: (r) => set({ lastRadius: Math.max(0.1, r) }),
 
   undoStack: [],
   redoStack: [],
@@ -1209,7 +1215,7 @@ export const useCADStore = create<CADState>((set, get) => ({
 
           const updatedConstraints = sketch.constraints.map((c) => {
             if (c.id === constraintId) {
-              return { ...c, value: finalConstraintValue };
+              return { ...c, value: finalConstraintValue, targetVal: Math.abs(finalConstraintValue) };
             }
             return c;
           });
@@ -1385,6 +1391,210 @@ export const useCADStore = create<CADState>((set, get) => ({
         }
         return f;
       }),
+    };
+
+    return {
+      ...pushUndoState(state),
+      document: updatedDocument,
+    };
+  }),
+
+  updateDimensionValue: (dimensionId, newValue) => set((state) => {
+    if (!state.activeSketchId) return state;
+    const safeValue = Math.abs(newValue);
+    if (isNaN(safeValue) || safeValue <= 0) return state;
+
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!sketch) return state;
+
+    const targetDim = sketch.dimensions?.find((d) => d.id === dimensionId);
+    if (!targetDim) return state;
+
+    let targetConstraintId = targetDim.constraintId;
+    let targetConstraint = targetConstraintId
+      ? sketch.constraints.find((c) => c.id === targetConstraintId)
+      : undefined;
+
+    // 若未直接關聯 constraintId，嘗試透過 entityIds 匹配已存在的約束
+    if (!targetConstraint && targetDim.entityIds && targetDim.entityIds.length > 0) {
+      targetConstraint = sketch.constraints.find((c) => {
+        if (targetDim.entityIds?.length === 1 && c.entityIds.length === 1) {
+          return c.entityIds[0] === targetDim.entityIds[0];
+        }
+        if (targetDim.entityIds?.length === 2 && c.entityIds.length === 2) {
+          return (
+            (c.entityIds[0] === targetDim.entityIds[0] && c.entityIds[1] === targetDim.entityIds[1]) ||
+            (c.entityIds[0] === targetDim.entityIds[1] && c.entityIds[1] === targetDim.entityIds[0])
+          );
+        }
+        return false;
+      });
+      if (targetConstraint) {
+        targetConstraintId = targetConstraint.id;
+      }
+    }
+
+    const isDiameter = !!targetDim.isDiameter;
+    const finalConstraintVal = (targetDim.type === 'radial' && isDiameter)
+      ? safeValue / 2
+      : safeValue;
+
+    let updatedConstraints: Constraint[];
+
+    if (targetConstraint) {
+      // 強制更新 targetVal 與 value（確保絕對值正數）
+      updatedConstraints = sketch.constraints.map((c) => {
+        if (c.id === targetConstraint!.id) {
+          return {
+            ...c,
+            value: finalConstraintVal,
+            targetVal: finalConstraintVal,
+          };
+        }
+        return c;
+      });
+    } else {
+      let cType: ConstraintType = 'distance';
+      if (targetDim.type === 'radial') {
+        cType = 'radius';
+      } else if (targetDim.type === 'angular') {
+        cType = 'angle';
+      } else if (targetDim.type === 'linear') {
+        if (targetDim.dimType === 'horizontal') cType = 'distance_x';
+        else if (targetDim.dimType === 'vertical') cType = 'distance_y';
+        else cType = (targetDim.entityIds && targetDim.entityIds.length === 1) ? 'length' : 'distance';
+      }
+
+      const newCId = `c-dim-${Date.now()}`;
+      targetConstraintId = newCId;
+      const newConstraint: Constraint = {
+        id: newCId,
+        type: cType,
+        entityIds: targetDim.entityIds || [],
+        pointIndices: targetDim.pointIndices,
+        value: finalConstraintVal,
+        targetVal: finalConstraintVal,
+      };
+      updatedConstraints = [...sketch.constraints, newConstraint];
+    }
+
+    // 呼叫約束求解器計算新幾何形狀與 DOF 自由度狀態及輪廓
+    const updatedSketchTemp = applyConstraintsToSketch({
+      ...sketch,
+      constraints: updatedConstraints,
+    });
+    
+    const updatedEntities = updatedSketchTemp.entities;
+
+    const getEntityPoint = (entity: CADEntity2D | { id: string; type: string }, index: number) => {
+      if (entity.id === 'origin') return { x: 0, y: 0 };
+      const e = entity as CADEntity2D;
+      if (e.type === 'line') {
+        return index === 1 ? e.end : e.start;
+      } else if (e.type === 'circle' || e.type === 'arc') {
+        return e.center;
+      } else if (e.type === 'polyline') {
+        return e.points[index] || e.points[0];
+      }
+      return null;
+    };
+
+    // 同步更新尺寸標註的端點位置，確保跨圖元尺寸跟隨新幾何位置移動
+    const updatedDimensions = (sketch.dimensions || []).map((dim) => {
+      const isTarget = dim.id === dimensionId;
+      const currentCId = dim.constraintId || (isTarget ? targetConstraintId : undefined);
+      const linkedConstraint = updatedConstraints.find((c) => c.id === currentCId);
+      const eIds = linkedConstraint?.entityIds || dim.entityIds;
+      const pIndices = linkedConstraint?.pointIndices || dim.pointIndices;
+
+      if (dim.type === 'radial') {
+        if (eIds && eIds.length === 1) {
+          const entity = updatedEntities.find((e) => e.id === eIds[0]);
+          if (entity && (entity.type === 'circle' || entity.type === 'arc')) {
+            const center = { ...entity.center };
+            const origP0 = dim.points[0] || center;
+            const origP1 = dim.points[1] || { x: origP0.x + 10, y: origP0.y };
+            const dx = origP1.x - origP0.x;
+            const dy = origP1.y - origP0.y;
+            const len = Math.hypot(dx, dy);
+            const dir = len > 1e-6 ? { x: dx / len, y: dy / len } : { x: 1, y: 0 };
+            const newEdge = {
+              x: center.x + dir.x * entity.radius,
+              y: center.y + dir.y * entity.radius,
+            };
+            return {
+              ...dim,
+              constraintId: currentCId,
+              points: [center, newEdge],
+            };
+          }
+        }
+      } else if (dim.type === 'linear') {
+        if (eIds) {
+          if (eIds.length === 1) {
+            const entity = updatedEntities.find((e) => e.id === eIds[0]);
+            if (entity && entity.type === 'line') {
+              return {
+                ...dim,
+                constraintId: currentCId,
+                points: [{ ...entity.start }, { ...entity.end }],
+              };
+            }
+          } else if (eIds.length >= 2) {
+            const id1 = eIds[0];
+            const id2 = eIds[1];
+            const idx1 = pIndices?.[0] ?? 0;
+            const idx2 = pIndices?.[1] ?? 0;
+            const e1 = id1 === 'origin' ? { id: 'origin', type: 'point' } : updatedEntities.find((e) => e.id === id1);
+            const e2 = id2 === 'origin' ? { id: 'origin', type: 'point' } : updatedEntities.find((e) => e.id === id2);
+            if (e1 && e2) {
+              const pt1 = getEntityPoint(e1, idx1);
+              const pt2 = getEntityPoint(e2, idx2);
+              if (pt1 && pt2) {
+                return {
+                  ...dim,
+                  constraintId: currentCId,
+                  points: [{ ...pt1 }, { ...pt2 }],
+                };
+              }
+            }
+          }
+        }
+      } else if (dim.type === 'angular') {
+        if (eIds && eIds.length >= 2) {
+          const id1 = eIds[0];
+          const id2 = eIds[1];
+          const e1 = updatedEntities.find((e) => e.id === id1);
+          const e2 = updatedEntities.find((e) => e.id === id2);
+          if (e1 && e2 && e1.type === 'line' && e2.type === 'line') {
+            return {
+              ...dim,
+              constraintId: currentCId,
+              points: [{ ...e1.start }, { ...e1.end }, { ...e2.start }, { ...e2.end }],
+            };
+          }
+        }
+      }
+
+      return {
+        ...dim,
+        constraintId: currentCId,
+      };
+    });
+
+    const updatedSketch: SketchFeature = {
+      ...updatedSketchTemp,
+      dimensions: updatedDimensions,
+    };
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) =>
+        f.id === state.activeSketchId ? updatedSketch : f
+      ),
     };
 
     return {
