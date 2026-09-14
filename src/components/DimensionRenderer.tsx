@@ -326,12 +326,22 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
               </g>
             );
           } else if (dim.type === 'radial') {
-            const center = dim.points[0];
-            const edge = dim.points[1] || { x: center.x + 10, y: center.y };
-            const physicalRadius = Math.hypot(edge.x - center.x, edge.y - center.y);
+            let center = dim.points[0];
+            let edge = dim.points[1] || { x: center.x + 10, y: center.y };
+            let physicalRadius = Math.hypot(edge.x - center.x, edge.y - center.y);
+
+            // 若有依附實體，動態獲取最新實體的圓心與半徑
+            if (dim.entityIds && dim.entityIds.length > 0) {
+              const ent = entities.find((e) => e.id === dim.entityIds![0]);
+              if (ent && (ent.type === 'circle' || ent.type === 'arc')) {
+                center = ent.center;
+                physicalRadius = ent.radius;
+              }
+            }
 
             const sCenter = worldToScreen(center);
-            const sRadius = physicalRadius * Math.hypot(worldToScreen({ x: 1, y: 0 }).x - worldToScreen({ x: 0, y: 0 }).x, worldToScreen({ x: 1, y: 0 }).y - worldToScreen({ x: 0, y: 0 }).y);
+            const sEdge = worldToScreen({ x: center.x + physicalRadius, y: center.y });
+            const sRadius = Math.hypot(sEdge.x - sCenter.x, sEdge.y - sCenter.y);
             let sText = worldToScreen(dim.textPosition);
 
             const isDiameter = !!(dim as any).isDiameter;
@@ -343,7 +353,7 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
 
             let layout = calculateRadialDimensionLayout(
               sCenter,
-              physicalRadius * (sRadius / physicalRadius),
+              sRadius,
               sText,
               isDiameter,
               7.0, // 箭頭長度
@@ -360,7 +370,7 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
             while (attempts < 8 && layout) {
               if (!checkOverlap({ x: layout.textCenter.x, y: layout.textCenter.y, r: collisionRadius })) break;
               sText.y -= 22; // shift vertically
-              layout = calculateRadialDimensionLayout(sCenter, physicalRadius * (sRadius / physicalRadius), sText, isDiameter, 7.0, Math.PI / 6, 10.0);
+              layout = calculateRadialDimensionLayout(sCenter, sRadius, sText, isDiameter, 7.0, Math.PI / 6, 10.0);
               attempts++;
             }
 
@@ -620,3 +630,4 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
     </g>
   );
 };
+

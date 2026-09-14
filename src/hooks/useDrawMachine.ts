@@ -2340,6 +2340,7 @@ export function useDrawMachine() {
               textPosition: clickPt,
               constraintId: constraintId,
               isDiameter: dimTarget.type === 'circle',
+              entityIds: [dimTarget.id],
             };
             const newConstraint = {
               id: constraintId,

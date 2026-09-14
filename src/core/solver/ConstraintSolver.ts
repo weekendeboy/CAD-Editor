@@ -233,6 +233,32 @@ export function solveConstraints(
                 };
               }
             }
+          } else if (ent && (ent.type === 'circle' || ent.type === 'arc')) {
+            const diff = Math.abs(ent.radius - c.value);
+            maxDisp = Math.max(maxDisp, diff);
+            if (diff > SOLVER_TOLERANCE) {
+              workingEntities[ent.id] = {
+                ...ent,
+                radius: c.value,
+              };
+            }
+          }
+        }
+      } else if (c.type === 'equal_radius' && c.entityIds.length >= 2) {
+        const entA = workingEntities[c.entityIds[0]];
+        const entB = workingEntities[c.entityIds[1]];
+        if (
+          entA &&
+          entB &&
+          (entA.type === 'circle' || entA.type === 'arc') &&
+          (entB.type === 'circle' || entB.type === 'arc')
+        ) {
+          const diff = Math.abs(entA.radius - entB.radius);
+          maxDisp = Math.max(maxDisp, diff);
+          if (diff > SOLVER_TOLERANCE) {
+            const avgR = (entA.radius + entB.radius) / 2;
+            workingEntities[entA.id] = { ...entA, radius: avgR };
+            workingEntities[entB.id] = { ...entB, radius: avgR };
           }
         }
       } else if (c.type === 'distance_x' && c.value !== undefined) {

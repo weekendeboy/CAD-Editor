@@ -325,20 +325,64 @@ export const CADSketchCanvas: React.FC = () => {
 
   // 處理雙擊編輯尺寸標註事件
   const handleEditDimension = useCallback((dim: Dimension) => {
-    if (!dim.constraintId) return;
-    
     const sketch = document.featureTree.find(
       (f) => f.id === activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
     const constraints = sketch?.constraints || [];
-    const linkedConstraint = constraints.find((c) => c.id === dim.constraintId);
+    const linkedConstraint = dim.constraintId ? constraints.find((c) => c.id === dim.constraintId) : undefined;
     
-    const initialVal = linkedConstraint?.value !== undefined 
-      ? linkedConstraint.value 
-      : (dim.type === 'linear' 
-          ? Math.hypot(dim.points[1].x - dim.points[0].x, dim.points[1].y - dim.points[0].y)
-          : Math.hypot((dim.points[1]?.x || dim.points[0].x + 10) - dim.points[0].x, (dim.points[1]?.y || dim.points[0].y) - dim.points[0].y)
-        );
+    let initialVal = 0;
+
+    if (dim.type === 'radial') {
+      const isDiameter = !!dim.isDiameter;
+      if (linkedConstraint?.value !== undefined) {
+        // linkedConstraint value is radius, diameter is radius * 2
+        initialVal = isDiameter ? linkedConstraint.value * 2 : linkedConstraint.value;
+      } else {
+        let r = 0;
+        if (dim.entityIds && dim.entityIds.length > 0) {
+          const ent = sketch?.entities.find((e) => e.id === dim.entityIds![0]);
+          if (ent && (ent.type === 'circle' || ent.type === 'arc')) {
+            r = ent.radius;
+          }
+        }
+        if (r === 0 && dim.points && dim.points.length >= 1) {
+          const center = dim.points[0];
+          const edge = dim.points[1] || { x: center.x + 10, y: center.y };
+          r = Math.hypot(edge.x - center.x, edge.y - center.y);
+        }
+        initialVal = isDiameter ? r * 2 : r;
+      }
+    } else if (dim.type === 'angular') {
+      if (linkedConstraint?.value !== undefined) {
+        initialVal = linkedConstraint.value;
+      } else if (dim.points && dim.points.length >= 4) {
+        const d1x = dim.points[1].x - dim.points[0].x;
+        const d1y = dim.points[1].y - dim.points[0].y;
+        const d2x = dim.points[3].x - dim.points[2].x;
+        const d2y = dim.points[3].y - dim.points[2].y;
+        const dot = d1x * d2x + d1y * d2y;
+        const len1 = Math.hypot(d1x, d1y);
+        const len2 = Math.hypot(d2x, d2y);
+        if (len1 > 1e-6 && len2 > 1e-6) {
+          const cosA = Math.max(-1, Math.min(1, dot / (len1 * len2)));
+          initialVal = (Math.acos(cosA) * 180) / Math.PI;
+        }
+      }
+    } else {
+      // Linear dimension
+      if (linkedConstraint?.value !== undefined) {
+        initialVal = linkedConstraint.value;
+      } else if (dim.points && dim.points.length >= 2) {
+        const p1 = dim.points[0];
+        const p2 = dim.points[1];
+        initialVal = dim.dimType === 'horizontal'
+          ? Math.abs(p2.x - p1.x)
+          : dim.dimType === 'vertical'
+          ? Math.abs(p2.y - p1.y)
+          : Math.hypot(p2.x - p1.x, p2.y - p1.y);
+      }
+    }
 
     const screenPt = worldToScreen(dim.textPosition);
 
@@ -357,6 +401,16 @@ export const CADSketchCanvas: React.FC = () => {
     if (!isNaN(value) && value > 0) {
       if (dimension.constraintId) {
         updateConstraintValue(dimension.constraintId, value);
+      } else if (dimension.entityIds && dimension.entityIds.length > 0) {
+        const entId = dimension.entityIds[0];
+        const sketch = document.featureTree.find(
+          (f) => f.id === activeSketchId && f.type === 'SKETCH'
+        ) as SketchFeature | undefined;
+        const ent = sketch?.entities.find((e) => e.id === entId);
+        if (ent && (ent.type === 'circle' || ent.type === 'arc')) {
+          const newRadius = dimension.isDiameter ? value / 2 : value;
+          updateEntity(entId, { radius: newRadius });
+        }
       }
     }
     setEditingDimension(null);
