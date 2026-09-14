@@ -8,193 +8,85 @@ import {
   Constraint,
   EntityState,
 } from '../../types/cad';
+import {
+  SolverResult,
+  SketchDofState,
+  SOLVER_MAX_ITERATIONS,
+  SOLVER_TOLERANCE,
+} from './solverTypes';
 
-export const SOLVER_MAX_ITERATIONS = 80;
-export const SOLVER_TOLERANCE = 1e-4;
+export { SOLVER_MAX_ITERATIONS, SOLVER_TOLERANCE } from './solverTypes';
 
-export interface SolverResult {
-  entities: CADEntity2D[];
-  iterations: number;
-  maxDisp: number;
-  converged: boolean;
-  conflictEntityIds: string[];
-}
-
-export interface SketchDofState {
-  totalDof: number;
-  state: EntityState;
-  entityStates: Record<string, EntityState>;
-}
-
-interface PointRef {
-  get: () => Point2D;
-  set: (p: Point2D) => void;
-  entityId: string;
-  pointIndex: number;
-}
-
-/**
- * Gets a reference object with getter and setter for a specific point on an entity based on pointIndex.
- */
-function getPointRef(entity: CADEntity2D, pointIndex: number = 0): PointRef | null {
+function getEntityPoint(entity: CADEntity2D, pointIndex: number = 0): Point2D | null {
   if (entity.type === 'line') {
-    if (pointIndex === 1) {
-      return {
-        get: () => ({ ...entity.end }),
-        set: (p: Point2D) => {
-          entity.end = { ...p };
-        },
-        entityId: entity.id,
-        pointIndex: 1,
-      };
-    }
-    return {
-      get: () => ({ ...entity.start }),
-      set: (p: Point2D) => {
-        entity.start = { ...p };
-      },
-      entityId: entity.id,
-      pointIndex: 0,
-    };
+    return pointIndex === 1 ? entity.end : entity.start;
   }
-
   if (entity.type === 'circle') {
-    return {
-      get: () => ({ ...entity.center }),
-      set: (p: Point2D) => {
-        entity.center = { ...p };
-      },
-      entityId: entity.id,
-      pointIndex: 0,
-    };
+    return entity.center;
   }
-
   if (entity.type === 'arc') {
     if (pointIndex === 0) {
       return {
-        get: () => ({
-          x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
-          y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
-        }),
-        set: (p: Point2D) => {
-          const dx = p.x - entity.center.x;
-          const dy = p.y - entity.center.y;
-          entity.startAngle = Math.atan2(dy, dx);
-        },
-        entityId: entity.id,
-        pointIndex: 0,
+        x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
+        y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
       };
     }
     if (pointIndex === 1) {
       return {
-        get: () => ({
-          x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
-          y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
-        }),
-        set: (p: Point2D) => {
-          const dx = p.x - entity.center.x;
-          const dy = p.y - entity.center.y;
-          entity.endAngle = Math.atan2(dy, dx);
-        },
-        entityId: entity.id,
-        pointIndex: 1,
+        x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
+        y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
       };
     }
-    return {
-      get: () => ({ ...entity.center }),
-      set: (p: Point2D) => {
-        entity.center = { ...p };
-      },
-      entityId: entity.id,
-      pointIndex: 2,
-    };
+    return entity.center;
   }
-
   if (entity.type === 'polyline') {
-    const idx = Math.min(Math.max(0, pointIndex), entity.points.length - 1);
-    return {
-      get: () => ({ ...entity.points[idx] }),
-      set: (p: Point2D) => {
-        if (entity.points[idx]) {
-          entity.points[idx] = { ...p };
-        }
-      },
-      entityId: entity.id,
-      pointIndex: idx,
-    };
+    return entity.points[pointIndex] || entity.points[0] || null;
   }
-
   return null;
 }
 
-/**
- * Shallow/selective clone for single entity (Zero GC for unconstrained entities).
- */
-function cloneEntity(entity: CADEntity2D): CADEntity2D {
+function setEntityPoint(
+  entity: CADEntity2D,
+  pointIndex: number = 0,
+  newPt: Point2D
+): CADEntity2D {
   if (entity.type === 'line') {
-    return {
-      ...entity,
-      start: { ...entity.start },
-      end: { ...entity.end },
-    };
+    if (pointIndex === 1) {
+      return { ...entity, end: { ...newPt } };
+    }
+    return { ...entity, start: { ...newPt } };
   }
   if (entity.type === 'circle') {
-    return {
-      ...entity,
-      center: { ...entity.center },
-    };
+    return { ...entity, center: { ...newPt } };
   }
   if (entity.type === 'arc') {
-    return {
-      ...entity,
-      center: { ...entity.center },
-    };
+    if (pointIndex === 0) {
+      const angle = Math.atan2(newPt.y - entity.center.y, newPt.x - entity.center.x);
+      return { ...entity, startAngle: angle };
+    }
+    if (pointIndex === 1) {
+      const angle = Math.atan2(newPt.y - entity.center.y, newPt.x - entity.center.x);
+      return { ...entity, endAngle: angle };
+    }
+    return { ...entity, center: { ...newPt } };
   }
   if (entity.type === 'polyline') {
-    return {
-      ...entity,
-      points: entity.points.map((p) => ({ ...p })),
-      bulges: entity.bulges ? [...entity.bulges] : undefined,
-    };
-  }
-  if (entity.type === 'insert') {
-    return {
-      ...entity,
-      position: { ...entity.position },
-      scale: { ...entity.scale },
-    };
+    const updated = [...entity.points];
+    if (pointIndex >= 0 && pointIndex < updated.length) {
+      updated[pointIndex] = { ...newPt };
+    }
+    return { ...entity, points: updated };
   }
   return entity;
 }
 
-/**
- * Identifies set of fixed point keys ("entityId:pointIndex") from 'fix' constraints.
- */
-function getFixedPointKeys(constraints: Constraint[]): Set<string> {
-  const fixedKeys = new Set<string>();
-  for (const c of constraints) {
-    if (c.type === 'fix') {
-      for (let i = 0; i < c.entityIds.length; i++) {
-        const entId = c.entityIds[i];
-        const ptIdx = c.pointIndices ? c.pointIndices[i] ?? 0 : 0;
-        fixedKeys.add(`${entId}:${ptIdx}`);
-      }
-    }
-  }
-  return fixedKeys;
-}
-
-/**
- * Main solver function using Position-Based Relaxation with Subgraph Partitioning.
- */
 export function solveConstraints(
   entities: CADEntity2D[],
   constraints: Constraint[]
 ): SolverResult {
-  // Fast path for zero constraints
   if (!constraints || constraints.length === 0) {
     return {
-      entities,
+      entities: JSON.parse(JSON.stringify(entities)),
       iterations: 0,
       maxDisp: 0,
       converged: true,
@@ -202,904 +94,389 @@ export function solveConstraints(
     };
   }
 
-  // Subgraph filtering: collect only entity IDs involved in constraints
-  const constrainedIdSet = new Set<string>();
+  let workingEntities: Record<string, CADEntity2D> = {};
+  for (const ent of entities) {
+    workingEntities[ent.id] = JSON.parse(JSON.stringify(ent));
+  }
+
+  const fixedPoints = new Set<string>();
   for (const c of constraints) {
-    if (c.entityIds) {
-      for (const id of c.entityIds) {
-        if (id) {
-          constrainedIdSet.add(id);
-        }
-      }
+    if (c.type === 'fix' && c.entityIds.length > 0) {
+      const entId = c.entityIds[0];
+      const ptIdx = c.pointIndices?.[0] ?? 0;
+      fixedPoints.add(`${entId}_${ptIdx}`);
     }
   }
 
-  if (constrainedIdSet.size === 0) {
-    return {
-      entities,
-      iterations: 0,
-      maxDisp: 0,
-      converged: true,
-      conflictEntityIds: [],
-    };
-  }
-
-  // Work map: only clone constrained entities
-  const workingMap = new Map<string, CADEntity2D>();
-  for (const e of entities) {
-    if (constrainedIdSet.has(e.id)) {
-      workingMap.set(e.id, cloneEntity(e));
-    }
-  }
-
-  const fixedPointKeys = getFixedPointKeys(constraints);
-
-  const isFixed = (entityId: string, pointIndex: number): boolean => {
-    return fixedPointKeys.has(`${entityId}:${pointIndex}`);
-  };
-
+  let iterations = 0;
   let maxDisp = 0;
   let converged = false;
-  let iterations = 0;
 
   for (iterations = 0; iterations < SOLVER_MAX_ITERATIONS; iterations++) {
     maxDisp = 0;
 
-    for (const constraint of constraints) {
-      const e1 = workingMap.get(constraint.entityIds[0] || '');
-      const e2 = workingMap.get(constraint.entityIds[1] || '');
+    for (const c of constraints) {
+      if (c.type === 'fix') continue;
 
-      switch (constraint.type) {
-        case 'fix': {
-          break;
+      if (c.type === 'coincident' && c.entityIds.length >= 2) {
+        const idA = c.entityIds[0];
+        const idB = c.entityIds[1];
+        const entA = workingEntities[idA];
+        const entB = workingEntities[idB];
+        if (!entA || !entB) continue;
+
+        const idxA = c.pointIndices?.[0] ?? 0;
+        const idxB = c.pointIndices?.[1] ?? 0;
+        const ptA = getEntityPoint(entA, idxA);
+        const ptB = getEntityPoint(entB, idxB);
+        if (!ptA || !ptB) continue;
+
+        const isFixedA = fixedPoints.has(`${idA}_${idxA}`);
+        const isFixedB = fixedPoints.has(`${idB}_${idxB}`);
+
+        const dx = ptB.x - ptA.x;
+        const dy = ptB.y - ptA.y;
+        const dist = Math.hypot(dx, dy);
+        maxDisp = Math.max(maxDisp, dist);
+
+        if (dist > SOLVER_TOLERANCE) {
+          if (isFixedA && !isFixedB) {
+            workingEntities[idB] = setEntityPoint(entB, idxB, ptA);
+          } else if (!isFixedA && isFixedB) {
+            workingEntities[idA] = setEntityPoint(entA, idxA, ptB);
+          } else if (!isFixedA && !isFixedB) {
+            const mid = { x: (ptA.x + ptB.x) / 2, y: (ptA.y + ptB.y) / 2 };
+            workingEntities[idA] = setEntityPoint(entA, idxA, mid);
+            workingEntities[idB] = setEntityPoint(entB, idxB, mid);
+          }
         }
-
-        case 'coincident': {
-          if (!e1) break;
-          const idx1 = constraint.pointIndices?.[0] ?? 0;
-          const idx2 = constraint.pointIndices?.[1] ?? 0;
-
-          const ref1 = getPointRef(e1, idx1);
-          const ref2 = e2 ? getPointRef(e2, idx2) : null;
-
-          if (ref1 && ref2) {
-            const p1 = ref1.get();
-            const p2 = ref2.get();
-
-            const f1 = isFixed(e1.id, idx1);
-            const f2 = isFixed(e2.id, idx2);
-
-            if (f1 && f2) break;
-
-            const dx = p2.x - p1.x;
-            const dy = p2.y - p1.y;
-            const dist = Math.hypot(dx, dy);
-            maxDisp = Math.max(maxDisp, dist);
-
-            if (f1) {
-              ref2.set(p1);
-            } else if (f2) {
-              ref1.set(p2);
+      } else if (c.type === 'horizontal' && c.entityIds.length >= 1) {
+        const ent = workingEntities[c.entityIds[0]];
+        if (ent && ent.type === 'line') {
+          const dy = ent.end.y - ent.start.y;
+          maxDisp = Math.max(maxDisp, Math.abs(dy));
+          if (Math.abs(dy) > SOLVER_TOLERANCE) {
+            const isFixed0 = fixedPoints.has(`${ent.id}_0`);
+            const isFixed1 = fixedPoints.has(`${ent.id}_1`);
+            if (isFixed0 && !isFixed1) {
+              workingEntities[ent.id] = { ...ent, end: { ...ent.end, y: ent.start.y } };
+            } else if (!isFixed0 && isFixed1) {
+              workingEntities[ent.id] = { ...ent, start: { ...ent.start, y: ent.end.y } };
             } else {
-              const midX = (p1.x + p2.x) / 2;
-              const midY = (p1.y + p2.y) / 2;
-              ref1.set({ x: midX, y: midY });
-              ref2.set({ x: midX, y: midY });
+              const avgY = (ent.start.y + ent.end.y) / 2;
+              workingEntities[ent.id] = {
+                ...ent,
+                start: { ...ent.start, y: avgY },
+                end: { ...ent.end, y: avgY },
+              };
             }
           }
-          break;
         }
-
-        case 'horizontal': {
-          if (!e1) break;
-          if (e1.type === 'line') {
-            const f0 = isFixed(e1.id, 0);
-            const f1 = isFixed(e1.id, 1);
-            const dy = Math.abs(e1.end.y - e1.start.y);
-            maxDisp = Math.max(maxDisp, dy);
-
-            if (f0 && f1) break;
-            if (f0) {
-              e1.end.y = e1.start.y;
-            } else if (f1) {
-              e1.start.y = e1.end.y;
+      } else if (c.type === 'vertical' && c.entityIds.length >= 1) {
+        const ent = workingEntities[c.entityIds[0]];
+        if (ent && ent.type === 'line') {
+          const dx = ent.end.x - ent.start.x;
+          maxDisp = Math.max(maxDisp, Math.abs(dx));
+          if (Math.abs(dx) > SOLVER_TOLERANCE) {
+            const isFixed0 = fixedPoints.has(`${ent.id}_0`);
+            const isFixed1 = fixedPoints.has(`${ent.id}_1`);
+            if (isFixed0 && !isFixed1) {
+              workingEntities[ent.id] = { ...ent, end: { ...ent.end, x: ent.start.x } };
+            } else if (!isFixed0 && isFixed1) {
+              workingEntities[ent.id] = { ...ent, start: { ...ent.start, x: ent.end.x } };
             } else {
-              const midY = (e1.start.y + e1.end.y) / 2;
-              e1.start.y = midY;
-              e1.end.y = midY;
+              const avgX = (ent.start.x + ent.end.x) / 2;
+              workingEntities[ent.id] = {
+                ...ent,
+                start: { ...ent.start, x: avgX },
+                end: { ...ent.end, x: avgX },
+              };
             }
-          } else if (e2) {
-            const idx1 = constraint.pointIndices?.[0] ?? 0;
-            const idx2 = constraint.pointIndices?.[1] ?? 0;
-            const ref1 = getPointRef(e1, idx1);
-            const ref2 = getPointRef(e2, idx2);
-            if (ref1 && ref2) {
-              const p1 = ref1.get();
-              const p2 = ref2.get();
-              const dy = Math.abs(p2.y - p1.y);
-              maxDisp = Math.max(maxDisp, dy);
-              const f1 = isFixed(e1.id, idx1);
-              const f2 = isFixed(e2.id, idx2);
-
-              if (f1 && !f2) {
-                ref2.set({ x: p2.x, y: p1.y });
-              } else if (f2 && !f1) {
-                ref1.set({ x: p1.x, y: p2.y });
-              } else if (!f1 && !f2) {
-                const midY = (p1.y + p2.y) / 2;
-                ref1.set({ x: p1.x, y: midY });
-                ref2.set({ x: p2.x, y: midY });
+          }
+        }
+      } else if (
+        (c.type === 'length' || c.type === 'distance') &&
+        c.value !== undefined &&
+        c.value > 0
+      ) {
+        if (c.entityIds.length === 1) {
+          const ent = workingEntities[c.entityIds[0]];
+          if (ent && ent.type === 'line') {
+            const dx = ent.end.x - ent.start.x;
+            const dy = ent.end.y - ent.start.y;
+            const currentLen = Math.hypot(dx, dy);
+            const diff = currentLen - c.value;
+            maxDisp = Math.max(maxDisp, Math.abs(diff));
+            if (Math.abs(diff) > SOLVER_TOLERANCE && currentLen > 1e-9) {
+              const scale = c.value / currentLen;
+              const isFixed0 = fixedPoints.has(`${ent.id}_0`);
+              const isFixed1 = fixedPoints.has(`${ent.id}_1`);
+              if (isFixed0 && !isFixed1) {
+                workingEntities[ent.id] = {
+                  ...ent,
+                  end: { x: ent.start.x + dx * scale, y: ent.start.y + dy * scale },
+                };
+              } else if (!isFixed0 && isFixed1) {
+                workingEntities[ent.id] = {
+                  ...ent,
+                  start: { x: ent.end.x - dx * scale, y: ent.end.y - dy * scale },
+                };
+              } else {
+                const midX = (ent.start.x + ent.end.x) / 2;
+                const midY = (ent.start.y + ent.end.y) / 2;
+                const halfX = (dx * scale) / 2;
+                const halfY = (dy * scale) / 2;
+                workingEntities[ent.id] = {
+                  ...ent,
+                  start: { x: midX - halfX, y: midY - halfY },
+                  end: { x: midX + halfX, y: midY + halfY },
+                };
               }
             }
           }
-          break;
         }
-
-        case 'vertical': {
-          if (!e1) break;
-          if (e1.type === 'line') {
-            const f0 = isFixed(e1.id, 0);
-            const f1 = isFixed(e1.id, 1);
-            const dx = Math.abs(e1.end.x - e1.start.x);
-            maxDisp = Math.max(maxDisp, dx);
-
-            if (f0 && f1) break;
-            if (f0) {
-              e1.end.x = e1.start.x;
-            } else if (f1) {
-              e1.start.x = e1.end.x;
-            } else {
-              const midX = (e1.start.x + e1.end.x) / 2;
-              e1.start.x = midX;
-              e1.end.x = midX;
-            }
-          } else if (e2) {
-            const idx1 = constraint.pointIndices?.[0] ?? 0;
-            const idx2 = constraint.pointIndices?.[1] ?? 0;
-            const ref1 = getPointRef(e1, idx1);
-            const ref2 = getPointRef(e2, idx2);
-            if (ref1 && ref2) {
-              const p1 = ref1.get();
-              const p2 = ref2.get();
-              const dx = Math.abs(p2.x - p1.x);
-              maxDisp = Math.max(maxDisp, dx);
-              const f1 = isFixed(e1.id, idx1);
-              const f2 = isFixed(e2.id, idx2);
-
-              if (f1 && !f2) {
-                ref2.set({ x: p1.x, y: p2.y });
-              } else if (f2 && !f1) {
-                ref1.set({ x: p2.x, y: p1.y });
-              } else if (!f1 && !f2) {
-                const midX = (p1.x + p2.x) / 2;
-                ref1.set({ x: midX, y: p1.y });
-                ref2.set({ x: midX, y: p2.y });
-              }
-            }
-          }
-          break;
-        }
-
-        case 'length': {
-          if (!e1 || e1.type !== 'line') break;
-          const targetLen = constraint.value ?? Math.hypot(e1.end.x - e1.start.x, e1.end.y - e1.start.y);
-          const dx = e1.end.x - e1.start.x;
-          const dy = e1.end.y - e1.start.y;
-          const currLen = Math.hypot(dx, dy);
-
-          if (currLen < 1e-9) break;
-
-          const err = Math.abs(currLen - targetLen);
-          maxDisp = Math.max(maxDisp, err);
-
-          const factor = targetLen / currLen;
-          const midX = (e1.start.x + e1.end.x) / 2;
-          const midY = (e1.start.y + e1.end.y) / 2;
-
-          const halfDx = (dx * factor) / 2;
-          const halfDy = (dy * factor) / 2;
-
-          const f0 = isFixed(e1.id, 0);
-          const f1 = isFixed(e1.id, 1);
-
-          if (f0 && !f1) {
-            e1.end.x = e1.start.x + dx * factor;
-            e1.end.y = e1.start.y + dy * factor;
-          } else if (f1 && !f0) {
-            e1.start.x = e1.end.x - dx * factor;
-            e1.start.y = e1.end.y - dy * factor;
-          } else if (!f0 && !f1) {
-            e1.start.x = midX - halfDx;
-            e1.start.y = midY - halfDy;
-            e1.end.x = midX + halfDx;
-            e1.end.y = midY + halfDy;
-          }
-          break;
-        }
-
-        case 'distance': {
-          if (!e1) break;
-          const idx1 = constraint.pointIndices?.[0] ?? 0;
-          const idx2 = constraint.pointIndices?.[1] ?? 0;
-
-          const ref1 = getPointRef(e1, idx1);
-          const ref2 = e2 ? getPointRef(e2, idx2) : null;
-
-          if (ref1 && ref2) {
-            const p1 = ref1.get();
-            const p2 = ref2.get();
-            const targetDist = constraint.value ?? Math.hypot(p2.x - p1.x, p2.y - p1.y);
-
-            const dx = p2.x - p1.x;
-            const dy = p2.y - p1.y;
-            const currDist = Math.hypot(dx, dy);
-
-            if (currDist < 1e-9) break;
-
-            const err = Math.abs(currDist - targetDist);
+      } else if (c.type === 'distance_x' && c.value !== undefined) {
+        if (c.entityIds.length === 1) {
+          const ent = workingEntities[c.entityIds[0]];
+          if (ent && ent.type === 'line') {
+            const curDX = ent.end.x - ent.start.x;
+            const sign = curDX >= 0 ? 1 : -1;
+            const targetDX = sign * Math.abs(c.value);
+            const err = Math.abs(curDX - targetDX);
             maxDisp = Math.max(maxDisp, err);
-
-            const scale = targetDist / currDist;
-            const shiftX = (dx * (scale - 1)) / 2;
-            const shiftY = (dy * (scale - 1)) / 2;
-
-            const f1 = isFixed(e1.id, idx1);
-            const f2 = isFixed(e2.id, idx2);
-
-            if (f1 && !f2) {
-              ref2.set({ x: p1.x + dx * scale, y: p1.y + dy * scale });
-            } else if (f2 && !f1) {
-              ref1.set({ x: p2.x - dx * scale, y: p2.y - dy * scale });
-            } else if (!f1 && !f2) {
-              ref1.set({ x: p1.x - shiftX, y: p1.y - shiftY });
-              ref2.set({ x: p2.x + shiftX, y: p2.y + shiftY });
+            if (err > SOLVER_TOLERANCE) {
+              const isFixed0 = fixedPoints.has(`${ent.id}_0`);
+              const isFixed1 = fixedPoints.has(`${ent.id}_1`);
+              if (isFixed0 && !isFixed1) {
+                workingEntities[ent.id] = { ...ent, end: { ...ent.end, x: ent.start.x + targetDX } };
+              } else if (!isFixed0 && isFixed1) {
+                workingEntities[ent.id] = { ...ent, start: { ...ent.start, x: ent.end.x - targetDX } };
+              } else {
+                const midX = (ent.start.x + ent.end.x) / 2;
+                workingEntities[ent.id] = {
+                  ...ent,
+                  start: { ...ent.start, x: midX - targetDX / 2 },
+                  end: { ...ent.end, x: midX + targetDX / 2 },
+                };
+              }
             }
           }
-          break;
         }
-
-        case 'distance_x': {
-          if (!e1 || !e2) break;
-          const idx1 = constraint.pointIndices?.[0] ?? 0;
-          const idx2 = constraint.pointIndices?.[1] ?? 0;
-
-          const ref1 = getPointRef(e1, idx1);
-          const ref2 = getPointRef(e2, idx2);
-
-          if (ref1 && ref2) {
-            const p1 = ref1.get();
-            const p2 = ref2.get();
-            const targetDx = constraint.value ?? Math.abs(p2.x - p1.x);
-            const currDx = p2.x - p1.x;
-            const err = Math.abs(Math.abs(currDx) - targetDx);
+      } else if (c.type === 'distance_y' && c.value !== undefined) {
+        if (c.entityIds.length === 1) {
+          const ent = workingEntities[c.entityIds[0]];
+          if (ent && ent.type === 'line') {
+            const curDY = ent.end.y - ent.start.y;
+            const sign = curDY >= 0 ? 1 : -1;
+            const targetDY = sign * Math.abs(c.value);
+            const err = Math.abs(curDY - targetDY);
             maxDisp = Math.max(maxDisp, err);
-
-            const sign = currDx >= 0 ? 1 : -1;
-            const targetX = p1.x + sign * targetDx;
-            const diffX = p2.x - targetX;
-
-            const f1 = isFixed(e1.id, idx1);
-            const f2 = isFixed(e2.id, idx2);
-
-            if (f1 && !f2) {
-              ref2.set({ x: targetX, y: p2.y });
-            } else if (f2 && !f1) {
-              ref1.set({ x: p2.x - sign * targetDx, y: p1.y });
-            } else if (!f1 && !f2) {
-              ref1.set({ x: p1.x + diffX / 2, y: p1.y });
-              ref2.set({ x: p2.x - diffX / 2, y: p2.y });
-            }
-          }
-          break;
-        }
-
-        case 'distance_y': {
-          if (!e1 || !e2) break;
-          const idx1 = constraint.pointIndices?.[0] ?? 0;
-          const idx2 = constraint.pointIndices?.[1] ?? 0;
-
-          const ref1 = getPointRef(e1, idx1);
-          const ref2 = getPointRef(e2, idx2);
-
-          if (ref1 && ref2) {
-            const p1 = ref1.get();
-            const p2 = ref2.get();
-            const targetDy = constraint.value ?? Math.abs(p2.y - p1.y);
-            const currDy = p2.y - p1.y;
-            const err = Math.abs(Math.abs(currDy) - targetDy);
-            maxDisp = Math.max(maxDisp, err);
-
-            const sign = currDy >= 0 ? 1 : -1;
-            const targetY = p1.y + sign * targetDy;
-            const diffY = p2.y - targetY;
-
-            const f1 = isFixed(e1.id, idx1);
-            const f2 = isFixed(e2.id, idx2);
-
-            if (f1 && !f2) {
-              ref2.set({ x: p2.x, y: targetY });
-            } else if (f2 && !f1) {
-              ref1.set({ x: p1.x, y: p2.y - sign * targetDy });
-            } else if (!f1 && !f2) {
-              ref1.set({ x: p1.x, y: p1.y + diffY / 2 });
-              ref2.set({ x: p2.x, y: p2.y - diffY / 2 });
-            }
-          }
-          break;
-        }
-
-        case 'parallel': {
-          if (!e1 || !e2 || e1.type !== 'line' || e2.type !== 'line') break;
-
-          const dx1 = e1.end.x - e1.start.x;
-          const dy1 = e1.end.y - e1.start.y;
-          const len1 = Math.hypot(dx1, dy1);
-
-          const dx2 = e2.end.x - e2.start.x;
-          const dy2 = e2.end.y - e2.start.y;
-          const len2 = Math.hypot(dx2, dy2);
-
-          if (len1 < 1e-9 || len2 < 1e-9) break;
-
-          const angle1 = Math.atan2(dy1, dx1);
-          const angle2 = Math.atan2(dy2, dx2);
-
-          let diffAngle = angle2 - angle1;
-          while (diffAngle > Math.PI / 2) diffAngle -= Math.PI;
-          while (diffAngle < -Math.PI / 2) diffAngle += Math.PI;
-
-          maxDisp = Math.max(maxDisp, Math.abs(diffAngle) * ((len1 + len2) / 2));
-
-          const f1_0 = isFixed(e1.id, 0);
-          const f1_1 = isFixed(e1.id, 1);
-          const f2_0 = isFixed(e2.id, 0);
-          const f2_1 = isFixed(e2.id, 1);
-
-          if (!f2_0 && !f2_1) {
-            const mid2X = (e2.start.x + e2.end.x) / 2;
-            const mid2Y = (e2.start.y + e2.end.y) / 2;
-            const nx = Math.cos(angle1) * len2;
-            const ny = Math.sin(angle1) * len2;
-            e2.start.x = mid2X - nx / 2;
-            e2.start.y = mid2Y - ny / 2;
-            e2.end.x = mid2X + nx / 2;
-            e2.end.y = mid2Y + ny / 2;
-          } else if (!f1_0 && !f1_1) {
-            const mid1X = (e1.start.x + e1.end.x) / 2;
-            const mid1Y = (e1.start.y + e1.end.y) / 2;
-            const nx = Math.cos(angle2) * len1;
-            const ny = Math.sin(angle2) * len1;
-            e1.start.x = mid1X - nx / 2;
-            e1.start.y = mid1Y - ny / 2;
-            e1.end.x = mid1X + nx / 2;
-            e1.end.y = mid1Y + ny / 2;
-          }
-          break;
-        }
-
-        case 'perpendicular': {
-          if (!e1 || !e2 || e1.type !== 'line' || e2.type !== 'line') break;
-
-          const dx1 = e1.end.x - e1.start.x;
-          const dy1 = e1.end.y - e1.start.y;
-          const len1 = Math.hypot(dx1, dy1);
-
-          const dx2 = e2.end.x - e2.start.x;
-          const dy2 = e2.end.y - e2.start.y;
-          const len2 = Math.hypot(dx2, dy2);
-
-          if (len1 < 1e-9 || len2 < 1e-9) break;
-
-          const dot = dx1 * dx2 + dy1 * dy2;
-          const normDot = dot / (len1 * len2);
-          maxDisp = Math.max(maxDisp, Math.abs(normDot) * ((len1 + len2) / 2));
-
-          const f2_0 = isFixed(e2.id, 0);
-          const f2_1 = isFixed(e2.id, 1);
-
-          if (!f2_0 && !f2_1) {
-            const perpX = -dy1 / len1;
-            const perpY = dx1 / len1;
-            const mid2X = (e2.start.x + e2.end.x) / 2;
-            const mid2Y = (e2.start.y + e2.end.y) / 2;
-            e2.start.x = mid2X - (perpX * len2) / 2;
-            e2.start.y = mid2Y - (perpY * len2) / 2;
-            e2.end.x = mid2X + (perpX * len2) / 2;
-            e2.end.y = mid2Y + (perpY * len2) / 2;
-          }
-          break;
-        }
-
-        case 'tangent': {
-          if (!e1 || !e2) break;
-
-          if (e1.type === 'line' && (e2.type === 'circle' || e2.type === 'arc')) {
-            const circle = e2;
-            const dx = e1.end.x - e1.start.x;
-            const dy = e1.end.y - e1.start.y;
-            const len = Math.hypot(dx, dy);
-
-            if (len > 1e-9) {
-              const nx = -dy / len;
-              const ny = dx / len;
-              const dist = Math.abs(
-                (circle.center.x - e1.start.x) * nx + (circle.center.y - e1.start.y) * ny
-              );
-              const err = Math.abs(dist - circle.radius);
-              maxDisp = Math.max(maxDisp, err);
-
-              const proj =
-                (circle.center.x - e1.start.x) * (dx / len) +
-                (circle.center.y - e1.start.y) * (dy / len);
-              const closestX = e1.start.x + proj * (dx / len);
-              const closestY = e1.start.y + proj * (dy / len);
-
-              const cToX = closestX - circle.center.x;
-              const cToY = closestY - circle.center.y;
-              const cDist = Math.hypot(cToX, cToY);
-
-              if (cDist > 1e-9 && !isFixed(circle.id, 0)) {
-                circle.center.x = closestX - (cToX / cDist) * circle.radius;
-                circle.center.y = closestY - (cToY / cDist) * circle.radius;
-              }
-            }
-          } else if ((e1.type === 'circle' || e1.type === 'arc') && e2.type === 'line') {
-            const circle = e1;
-            const line = e2;
-            const dx = line.end.x - line.start.x;
-            const dy = line.end.y - line.start.y;
-            const len = Math.hypot(dx, dy);
-
-            if (len > 1e-9) {
-              const nx = -dy / len;
-              const ny = dx / len;
-              const dist = Math.abs(
-                (circle.center.x - line.start.x) * nx + (circle.center.y - line.start.y) * ny
-              );
-              const err = Math.abs(dist - circle.radius);
-              maxDisp = Math.max(maxDisp, err);
-
-              const proj =
-                (circle.center.x - line.start.x) * (dx / len) +
-                (circle.center.y - line.start.y) * (dy / len);
-              const closestX = line.start.x + proj * (dx / len);
-              const closestY = line.start.y + proj * (dy / len);
-
-              const cToX = closestX - circle.center.x;
-              const cToY = closestY - circle.center.y;
-              const cDist = Math.hypot(cToX, cToY);
-
-              if (cDist > 1e-9 && !isFixed(circle.id, 0)) {
-                circle.center.x = closestX - (cToX / cDist) * circle.radius;
-                circle.center.y = closestY - (cToY / cDist) * circle.radius;
-              }
-            }
-          } else if (
-            (e1.type === 'circle' || e1.type === 'arc') &&
-            (e2.type === 'circle' || e2.type === 'arc')
-          ) {
-            const c1 = e1;
-            const c2 = e2;
-            const dx = c2.center.x - c1.center.x;
-            const dy = c2.center.y - c1.center.y;
-            const centerDist = Math.hypot(dx, dy);
-
-            if (centerDist > 1e-9) {
-              const targetDist = c1.radius + c2.radius;
-              const err = Math.abs(centerDist - targetDist);
-              maxDisp = Math.max(maxDisp, err);
-
-              const scale = targetDist / centerDist;
-              const f1 = isFixed(c1.id, 0);
-              const f2 = isFixed(c2.id, 0);
-
-              if (f1 && !f2) {
-                c2.center.x = c1.center.x + dx * scale;
-                c2.center.y = c1.center.y + dy * scale;
-              } else if (f2 && !f1) {
-                c1.center.x = c2.center.x - dx * scale;
-                c1.center.y = c2.center.y - dy * scale;
-              } else if (!f1 && !f2) {
-                const midX = (c1.center.x + c2.center.x) / 2;
-                const midY = (c1.center.y + c2.center.y) / 2;
-                const halfDx = (dx * scale) / 2;
-                const halfDy = (dy * scale) / 2;
-                c1.center.x = midX - halfDx;
-                c1.center.y = midY - halfDy;
-                c2.center.x = midX + halfDx;
-                c2.center.y = midY + halfDy;
+            if (err > SOLVER_TOLERANCE) {
+              const isFixed0 = fixedPoints.has(`${ent.id}_0`);
+              const isFixed1 = fixedPoints.has(`${ent.id}_1`);
+              if (isFixed0 && !isFixed1) {
+                workingEntities[ent.id] = { ...ent, end: { ...ent.end, y: ent.start.y + targetDY } };
+              } else if (!isFixed0 && isFixed1) {
+                workingEntities[ent.id] = { ...ent, start: { ...ent.start, y: ent.end.y - targetDY } };
+              } else {
+                const midY = (ent.start.y + ent.end.y) / 2;
+                workingEntities[ent.id] = {
+                  ...ent,
+                  start: { ...ent.start, y: midY - targetDY / 2 },
+                  end: { ...ent.end, y: midY + targetDY / 2 },
+                };
               }
             }
           }
-          break;
         }
+      } else if (c.type === 'tangent' && c.entityIds.length === 2) {
+        const entA = workingEntities[c.entityIds[0]];
+        const entB = workingEntities[c.entityIds[1]];
+        const line = entA?.type === 'line' ? entA : entB?.type === 'line' ? entB : null;
+        const circle = entA?.type === 'circle' ? entA : entB?.type === 'circle' ? entB : null;
+        if (line && circle) {
+          const vx = line.end.x - line.start.x;
+          const vy = line.end.y - line.start.y;
+          const len = Math.hypot(vx, vy);
+          if (len > 1e-6) {
+            const dist =
+              Math.abs(
+                (line.end.y - line.start.y) * circle.center.x -
+                  (line.end.x - line.start.x) * circle.center.y +
+                  line.end.x * line.start.y -
+                  line.end.y * line.start.x
+              ) / len;
+            const diff = dist - circle.radius;
+            maxDisp = Math.max(maxDisp, Math.abs(diff));
+          }
+        }
+      } else if (c.type === 'angle' && c.entityIds.length === 2 && c.value !== undefined) {
+        const entA = workingEntities[c.entityIds[0]];
+        const entB = workingEntities[c.entityIds[1]];
+        if (entA && entB && entA.type === 'line' && entB.type === 'line') {
+          const dxA = entA.end.x - entA.start.x;
+          const dyA = entA.end.y - entA.start.y;
+          const dxB = entB.end.x - entB.start.x;
+          const dyB = entB.end.y - entB.start.y;
 
-        case 'equal_length': {
-          if (!e1 || !e2 || e1.type !== 'line' || e2.type !== 'line') break;
+          const lenA = Math.hypot(dxA, dyA);
+          const lenB = Math.hypot(dxB, dyB);
 
-          const len1 = Math.hypot(e1.end.x - e1.start.x, e1.end.y - e1.start.y);
-          const len2 = Math.hypot(e2.end.x - e2.start.x, e2.end.y - e2.start.y);
+          if (lenA > 1e-6 && lenB > 1e-6) {
+            const dot = dxA * dxB + dyA * dyB;
+            const cross = dxA * dyB - dyA * dxB;
+            const cosAngle = dot / (lenA * lenB);
+            const currentAngleRad = Math.acos(Math.max(-1, Math.min(1, cosAngle))); // [0, PI]
 
-          const err = Math.abs(len1 - len2);
-          maxDisp = Math.max(maxDisp, err);
+            // 標準化 UI 輸入的角度度數為 0~180 的無方向內角
+            let targetDeg = c.value % 360;
+            if (targetDeg < 0) targetDeg += 360;
+            if (targetDeg > 180) targetDeg = 360 - targetDeg;
+            const targetAngleRad = (targetDeg * Math.PI) / 180;
 
-          const avgLen = (len1 + len2) / 2;
+            let useSupplementary = false;
+            let err = currentAngleRad - targetAngleRad;
 
-          if (len1 > 1e-9) {
-            const dx1 = e1.end.x - e1.start.x;
-            const dy1 = e1.end.y - e1.start.y;
-            const s1 = avgLen / len1;
-            const mid1X = (e1.start.x + e1.end.x) / 2;
-            const mid1Y = (e1.start.y + e1.end.y) / 2;
-            if (!isFixed(e1.id, 0) && !isFixed(e1.id, 1)) {
-              e1.start.x = mid1X - (dx1 * s1) / 2;
-              e1.start.y = mid1Y - (dy1 * s1) / 2;
-              e1.end.x = mid1X + (dx1 * s1) / 2;
-              e1.end.y = mid1Y + (dy1 * s1) / 2;
+            // 判斷原拓撲與哪一側角度比較近，避免翻轉破壞原本圖形
+            if (Math.abs((Math.PI - currentAngleRad) - targetAngleRad) < Math.abs(err)) {
+              err = (Math.PI - currentAngleRad) - targetAngleRad;
+              useSupplementary = true;
+            }
+
+            maxDisp = Math.max(maxDisp, Math.abs(err) * Math.min(lenA, lenB));
+
+            if (Math.abs(err) > SOLVER_TOLERANCE) {
+              const effectiveTargetRad = useSupplementary ? Math.PI - targetAngleRad : targetAngleRad;
+              let rotationDiff = effectiveTargetRad - currentAngleRad;
+
+              if (cross < 0) {
+                rotationDiff = -rotationDiff;
+              }
+
+              let rotB = rotationDiff / 2;
+              let rotA = -rotationDiff / 2;
+
+              const isFixedA0 = fixedPoints.has(`${entA.id}_0`);
+              const isFixedA1 = fixedPoints.has(`${entA.id}_1`);
+              const isFixedB0 = fixedPoints.has(`${entB.id}_0`);
+              const isFixedB1 = fixedPoints.has(`${entB.id}_1`);
+              const isFixedA = isFixedA0 || isFixedA1;
+              const isFixedB = isFixedB0 || isFixedB1;
+
+              if (isFixedA && !isFixedB) {
+                rotB = rotB - rotA;
+                rotA = 0;
+              } else if (!isFixedA && isFixedB) {
+                rotA = rotA - rotB;
+                rotB = 0;
+              }
+
+              const rotatePoint = (pt: Point2D, pivot: Point2D, angle: number) => {
+                const cos = Math.cos(angle);
+                const sin = Math.sin(angle);
+                return {
+                  x: cos * (pt.x - pivot.x) - sin * (pt.y - pivot.y) + pivot.x,
+                  y: sin * (pt.x - pivot.x) + cos * (pt.y - pivot.y) + pivot.y,
+                };
+              };
+
+              const midA = { x: (entA.start.x + entA.end.x) / 2, y: (entA.start.y + entA.end.y) / 2 };
+              const midB = { x: (entB.start.x + entB.end.x) / 2, y: (entB.start.y + entB.end.y) / 2 };
+              const pivotA = isFixedA0 ? entA.start : isFixedA1 ? entA.end : midA;
+              const pivotB = isFixedB0 ? entB.start : isFixedB1 ? entB.end : midB;
+
+              if (Math.abs(rotA) > 1e-6) {
+                workingEntities[entA.id] = {
+                  ...entA,
+                  start: rotatePoint(entA.start, pivotA, rotA),
+                  end: rotatePoint(entA.end, pivotA, rotA),
+                };
+              }
+              if (Math.abs(rotB) > 1e-6) {
+                workingEntities[entB.id] = {
+                  ...entB,
+                  start: rotatePoint(entB.start, pivotB, rotB),
+                  end: rotatePoint(entB.end, pivotB, rotB),
+                };
+              }
             }
           }
-
-          if (len2 > 1e-9) {
-            const dx2 = e2.end.x - e2.start.x;
-            const dy2 = e2.end.y - e2.start.y;
-            const s2 = avgLen / len2;
-            const mid2X = (e2.start.x + e2.end.x) / 2;
-            const mid2Y = (e2.start.y + e2.end.y) / 2;
-            if (!isFixed(e2.id, 0) && !isFixed(e2.id, 1)) {
-              e2.start.x = mid2X - (dx2 * s2) / 2;
-              e2.start.y = mid2Y - (dy2 * s2) / 2;
-              e2.end.x = mid2X + (dx2 * s2) / 2;
-              e2.end.y = mid2Y + (dy2 * s2) / 2;
-            }
-          }
-          break;
         }
-
-        case 'equal_radius': {
-          if (
-            !e1 ||
-            !e2 ||
-            (e1.type !== 'circle' && e1.type !== 'arc') ||
-            (e2.type !== 'circle' && e2.type !== 'arc')
-          )
-            break;
-
-          const r1 = e1.radius;
-          const r2 = e2.radius;
-          const err = Math.abs(r1 - r2);
-          maxDisp = Math.max(maxDisp, err);
-
-          const avgR = (r1 + r2) / 2;
-          e1.radius = avgR;
-          e2.radius = avgR;
-          break;
-        }
-
-        case 'angle': {
-          if (!e1 || !e2 || e1.type !== 'line' || e2.type !== 'line') break;
-
-          const dx1 = e1.end.x - e1.start.x;
-          const dy1 = e1.end.y - e1.start.y;
-          const len1 = Math.hypot(dx1, dy1);
-
-          const dx2 = e2.end.x - e2.start.x;
-          const dy2 = e2.end.y - e2.start.y;
-          const len2 = Math.hypot(dx2, dy2);
-
-          if (len1 < 1e-9 || len2 < 1e-9) break;
-
-          const targetAngleRad = constraint.value ?? Math.PI / 2;
-          const currentAngle1 = Math.atan2(dy1, dx1);
-          const currentAngle2 = Math.atan2(dy2, dx2);
-          const diff = currentAngle2 - currentAngle1 - targetAngleRad;
-
-          maxDisp = Math.max(maxDisp, Math.abs(diff) * ((len1 + len2) / 2));
-
-          if (!isFixed(e2.id, 0) && !isFixed(e2.id, 1)) {
-            const newAngle2 = currentAngle1 + targetAngleRad;
-            const mid2X = (e2.start.x + e2.end.x) / 2;
-            const mid2Y = (e2.start.y + e2.end.y) / 2;
-            const nx = Math.cos(newAngle2) * len2;
-            const ny = Math.sin(newAngle2) * len2;
-            e2.start.x = mid2X - nx / 2;
-            e2.start.y = mid2Y - ny / 2;
-            e2.end.x = mid2X + nx / 2;
-            e2.end.y = mid2Y + ny / 2;
-          }
-          break;
-        }
-
-        default:
-          break;
       }
     }
 
-    if (maxDisp < SOLVER_TOLERANCE) {
+    if (maxDisp <= SOLVER_TOLERANCE) {
       converged = true;
       break;
     }
   }
 
-  if (maxDisp < 1e-3) {
-    converged = true;
-  }
-
-  const conflictEntityIds: string[] = [];
-  if (!converged) {
-    const conflictSet = new Set<string>();
-    constraints.forEach((c) => {
-      c.entityIds.forEach((id) => {
-        if (id && workingMap.has(id)) {
-          conflictSet.add(id);
-        }
-      });
-    });
-    conflictEntityIds.push(...Array.from(conflictSet));
-  }
-
-  // Result assembly: merge solved working entities with untouched entities in original order
-  const resultEntities = entities.map((e) => workingMap.get(e.id) || e);
-
   return {
-    entities: resultEntities,
-    iterations: Math.min(iterations + 1, SOLVER_MAX_ITERATIONS),
+    entities: Object.values(workingEntities),
+    iterations,
     maxDisp,
     converged,
-    conflictEntityIds,
+    conflictEntityIds: converged ? [] : constraints.flatMap((c) => c.entityIds),
   };
 }
 
-class PointDSU {
-  parent: Map<string, string> = new Map();
-
-  find(i: string): string {
-    if (!this.parent.has(i)) {
-      this.parent.set(i, i);
-      return i;
-    }
-    const p = this.parent.get(i)!;
-    if (p === i) return i;
-    const root = this.find(p);
-    this.parent.set(i, root);
-    return root;
-  }
-
-  union(i: string, j: string) {
-    const rootI = this.find(i);
-    const rootJ = this.find(j);
-    if (rootI !== rootJ) {
-      this.parent.set(rootI, rootJ);
-    }
-  }
-}
-
-/**
- * Analyzes the degrees of freedom (DOF) of a sketch based on entities and constraints.
- */
 export function analyzeSketchDOF(
   entities: CADEntity2D[],
   constraints: Constraint[]
 ): SketchDofState {
-  if (!entities || entities.length === 0) {
-    return {
-      totalDof: 0,
-      state: 'UnderDefined',
-      entityStates: {},
-    };
+  const activeEntities = entities.filter((e) => !e.isConstruction && e.visible !== false);
+  const entityStates: Record<string, EntityState> = {};
+
+  let totalDof = 0;
+  for (const ent of activeEntities) {
+    if (ent.type === 'line') totalDof += 4;
+    else if (ent.type === 'circle') totalDof += 3;
+    else if (ent.type === 'arc') totalDof += 5;
+    else if (ent.type === 'polyline') totalDof += ent.points.length * 2;
+    entityStates[ent.id] = 'UnderDefined';
   }
 
-  const dsu = new PointDSU();
-
-  // 1. Initialize all point keys for entities
-  const entityMap = new Map<string, CADEntity2D>();
-  entities.forEach((entity) => {
-    entityMap.set(entity.id, entity);
-    if (entity.type === 'line') {
-      dsu.find(`${entity.id}:0`);
-      dsu.find(`${entity.id}:1`);
-    } else if (entity.type === 'circle') {
-      dsu.find(`${entity.id}:0`);
-    } else if (entity.type === 'arc') {
-      dsu.find(`${entity.id}:0`);
-      dsu.find(`${entity.id}:1`);
-      dsu.find(`${entity.id}:2`);
-    } else if (entity.type === 'polyline') {
-      entity.points.forEach((_, idx) => {
-        dsu.find(`${entity.id}:${idx}`);
-      });
-    }
-  });
-
-  // 2. Process coincident constraints to merge points into clusters
-  const constrainedIdSet = new Set<string>();
-  const activeConstraints = constraints || [];
-
-  activeConstraints.forEach((c) => {
-    if (c.entityIds) {
-      c.entityIds.forEach((id) => {
-        if (id && entityMap.has(id)) {
-          constrainedIdSet.add(id);
-        }
-      });
-    }
-
-    if (c.type === 'coincident' && c.entityIds && c.entityIds.length >= 2) {
-      const e1 = c.entityIds[0];
-      const e2 = c.entityIds[1];
-      const idx1 = c.pointIndices?.[0] ?? 0;
-      const idx2 = c.pointIndices?.[1] ?? 0;
-
-      if (entityMap.has(e1) && entityMap.has(e2)) {
-        dsu.union(`${e1}:${idx1}`, `${e2}:${idx2}`);
-      }
-    }
-  });
-
-  // 3. Build component graph between entities & point clusters
-  const compDsu = new PointDSU();
-  entities.forEach((e) => compDsu.find(e.id));
-
-  entities.forEach((entity) => {
-    const pointKeys: string[] = [];
-    if (entity.type === 'line') {
-      pointKeys.push(`${entity.id}:0`, `${entity.id}:1`);
-    } else if (entity.type === 'circle') {
-      pointKeys.push(`${entity.id}:0`);
-    } else if (entity.type === 'arc') {
-      pointKeys.push(`${entity.id}:0`, `${entity.id}:1`, `${entity.id}:2`);
-    } else if (entity.type === 'polyline') {
-      entity.points.forEach((_, idx) => pointKeys.push(`${entity.id}:${idx}`));
-    }
-
-    pointKeys.forEach((pk) => {
-      const clusterRoot = `cluster:${dsu.find(pk)}`;
-      compDsu.union(entity.id, clusterRoot);
-    });
-  });
-
-  activeConstraints.forEach((c) => {
-    if (c.entityIds && c.entityIds.length >= 2) {
-      const firstId = c.entityIds[0];
-      for (let i = 1; i < c.entityIds.length; i++) {
-        const otherId = c.entityIds[i];
-        if (entityMap.has(firstId) && entityMap.has(otherId)) {
-          compDsu.union(firstId, otherId);
-        }
-      }
-    }
-  });
-
-  // 4. Group entities, point clusters, and non-coincident constraints by component
-  const components = new Map<string, {
-    entityIds: Set<string>;
-    pointClusterRoots: Set<string>;
-    nonCoincidentConstraints: Constraint[];
-  }>();
-
-  entities.forEach((entity) => {
-    const root = compDsu.find(entity.id);
-    if (!components.has(root)) {
-      components.set(root, {
-        entityIds: new Set(),
-        pointClusterRoots: new Set(),
-        nonCoincidentConstraints: [],
-      });
-    }
-    const comp = components.get(root)!;
-    comp.entityIds.add(entity.id);
-
-    const pointKeys: string[] = [];
-    if (entity.type === 'line') {
-      pointKeys.push(`${entity.id}:0`, `${entity.id}:1`);
-    } else if (entity.type === 'circle') {
-      pointKeys.push(`${entity.id}:0`);
-    } else if (entity.type === 'arc') {
-      pointKeys.push(`${entity.id}:0`, `${entity.id}:1`, `${entity.id}:2`);
-    } else if (entity.type === 'polyline') {
-      entity.points.forEach((_, idx) => pointKeys.push(`${entity.id}:${idx}`));
-    }
-    pointKeys.forEach((pk) => {
-      comp.pointClusterRoots.add(dsu.find(pk));
-    });
-  });
-
-  activeConstraints.forEach((c) => {
-    if (c.type === 'coincident') return;
-    if (!c.entityIds || c.entityIds.length === 0) return;
-
-    const firstValidId = c.entityIds.find((id) => entityMap.has(id));
-    if (firstValidId) {
-      const root = compDsu.find(firstValidId);
-      const comp = components.get(root);
-      if (comp) {
-        comp.nonCoincidentConstraints.push(c);
-      }
-    }
-  });
-
-  // 5. Calculate DOFs for each component
-  let totalDof = 0;
-  const entityStates: Record<string, EntityState> = {};
-  let overallState: EntityState = 'UnderDefined';
-  let hasOverDefined = false;
-  let allFullyDefined = true;
-  let hasConstrainedComponent = false;
-
-  components.forEach((comp) => {
-    let isConstrained = false;
-    comp.entityIds.forEach((id) => {
-      if (constrainedIdSet.has(id)) {
-        isConstrained = true;
-      }
-    });
-
-    if (!isConstrained) {
-      comp.entityIds.forEach((id) => {
-        entityStates[id] = 'UnderDefined';
-      });
-      return;
-    }
-
-    hasConstrainedComponent = true;
-
-    let baseDof = comp.pointClusterRoots.size * 2;
-    comp.entityIds.forEach((id) => {
-      const entity = entityMap.get(id);
-      if (entity) {
-        if (entity.type === 'circle' || entity.type === 'arc') {
-          baseDof += 1;
-        }
-      }
-    });
-
-    let consumedDof = 0;
-    comp.nonCoincidentConstraints.forEach((c) => {
-      if (c.type === 'fix') {
+  let consumedDof = 0;
+  for (const c of constraints) {
+    switch (c.type) {
+      case 'fix':
+      case 'coincident':
         consumedDof += 2;
-      } else {
+        break;
+      case 'horizontal':
+      case 'vertical':
+      case 'length':
+      case 'distance':
+      case 'distance_x':
+      case 'distance_y':
+      case 'parallel':
+      case 'perpendicular':
+      case 'tangent':
+      case 'equal_length':
+      case 'equal_radius':
+      case 'angle':
         consumedDof += 1;
-      }
+        break;
+    }
+  }
+
+  const remainingDof = totalDof - consumedDof;
+  let overallState: EntityState = 'UnderDefined';
+
+  if (remainingDof < 0) {
+    overallState = 'OverDefined';
+    activeEntities.forEach((e) => {
+      entityStates[e.id] = 'OverDefined';
     });
-
-    const netCompDof = baseDof - consumedDof;
-    totalDof += netCompDof;
-
-    let compState: EntityState = 'UnderDefined';
-    if (netCompDof < 0) {
-      compState = 'OverDefined';
-      hasOverDefined = true;
-    } else if (netCompDof === 0) {
-      compState = 'FullyDefined';
-    } else {
-      compState = 'UnderDefined';
-      allFullyDefined = false;
-    }
-
-    comp.entityIds.forEach((id) => {
-      entityStates[id] = compState;
+  } else if (remainingDof === 0 && activeEntities.length > 0) {
+    overallState = 'FullyDefined';
+    activeEntities.forEach((e) => {
+      entityStates[e.id] = 'FullyDefined';
     });
-  });
-
-  entities.forEach((entity) => {
-    if (!entityStates[entity.id]) {
-      entityStates[entity.id] = 'UnderDefined';
-    }
-  });
-
-  if (hasConstrainedComponent) {
-    if (hasOverDefined || totalDof < 0) {
-      overallState = 'OverDefined';
-    } else if (allFullyDefined && totalDof === 0) {
-      overallState = 'FullyDefined';
-    } else {
-      overallState = 'UnderDefined';
-    }
-  } else {
-    overallState = 'UnderDefined';
   }
 
   return {
-    totalDof,
+    totalDof: Math.max(0, remainingDof),
     state: overallState,
     entityStates,
   };
