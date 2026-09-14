@@ -1,4 +1,5 @@
-import { Point2D, LineEntity, ArcEntity, CircleEntity, CADEntity2D, Constraint } from '../../types/cad';
+import { Point2D, LineEntity, ArcEntity, CircleEntity, PolylineEntity, CADEntity2D, Constraint } from '../../types/cad';
+import { bulgeToArc, endpointsToBulge } from './BulgeMath';
 
 export interface OffsetOptions {
   distance: number;       // 偏移距離（永遠大於 0）
@@ -492,6 +493,227 @@ export function solveCornerIntersection(
 }
 
 /**
+ * 計算 PolylineEntity 的精確幾何偏移 (Polyline Offset Engine)
+ * 完整支援 closed: true (閉合內縮/外擴) 與 closed: false (開放式多段線)
+ * 正確處理由角節點法向量與線段/圓弧交點 (Miter Limit) 計算。
+ */
+export function calculatePolylineOffset(
+  polyline: PolylineEntity,
+  options: OffsetOptions
+): OffsetResult | null {
+  const { distance, sidePoint } = options;
+  if (!polyline || !polyline.points || polyline.points.length < 2 || distance <= 0) {
+    return null;
+  }
+
+  const pts = polyline.points;
+  const isClosed = polyline.closed ?? false;
+  const bulges = polyline.bulges ?? [];
+  const numSegs = isClosed ? pts.length : pts.length - 1;
+
+  if (numSegs < 1) return null;
+
+  // 1. 將多段線各段拆解為 Segment 幾何圖元 (LineEntity 或 ArcEntity)
+  const segGeoms: (LineEntity | ArcEntity)[] = [];
+  const chainElems: ChainElement[] = [];
+
+  for (let i = 0; i < numSegs; i++) {
+    const p1 = pts[i];
+    const p2 = pts[(i + 1) % pts.length];
+    const bulge = bulges[i] ?? 0;
+    const segId = `poly-seg-${i}`;
+
+    let geom: LineEntity | ArcEntity;
+    if (Math.abs(bulge) < 1e-8) {
+      geom = {
+        id: segId,
+        type: 'line',
+        layerId: polyline.layerId,
+        visible: polyline.visible,
+        locked: polyline.locked,
+        start: { x: p1.x, y: p1.y },
+        end: { x: p2.x, y: p2.y },
+      };
+    } else {
+      const arcDef = bulgeToArc(p1, p2, bulge);
+      if (arcDef) {
+        const isClockwise = bulge < 0;
+        let startAngle = arcDef.startAngle;
+        let endAngle = arcDef.endAngle;
+        if (isClockwise) {
+          startAngle = arcDef.endAngle;
+          endAngle = arcDef.startAngle;
+        }
+        geom = {
+          id: segId,
+          type: 'arc',
+          layerId: polyline.layerId,
+          visible: polyline.visible,
+          locked: polyline.locked,
+          center: arcDef.center,
+          radius: arcDef.radius,
+          startAngle,
+          endAngle,
+        };
+      } else {
+        geom = {
+          id: segId,
+          type: 'line',
+          layerId: polyline.layerId,
+          visible: polyline.visible,
+          locked: polyline.locked,
+          start: { x: p1.x, y: p1.y },
+          end: { x: p2.x, y: p2.y },
+        };
+      }
+    }
+    segGeoms.push(geom);
+    chainElems.push({ entity: geom, isReversed: false });
+  }
+
+  // 2. 尋找與 sidePoint 最近的段落，推導全多段線統一的偏移側 ('left' 或 'right')
+  let closestSegIdx = 0;
+  let minDistance = Infinity;
+
+  for (let i = 0; i < numSegs; i++) {
+    const p1 = pts[i];
+    const p2 = pts[(i + 1) % pts.length];
+    const midX = (p1.x + p2.x) / 2;
+    const midY = (p1.y + p2.y) / 2;
+    const dist = Math.hypot(sidePoint.x - midX, sidePoint.y - midY);
+    if (dist < minDistance) {
+      minDistance = dist;
+      closestSegIdx = i;
+    }
+  }
+
+  const offsetSide = determineOffsetSide(chainElems[closestSegIdx], sidePoint);
+  const offsetSegs: (LineEntity | ArcEntity)[] = [];
+
+  // 3. 獨立平行/同心偏移各個圖元段落
+  for (let i = 0; i < numSegs; i++) {
+    const geom = segGeoms[i];
+    if (geom.type === 'line') {
+      const vx = geom.end.x - geom.start.x;
+      const vy = geom.end.y - geom.start.y;
+      const len = Math.hypot(vx, vy);
+      if (len < 1e-10) return null;
+
+      const factor = offsetSide === 'left' ? 1 : -1;
+      const nx = (-vy / len) * factor;
+      const ny = (vx / len) * factor;
+      const dx = distance * nx;
+      const dy = distance * ny;
+
+      offsetSegs.push({
+        ...geom,
+        id: `off-seg-${i}`,
+        start: { x: geom.start.x + dx, y: geom.start.y + dy },
+        end: { x: geom.end.x + dx, y: geom.end.y + dy },
+      });
+    } else {
+      const { center, radius } = geom;
+      const bulge = bulges[i] ?? 0;
+      let radiusDelta = 0;
+      if (bulge >= 0) {
+        radiusDelta = offsetSide === 'left' ? -distance : distance;
+      } else {
+        radiusDelta = offsetSide === 'left' ? distance : -distance;
+      }
+
+      const finalRadius = Math.max(1e-4, radius + radiusDelta);
+      offsetSegs.push({
+        ...geom,
+        id: `off-seg-${i}`,
+        radius: finalRadius,
+      });
+    }
+  }
+
+  // 4. 轉角 Miter 點集求解 (solveCornerIntersection)
+  const newPoints: Point2D[] = [];
+
+  if (isClosed) {
+    for (let i = 0; i < numSegs; i++) {
+      const prevIdx = (i - 1 + numSegs) % numSegs;
+      const origCorner = pts[i];
+      const cornerPt = solveCornerIntersection(
+        offsetSegs[prevIdx],
+        chainElems[prevIdx],
+        offsetSegs[i],
+        chainElems[i],
+        origCorner,
+        distance
+      );
+      newPoints.push(cornerPt);
+    }
+  } else {
+    // 開放多段線起點
+    const seg0 = offsetSegs[0];
+    const pStart = seg0.type === 'line'
+      ? { ...seg0.start }
+      : { x: seg0.center.x + seg0.radius * Math.cos(seg0.startAngle), y: seg0.center.y + seg0.radius * Math.sin(seg0.startAngle) };
+    newPoints.push(pStart);
+
+    // 內部節點 Miter 交點
+    for (let i = 1; i < numSegs; i++) {
+      const prevIdx = i - 1;
+      const origCorner = pts[i];
+      const cornerPt = solveCornerIntersection(
+        offsetSegs[prevIdx],
+        chainElems[prevIdx],
+        offsetSegs[i],
+        chainElems[i],
+        origCorner,
+        distance
+      );
+      newPoints.push(cornerPt);
+    }
+
+    // 開放多段線終點
+    const segLast = offsetSegs[numSegs - 1];
+    const pEnd = segLast.type === 'line'
+      ? { ...segLast.end }
+      : { x: segLast.center.x + segLast.radius * Math.cos(segLast.endAngle), y: segLast.center.y + segLast.radius * Math.sin(segLast.endAngle) };
+    newPoints.push(pEnd);
+  }
+
+  // 5. 推導 offset polyline 的 bulges 陣列
+  const newBulges: number[] = [];
+  for (let i = 0; i < numSegs; i++) {
+    const origBulge = bulges[i] ?? 0;
+    if (Math.abs(origBulge) < 1e-8) {
+      newBulges.push(0);
+    } else {
+      const p1 = newPoints[i];
+      const p2 = isClosed ? newPoints[(i + 1) % newPoints.length] : newPoints[i + 1];
+      const arcGeom = segGeoms[i] as ArcEntity;
+      const isClockwise = origBulge < 0;
+      const calculatedBulge = endpointsToBulge(p1, p2, arcGeom.center, isClockwise);
+      newBulges.push(Number.isFinite(calculatedBulge) ? calculatedBulge : origBulge);
+    }
+  }
+
+  if (!isClosed) {
+    newBulges.push(0);
+  }
+
+  const newPolylineId = crypto.randomUUID();
+  const newPolyline: PolylineEntity = {
+    ...polyline,
+    id: newPolylineId,
+    points: newPoints,
+    bulges: newBulges,
+    closed: isClosed,
+  };
+
+  return {
+    entity: newPolyline,
+    generatedConstraints: [],
+  };
+}
+
+/**
  * 計算整條連續多段線/連鎖幾何一次性整體偏移 (Bulk Chained Offset)
  * 包含：
  * 1. 連鎖圖元尋找 (findConnectedChain)
@@ -505,7 +727,7 @@ export function calculateOffsetChain(
   allEntities: CADEntity2D[],
   constraints: Constraint[] = []
 ): OffsetChainResult | null {
-  const { distance, sidePoint } = options;
+  const { distance } = options;
 
   if (distance <= 0) {
     return null;
@@ -518,6 +740,16 @@ export function calculateOffsetChain(
     return {
       entities: [singleResult.entity],
       generatedConstraints: singleResult.generatedConstraints,
+    };
+  }
+
+  // 多段線 (Polyline) 獨立處理整體偏移
+  if (targetEntity.type === 'polyline') {
+    const polyResult = calculatePolylineOffset(targetEntity, options);
+    if (!polyResult) return null;
+    return {
+      entities: [polyResult.entity],
+      generatedConstraints: polyResult.generatedConstraints,
     };
   }
 
@@ -539,7 +771,7 @@ export function calculateOffsetChain(
 
   // 找到 targetEntity 在鏈中的元素以判定統一的偏移側 ('left' 或 'right')
   const targetElem = chain.find((elem) => elem.entity.id === targetEntity.id) || chain[0];
-  const offsetSide = determineOffsetSide(targetElem, sidePoint);
+  const offsetSide = determineOffsetSide(targetElem, options.sidePoint);
 
   const offsetEntities: (LineEntity | ArcEntity)[] = [];
   const generatedConstraints: Constraint[] = [];
@@ -730,7 +962,7 @@ export function calculateChainOffset(
 
 /**
  * 計算單一圖元等距法向偏置 (Normal Offset)
- * 支援 Line, Arc, Circle。
+ * 支援 Line, Arc, Circle, Polyline。
  */
 export function calculateOffsetEntity(entity: CADEntity2D, options: OffsetOptions): OffsetResult | null {
   const { distance, sidePoint } = options;
@@ -849,7 +1081,10 @@ export function calculateOffsetEntity(entity: CADEntity2D, options: OffsetOption
       };
     }
 
-    case 'polyline':
+    case 'polyline': {
+      return calculatePolylineOffset(entity, options);
+    }
+
     default:
       return null;
   }

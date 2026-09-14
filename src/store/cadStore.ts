@@ -189,6 +189,7 @@ export const useCADStore = create<CADState>((set, get) => ({
   selectedFeatureId: null,
   osnapEnabled: true,
   orthoEnabled: false,
+  showProfiles: true,
 
   // 鎖點開關與各模式勾選狀態（預設全開啟）
   osnapSettings: {
@@ -1830,6 +1831,7 @@ export const useCADStore = create<CADState>((set, get) => ({
 
   toggleOsnap: () => set((state) => ({ osnapEnabled: !state.osnapEnabled })),
   toggleOrtho: () => set((state) => ({ orthoEnabled: !state.orthoEnabled })),
+  toggleShowProfiles: () => set((state) => ({ showProfiles: !state.showProfiles })),
 
   setOsnapModalOpen: (open) => set({ isOsnapModalOpen: open }),
   toggleOsnapMode: (mode) => set((state) => ({
@@ -1928,6 +1930,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       isOsnapModalOpen: false,
       isPolarModalOpen: false,
       isLayerModalOpen: false,
+      showProfiles: true,
     });
   }
 }));
@@ -1939,3 +1942,4 @@ export const useCurrentTool = () => useCADStore((state) => state.currentTool);
 export const useActiveSketch = () => useCADStore((state) => state.activeSketchId);
 export const useActiveLayerId = () => useCADStore((state) => state.activeLayerId);
 export const useCADLayers = () => useCADStore((state) => state.document.layers);
+export const useShowProfiles = () => useCADStore((state) => state.showProfiles);

@@ -183,6 +183,8 @@ export default function App() {
     polygonMethod,
     setPolygonMethod,
     importDxfData,
+    showProfiles,
+    toggleShowProfiles,
   } = useCADStore();
 
   // 清除彈窗 Timer 清理機制
@@ -971,6 +973,20 @@ export default function App() {
                 </button>
               </>
             )}
+
+            {/* Toggle Profiles Button */}
+            <button
+              onClick={toggleShowProfiles}
+              className={`px-3 py-1 rounded text-xs font-semibold border transition-colors shadow-sm flex items-center gap-1.5 ${
+                showProfiles
+                  ? 'bg-neutral-800 hover:bg-neutral-700 text-sky-400 border-sky-600/50'
+                  : 'bg-neutral-900 hover:bg-neutral-800 text-neutral-500 border-neutral-800'
+              }`}
+              title="Toggle Profiles Fill (切換草圖輪廓填色)"
+            >
+              <Layers size={15} className={showProfiles ? 'text-sky-400' : 'text-neutral-500'} />
+              <span>Toggle Profiles</span>
+            </button>
 
             {/* 2D/3D Toggle Button */}
             <button

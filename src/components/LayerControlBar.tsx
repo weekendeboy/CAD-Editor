@@ -68,17 +68,23 @@ export const LayerControlBar: React.FC<LayerControlBarProps> = ({ onOpenManager 
   // 切換圖層處理函式：
   // 若畫面中有選取圖元（selectedEntityIds.length > 0），自動將被選取的圖元批量轉移至所選圖層
   const handleSelectLayer = (targetLayerId: string) => {
-    if (hasSelection && activeSketch) {
-      const entitiesToTransfer = activeSketch.entities
-        .filter((ent) => selectedEntityIds.includes(ent.id))
-        .map((ent) => ({
-          ...ent,
-          layerId: targetLayerId,
-          isConstruction: targetLayerId === 'CONSTRUCTION' ? true : ent.isConstruction,
-        }));
+    if (selectedEntityIds.length > 0) {
+      const sketch = activeSketch || (document.featureTree.find(
+        (f) => f.type === 'SKETCH'
+      ) as SketchFeature | undefined);
 
-      if (entitiesToTransfer.length > 0) {
-        updateEntities(entitiesToTransfer);
+      if (sketch) {
+        const entitiesToTransfer = sketch.entities
+          .filter((ent) => selectedEntityIds.includes(ent.id))
+          .map((ent) => ({
+            ...ent,
+            layerId: targetLayerId,
+            isConstruction: targetLayerId === 'CONSTRUCTION' ? true : ent.isConstruction,
+          }));
+
+        if (entitiesToTransfer.length > 0) {
+          updateEntities(entitiesToTransfer);
+        }
       }
     }
 

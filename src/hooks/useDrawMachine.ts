@@ -589,9 +589,19 @@ export function useDrawMachine() {
 
       // 收集頂點 points 陣列
       const points: Point2D[] = [p0];
-      const segCount = closed ? segments.length - 1 : segments.length;
-      for (let i = 0; i < segCount; i++) {
-        points.push(segments[i].endPt);
+      const lastSeg = segments[segments.length - 1];
+      const lastEndIsStart = Math.hypot(lastSeg.endPt.x - p0.x, lastSeg.endPt.y - p0.y) < 1e-3;
+
+      if (closed && lastEndIsStart && segments.length > 1) {
+        // 已有繪製回起點的最後一個段落，只需收集到倒數第二個端點
+        for (let i = 0; i < segments.length - 1; i++) {
+          points.push(segments[i].endPt);
+        }
+      } else {
+        // 一般開放多段線，或按下快速鍵 C 閉合（最後一個端點為新頂點）
+        for (let i = 0; i < segments.length; i++) {
+          points.push(segments[i].endPt);
+        }
       }
 
       // 初始化 bulges 陣列 = new Array(points.length).fill(0)
@@ -606,12 +616,12 @@ export function useDrawMachine() {
             const arcEntity = currentEntities.find((e) => e.id === seg.entityId) as ArcEntity | undefined;
             if (arcEntity && arcEntity.type === 'arc') {
               let bulgeVal = arcToBulge(arcEntity);
-              const p1 = points[index];
+              const pStart = index === 0 ? p0! : points[index];
               const arcStart = {
                 x: arcEntity.center.x + arcEntity.radius * Math.cos(arcEntity.startAngle),
                 y: arcEntity.center.y + arcEntity.radius * Math.sin(arcEntity.startAngle),
               };
-              if (Math.hypot(p1.x - arcStart.x, p1.y - arcStart.y) > 1e-3) {
+              if (Math.hypot(pStart.x - arcStart.x, pStart.y - arcStart.y) > 1e-3) {
                 bulgeVal = -bulgeVal;
               }
               bulges[index] = bulgeVal;
@@ -640,7 +650,7 @@ export function useDrawMachine() {
       addEntity(polylineEntity);
       cancelDrawing();
     },
-    [drawSession, polySegments, currentEntities, removeEntity, addEntity, cancelDrawing]
+    [drawSession, polySegments, currentEntities, removeEntity, addEntity, cancelDrawing, activeLayerId]
   );
 
   // 當工具切換時，將狀態徹底重置，並特別為鏡射工具初始化選取
@@ -755,6 +765,10 @@ export function useDrawMachine() {
         togglePolylineMode();
       } else if (e.key === 'Enter' && currentTool === 'POLYLINE') {
         finishPolyline(false);
+      } else if ((e.key === 'c' || e.key === 'C') && currentTool === 'POLYLINE' && drawSession.isDrawing) {
+        if ((drawSession.polySegments?.length || polySegments.length) >= 2) {
+          finishPolyline(true);
+        }
       } else if (e.key === 'Enter' && currentTool === 'MIRROR') {
         if (mirrorStep === 'PICK_SOURCE') {
           setMirrorStep('PICK_AXIS');
@@ -1558,6 +1572,16 @@ export function useDrawMachine() {
 
           addEntity(newLine);
 
+          if (lastEntityId) {
+            addConstraint({
+              id: crypto.randomUUID(),
+              type: 'coincident',
+              entityIds: [lastEntityId, newLine.id],
+              pointIndices: [1, 0],
+            });
+          }
+          setLastEntityId(newLine.id);
+
           if (deferredTangent) {
             addConstraint({
               id: crypto.randomUUID(),
@@ -1638,9 +1662,10 @@ export function useDrawMachine() {
             polyStartPt = drawSession.startPoint;
           }
 
+          const closeTolerance = Math.max(0.5, 15 / (scale || 1));
           const isNearFirstStart =
             polyStartPt
-              ? Math.hypot(clickPt.x - polyStartPt.x, clickPt.y - polyStartPt.y) < 0.5
+              ? Math.hypot(clickPt.x - polyStartPt.x, clickPt.y - polyStartPt.y) <= closeTolerance
               : false;
 
           const isClosing = Boolean(
@@ -1966,11 +1991,6 @@ export function useDrawMachine() {
               id: crypto.randomUUID(),
               type: 'vertical',
               entityIds: [leftLine.id],
-            });
-            addConstraint({
-              id: crypto.randomUUID(),
-              type: 'vertical',
-              entityIds: [rightLine.id],
             });
           }
 
@@ -2929,6 +2949,16 @@ export function useDrawMachine() {
         };
 
         addEntity(newLine);
+
+        if (lastEntityId) {
+          addConstraint({
+            id: crypto.randomUUID(),
+            type: 'coincident',
+            entityIds: [lastEntityId, newLine.id],
+            pointIndices: [1, 0],
+          });
+        }
+        setLastEntityId(newLine.id);
 
         if (startSnap && startSnap.entityId !== newLine.id && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
           addConstraint({

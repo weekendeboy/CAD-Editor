@@ -353,3 +353,36 @@ export function calculatePolygonVertices(
   return points;
 }
 
+export interface Ray2D {
+  origin: Point2D;
+  angle: number; // 弧度
+}
+
+/**
+ * 求解兩條射線的無限延伸交點
+ *
+ * @param ray1 第一條射線
+ * @param ray2 第二條射線
+ * @returns 交點座標 (Point2D) 或 null (若兩線平行/共線)
+ */
+export function calculateRayIntersection(ray1: Ray2D, ray2: Ray2D): Point2D | null {
+  const v1 = { x: Math.cos(ray1.angle), y: Math.sin(ray1.angle) };
+  const v2 = { x: Math.cos(ray2.angle), y: Math.sin(ray2.angle) };
+
+  const det = v1.x * v2.y - v1.y * v2.x;
+
+  if (Math.abs(det) < 1e-6) {
+    return null;
+  }
+
+  const dx = ray2.origin.x - ray1.origin.x;
+  const dy = ray2.origin.y - ray1.origin.y;
+
+  const t1 = (dx * v2.y - dy * v2.x) / det;
+
+  return {
+    x: ray1.origin.x + t1 * v1.x,
+    y: ray1.origin.y + t1 * v1.y,
+  };
+}
+

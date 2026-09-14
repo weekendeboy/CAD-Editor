@@ -1,4 +1,5 @@
 import { Point2D } from '../../types/cad';
+import { calculateRayIntersection, Ray2D } from './GeometryMath';
 
 export interface TrackAnchor {
   id: string;
@@ -119,8 +120,8 @@ export class OTrackManager {
   }
 
   /**
-   * Evaluates object tracking alignments (orthogonal or polar) with existing tracking anchors.
-   * If mouse is aligned with rays from anchors (or basePoint), snaps the point to the alignment ray or intersection.
+   * Evaluates object tracking alignments (orthogonal or polar) with existing tracking anchors and base point.
+   * Performs pairwise ray intersection solving across all active guides first, then falls back to single-ray candidate matching.
    *
    * @param mouseWorld Current mouse position in world coordinates
    * @param tolerance Alignment snap tolerance in world units
@@ -178,168 +179,172 @@ export class OTrackManager {
       }
     }
 
-    // 1. Collect single ray candidates
-    interface RayCandidate {
+    // Collect all active guide lines (rays) from all active origins
+    interface ActiveGuide {
       anchor: Point2D;
       isBasePoint: boolean;
       angleDeg: number;
       rad: number;
-      perpDist: number;
-      projDist: number;
-      targetPoint: Point2D;
+      type: 'horizontal' | 'vertical' | 'polar';
+      ray: Ray2D;
     }
 
-    const rayCandidates: RayCandidate[] = [];
+    const activeGuides: ActiveGuide[] = [];
 
     for (const origin of origins) {
-      const dx = mouseWorld.x - origin.point.x;
-      const dy = mouseWorld.y - origin.point.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-
-      if (dist < 1e-3) {
-        continue;
-      }
-
-      const cursorAngleDeg = normalizeAngle((Math.atan2(dy, dx) * 180) / Math.PI);
-
       for (const angleDeg of targetAngles) {
         const rad = (angleDeg * Math.PI) / 180;
-        const cosAngle = Math.cos(rad);
-        const sinAngle = Math.sin(rad);
-
-        const projDist = dx * cosAngle + dy * sinAngle;
-        if (projDist <= 0) {
-          continue;
-        }
-
-        const perpDist = Math.abs(dx * sinAngle - dy * cosAngle);
-
-        let angleDiff = Math.abs(cursorAngleDeg - angleDeg);
-        if (angleDiff > 180) angleDiff = 360 - angleDiff;
-
-        if (perpDist <= tolerance && angleDiff <= 5.0) {
-          const targetPoint: Point2D = {
-            x: origin.point.x + projDist * cosAngle,
-            y: origin.point.y + projDist * sinAngle,
-          };
-
-          rayCandidates.push({
-            anchor: origin.point,
-            isBasePoint: origin.isBasePoint,
-            angleDeg,
-            rad,
-            perpDist,
-            projDist,
-            targetPoint,
-          });
-        }
+        activeGuides.push({
+          anchor: origin.point,
+          isBasePoint: origin.isBasePoint,
+          angleDeg,
+          rad,
+          type: getGuideLineType(angleDeg),
+          ray: {
+            origin: origin.point,
+            angle: rad,
+          },
+        });
       }
     }
 
-    // 2. Check for 2-Ray Intersection candidates between distinct origins
+    // 1. Pairwise Intersection Evaluation (兩兩射線求交)
     interface IntersectionCandidate {
-      anchor1: Point2D;
-      isBase1: boolean;
-      angle1: number;
-      anchor2: Point2D;
-      isBase2: boolean;
-      angle2: number;
+      guide1: ActiveGuide;
+      guide2: ActiveGuide;
       intersectionPoint: Point2D;
       distToMouse: number;
     }
 
     const intersectionCandidates: IntersectionCandidate[] = [];
 
-    if (origins.length >= 2) {
-      for (let i = 0; i < origins.length; i++) {
-        for (let j = i + 1; j < origins.length; j++) {
-          const o1 = origins[i];
-          const o2 = origins[j];
+    for (let i = 0; i < activeGuides.length; i++) {
+      for (let j = i + 1; j < activeGuides.length; j++) {
+        const g1 = activeGuides[i];
+        const g2 = activeGuides[j];
 
-          for (const angle1 of targetAngles) {
-            const rad1 = (angle1 * Math.PI) / 180;
-            const cos1 = Math.cos(rad1);
-            const sin1 = Math.sin(rad1);
+        // Skip rays originating from the exact same anchor point
+        if (getDistance(g1.anchor, g2.anchor) < 1e-4) {
+          continue;
+        }
 
-            for (const angle2 of targetAngles) {
-              const rad2 = (angle2 * Math.PI) / 180;
-              const cos2 = Math.cos(rad2);
-              const sin2 = Math.sin(rad2);
+        // Calculate ray intersection using calculateRayIntersection
+        const interPt = calculateRayIntersection(g1.ray, g2.ray);
+        if (!interPt) {
+          continue; // Parallel or collinear rays
+        }
 
-              const det = cos1 * sin2 - sin1 * cos2;
-              if (Math.abs(det) < 1e-4) {
-                continue; // Parallel
-              }
+        // Verify that the intersection point projects forward along both rays
+        const v1 = { x: Math.cos(g1.rad), y: Math.sin(g1.rad) };
+        const v2 = { x: Math.cos(g2.rad), y: Math.sin(g2.rad) };
 
-              const Dx = o2.point.x - o1.point.x;
-              const Dy = o2.point.y - o1.point.y;
+        const t1 = (interPt.x - g1.anchor.x) * v1.x + (interPt.y - g1.anchor.y) * v1.y;
+        const t2 = (interPt.x - g2.anchor.x) * v2.x + (interPt.y - g2.anchor.y) * v2.y;
 
-              const t1 = (Dy * cos2 - Dx * sin2) / det;
-              const t2 = (Dy * cos1 - Dx * sin1) / det;
+        // Rays project forward
+        if (t1 < -1e-3 || t2 < -1e-3) {
+          continue;
+        }
 
-              if (t1 <= 1e-4 || t2 <= 1e-4) {
-                continue; // Must project forward
-              }
+        const distToMouse = getDistance(mouseWorld, interPt);
 
-              const interPt: Point2D = {
-                x: o1.point.x + t1 * cos1,
-                y: o1.point.y + t1 * sin1,
-              };
-
-              const distToMouse = getDistance(mouseWorld, interPt);
-
-              if (distToMouse <= tolerance * 1.8) {
-                intersectionCandidates.push({
-                  anchor1: o1.point,
-                  isBase1: o1.isBasePoint,
-                  angle1,
-                  anchor2: o2.point,
-                  isBase2: o2.isBasePoint,
-                  angle2,
-                  intersectionPoint: interPt,
-                  distToMouse,
-                });
-              }
-            }
-          }
+        if (distToMouse <= tolerance) {
+          intersectionCandidates.push({
+            guide1: g1,
+            guide2: g2,
+            intersectionPoint: interPt,
+            distToMouse,
+          });
         }
       }
     }
 
-    // Priority 1: Best 2-ray intersection
+    // Priority 1: Force Snap to Intersection if mouse is within tolerance of any virtual intersection
     if (intersectionCandidates.length > 0) {
       intersectionCandidates.sort((a, b) => a.distToMouse - b.distToMouse);
       const bestInter = intersectionCandidates[0];
 
       result.point = bestInter.intersectionPoint;
+
+      // Return BOTH guide lines that form this intersection
       result.guideLines.push({
-        anchor: bestInter.anchor1,
+        anchor: bestInter.guide1.anchor,
         targetPoint: bestInter.intersectionPoint,
-        angleDeg: bestInter.angle1,
-        type: getGuideLineType(bestInter.angle1),
+        angleDeg: bestInter.guide1.angleDeg,
+        type: bestInter.guide1.type,
       });
       result.guideLines.push({
-        anchor: bestInter.anchor2,
+        anchor: bestInter.guide2.anchor,
         targetPoint: bestInter.intersectionPoint,
-        angleDeg: bestInter.angle2,
-        type: getGuideLineType(bestInter.angle2),
+        angleDeg: bestInter.guide2.angleDeg,
+        type: bestInter.guide2.type,
       });
 
       return result;
     }
 
-    // Priority 2: Best single-ray tracking candidate from OTrack anchors
-    const otrackRayCandidates = rayCandidates.filter((r) => !r.isBasePoint);
-    if (otrackRayCandidates.length > 0) {
-      otrackRayCandidates.sort((a, b) => a.perpDist - b.perpDist);
-      const bestRay = otrackRayCandidates[0];
+    // Priority 2: Fallback strategy - Single ray distance evaluation
+    interface SingleRayCandidate {
+      guide: ActiveGuide;
+      perpDist: number;
+      projDist: number;
+      targetPoint: Point2D;
+    }
+
+    const singleRayCandidates: SingleRayCandidate[] = [];
+
+    for (const guide of activeGuides) {
+      const dx = mouseWorld.x - guide.anchor.x;
+      const dy = mouseWorld.y - guide.anchor.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (dist < 1e-3) {
+        continue;
+      }
+
+      const cosAngle = Math.cos(guide.rad);
+      const sinAngle = Math.sin(guide.rad);
+
+      const projDist = dx * cosAngle + dy * sinAngle;
+      if (projDist <= 0) {
+        continue;
+      }
+
+      const perpDist = Math.abs(dx * sinAngle - dy * cosAngle);
+
+      const cursorAngleDeg = normalizeAngle((Math.atan2(dy, dx) * 180) / Math.PI);
+      let angleDiff = Math.abs(cursorAngleDeg - guide.angleDeg);
+      if (angleDiff > 180) angleDiff = 360 - angleDiff;
+
+      if (perpDist <= tolerance && angleDiff <= 5.0) {
+        const targetPoint: Point2D = {
+          x: guide.anchor.x + projDist * cosAngle,
+          y: guide.anchor.y + projDist * sinAngle,
+        };
+
+        singleRayCandidates.push({
+          guide,
+          perpDist,
+          projDist,
+          targetPoint,
+        });
+      }
+    }
+
+    if (singleRayCandidates.length > 0) {
+      // Prioritize non-basePoint rays if available, or sort by smallest perpDist
+      const otrackCandidates = singleRayCandidates.filter((r) => !r.guide.isBasePoint);
+      const candidatesToUse = otrackCandidates.length > 0 ? otrackCandidates : singleRayCandidates;
+
+      candidatesToUse.sort((a, b) => a.perpDist - b.perpDist);
+      const bestRay = candidatesToUse[0];
 
       result.point = bestRay.targetPoint;
       result.guideLines.push({
-        anchor: bestRay.anchor,
+        anchor: bestRay.guide.anchor,
         targetPoint: bestRay.targetPoint,
-        angleDeg: bestRay.angleDeg,
-        type: getGuideLineType(bestRay.angleDeg),
+        angleDeg: bestRay.guide.angleDeg,
+        type: bestRay.guide.type,
       });
 
       return result;
@@ -348,3 +353,4 @@ export class OTrackManager {
     return result;
   }
 }
+

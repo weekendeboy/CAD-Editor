@@ -143,6 +143,7 @@ export interface CADActions {
 
   // 輔助模式與 Undo/Redo
   toggleOrtho: () => void;
+  toggleShowProfiles: () => void;
   resetDocument: () => void;
   undo: () => void;
   redo: () => void;
@@ -160,6 +161,7 @@ export interface CADState extends CADActions {
   selectedFeatureId: string | null;
   osnapEnabled: boolean;
   orthoEnabled: boolean;
+  showProfiles: boolean;
 
   // 鎖點開關與各模式勾選狀態（預設全開啟）
   osnapSettings: OsnapSettings;

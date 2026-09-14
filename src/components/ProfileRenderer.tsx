@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Point2D, SketchProfile, ProfileSegment } from '../types/cad';
+import { useCADStore } from '../store/cadStore';
 
 export interface ProfileRendererProps {
   profiles: SketchProfile[];
@@ -59,9 +60,10 @@ export const ProfileRenderer: React.FC<ProfileRendererProps> = ({
   profiles,
   worldToScreen,
 }) => {
+  const showProfiles = useCADStore((state) => state.showProfiles);
   const [hoveredProfileId, setHoveredProfileId] = useState<string | null>(null);
 
-  if (!profiles || profiles.length === 0) {
+  if (!showProfiles || !profiles || profiles.length === 0) {
     return null;
   }
 
@@ -100,8 +102,8 @@ export const ProfileRenderer: React.FC<ProfileRendererProps> = ({
             fill={isHovered ? 'rgba(56, 189, 248, 0.35)' : 'rgba(56, 189, 248, 0.18)'}
             stroke="none"
             fillRule="evenodd"
-            className="transition-colors duration-150 cursor-pointer"
-            style={{ pointerEvents: 'auto' }}
+            className="transition-colors duration-150"
+            style={{ pointerEvents: 'none' }}
             onMouseEnter={() => setHoveredProfileId(profile.id)}
             onMouseLeave={() => setHoveredProfileId(null)}
           />

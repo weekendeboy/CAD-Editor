@@ -820,6 +820,10 @@ export function solveConstraints(
     }
   }
 
+  if (maxDisp < 1e-3) {
+    converged = true;
+  }
+
   const conflictEntityIds: string[] = [];
   if (!converged) {
     const conflictSet = new Set<string>();
@@ -845,6 +849,30 @@ export function solveConstraints(
   };
 }
 
+class PointDSU {
+  parent: Map<string, string> = new Map();
+
+  find(i: string): string {
+    if (!this.parent.has(i)) {
+      this.parent.set(i, i);
+      return i;
+    }
+    const p = this.parent.get(i)!;
+    if (p === i) return i;
+    const root = this.find(p);
+    this.parent.set(i, root);
+    return root;
+  }
+
+  union(i: string, j: string) {
+    const rootI = this.find(i);
+    const rootJ = this.find(j);
+    if (rootI !== rootJ) {
+      this.parent.set(rootI, rootJ);
+    }
+  }
+}
+
 /**
  * Analyzes the degrees of freedom (DOF) of a sketch based on entities and constraints.
  */
@@ -852,96 +880,223 @@ export function analyzeSketchDOF(
   entities: CADEntity2D[],
   constraints: Constraint[]
 ): SketchDofState {
-  const constrainedIdSet = new Set<string>();
-  if (constraints) {
-    for (const c of constraints) {
-      if (c.entityIds) {
-        for (const id of c.entityIds) {
-          if (id) {
-            constrainedIdSet.add(id);
-          }
-        }
-      }
-    }
+  if (!entities || entities.length === 0) {
+    return {
+      totalDof: 0,
+      state: 'UnderDefined',
+      entityStates: {},
+    };
   }
 
-  let totalDof = 0;
-  const entityDofs: Record<string, number> = {};
-  const entityConstraints: Record<string, number> = {};
+  const dsu = new PointDSU();
 
+  // 1. Initialize all point keys for entities
+  const entityMap = new Map<string, CADEntity2D>();
   entities.forEach((entity) => {
-    let dof = 0;
+    entityMap.set(entity.id, entity);
     if (entity.type === 'line') {
-      dof = 4;
+      dsu.find(`${entity.id}:0`);
+      dsu.find(`${entity.id}:1`);
     } else if (entity.type === 'circle') {
-      dof = 3;
+      dsu.find(`${entity.id}:0`);
     } else if (entity.type === 'arc') {
-      dof = 5;
+      dsu.find(`${entity.id}:0`);
+      dsu.find(`${entity.id}:1`);
+      dsu.find(`${entity.id}:2`);
     } else if (entity.type === 'polyline') {
-      dof = entity.points.length * 2;
-    }
-    entityDofs[entity.id] = dof;
-    entityConstraints[entity.id] = 0;
-  });
-
-  let constrainedTotalDof = 0;
-  constrainedIdSet.forEach((id) => {
-    if (entityDofs[id] !== undefined) {
-      constrainedTotalDof += entityDofs[id];
+      entity.points.forEach((_, idx) => {
+        dsu.find(`${entity.id}:${idx}`);
+      });
     }
   });
 
-  if (constraints) {
-    constraints.forEach((constraint) => {
-      let consumedDof = 1;
-      if (constraint.type === 'fix' || constraint.type === 'coincident') {
-        consumedDof = 2;
-      } else if (constraint.type === 'distance_x' || constraint.type === 'distance_y') {
-        consumedDof = 1;
-      } else {
-        consumedDof = 1;
-      }
+  // 2. Process coincident constraints to merge points into clusters
+  const constrainedIdSet = new Set<string>();
+  const activeConstraints = constraints || [];
 
-      constrainedTotalDof -= consumedDof;
-
-      constraint.entityIds.forEach((id) => {
-        if (entityConstraints[id] !== undefined) {
-          entityConstraints[id] += consumedDof;
+  activeConstraints.forEach((c) => {
+    if (c.entityIds) {
+      c.entityIds.forEach((id) => {
+        if (id && entityMap.has(id)) {
+          constrainedIdSet.add(id);
         }
       });
-    });
-  }
-
-  totalDof = constrainedTotalDof;
-
-  let overallState: EntityState = 'UnderDefined';
-  if (constrainedIdSet.size > 0) {
-    if (totalDof === 0) {
-      overallState = 'FullyDefined';
-    } else if (totalDof < 0) {
-      overallState = 'OverDefined';
     }
-  }
 
-  const entityStates: Record<string, EntityState> = {};
+    if (c.type === 'coincident' && c.entityIds && c.entityIds.length >= 2) {
+      const e1 = c.entityIds[0];
+      const e2 = c.entityIds[1];
+      const idx1 = c.pointIndices?.[0] ?? 0;
+      const idx2 = c.pointIndices?.[1] ?? 0;
+
+      if (entityMap.has(e1) && entityMap.has(e2)) {
+        dsu.union(`${e1}:${idx1}`, `${e2}:${idx2}`);
+      }
+    }
+  });
+
+  // 3. Build component graph between entities & point clusters
+  const compDsu = new PointDSU();
+  entities.forEach((e) => compDsu.find(e.id));
+
   entities.forEach((entity) => {
-    if (!constrainedIdSet.has(entity.id)) {
-      entityStates[entity.id] = 'UnderDefined';
+    const pointKeys: string[] = [];
+    if (entity.type === 'line') {
+      pointKeys.push(`${entity.id}:0`, `${entity.id}:1`);
+    } else if (entity.type === 'circle') {
+      pointKeys.push(`${entity.id}:0`);
+    } else if (entity.type === 'arc') {
+      pointKeys.push(`${entity.id}:0`, `${entity.id}:1`, `${entity.id}:2`);
+    } else if (entity.type === 'polyline') {
+      entity.points.forEach((_, idx) => pointKeys.push(`${entity.id}:${idx}`));
+    }
+
+    pointKeys.forEach((pk) => {
+      const clusterRoot = `cluster:${dsu.find(pk)}`;
+      compDsu.union(entity.id, clusterRoot);
+    });
+  });
+
+  activeConstraints.forEach((c) => {
+    if (c.entityIds && c.entityIds.length >= 2) {
+      const firstId = c.entityIds[0];
+      for (let i = 1; i < c.entityIds.length; i++) {
+        const otherId = c.entityIds[i];
+        if (entityMap.has(firstId) && entityMap.has(otherId)) {
+          compDsu.union(firstId, otherId);
+        }
+      }
+    }
+  });
+
+  // 4. Group entities, point clusters, and non-coincident constraints by component
+  const components = new Map<string, {
+    entityIds: Set<string>;
+    pointClusterRoots: Set<string>;
+    nonCoincidentConstraints: Constraint[];
+  }>();
+
+  entities.forEach((entity) => {
+    const root = compDsu.find(entity.id);
+    if (!components.has(root)) {
+      components.set(root, {
+        entityIds: new Set(),
+        pointClusterRoots: new Set(),
+        nonCoincidentConstraints: [],
+      });
+    }
+    const comp = components.get(root)!;
+    comp.entityIds.add(entity.id);
+
+    const pointKeys: string[] = [];
+    if (entity.type === 'line') {
+      pointKeys.push(`${entity.id}:0`, `${entity.id}:1`);
+    } else if (entity.type === 'circle') {
+      pointKeys.push(`${entity.id}:0`);
+    } else if (entity.type === 'arc') {
+      pointKeys.push(`${entity.id}:0`, `${entity.id}:1`, `${entity.id}:2`);
+    } else if (entity.type === 'polyline') {
+      entity.points.forEach((_, idx) => pointKeys.push(`${entity.id}:${idx}`));
+    }
+    pointKeys.forEach((pk) => {
+      comp.pointClusterRoots.add(dsu.find(pk));
+    });
+  });
+
+  activeConstraints.forEach((c) => {
+    if (c.type === 'coincident') return;
+    if (!c.entityIds || c.entityIds.length === 0) return;
+
+    const firstValidId = c.entityIds.find((id) => entityMap.has(id));
+    if (firstValidId) {
+      const root = compDsu.find(firstValidId);
+      const comp = components.get(root);
+      if (comp) {
+        comp.nonCoincidentConstraints.push(c);
+      }
+    }
+  });
+
+  // 5. Calculate DOFs for each component
+  let totalDof = 0;
+  const entityStates: Record<string, EntityState> = {};
+  let overallState: EntityState = 'UnderDefined';
+  let hasOverDefined = false;
+  let allFullyDefined = true;
+  let hasConstrainedComponent = false;
+
+  components.forEach((comp) => {
+    let isConstrained = false;
+    comp.entityIds.forEach((id) => {
+      if (constrainedIdSet.has(id)) {
+        isConstrained = true;
+      }
+    });
+
+    if (!isConstrained) {
+      comp.entityIds.forEach((id) => {
+        entityStates[id] = 'UnderDefined';
+      });
       return;
     }
 
-    const baseDof = entityDofs[entity.id] || 0;
-    const removedDof = entityConstraints[entity.id] || 0;
-    const remainingDof = baseDof - removedDof;
+    hasConstrainedComponent = true;
 
-    if (overallState === 'OverDefined' || remainingDof < 0) {
-      entityStates[entity.id] = 'OverDefined';
-    } else if (remainingDof === 0) {
-      entityStates[entity.id] = 'FullyDefined';
+    let baseDof = comp.pointClusterRoots.size * 2;
+    comp.entityIds.forEach((id) => {
+      const entity = entityMap.get(id);
+      if (entity) {
+        if (entity.type === 'circle' || entity.type === 'arc') {
+          baseDof += 1;
+        }
+      }
+    });
+
+    let consumedDof = 0;
+    comp.nonCoincidentConstraints.forEach((c) => {
+      if (c.type === 'fix') {
+        consumedDof += 2;
+      } else {
+        consumedDof += 1;
+      }
+    });
+
+    const netCompDof = baseDof - consumedDof;
+    totalDof += netCompDof;
+
+    let compState: EntityState = 'UnderDefined';
+    if (netCompDof < 0) {
+      compState = 'OverDefined';
+      hasOverDefined = true;
+    } else if (netCompDof === 0) {
+      compState = 'FullyDefined';
     } else {
+      compState = 'UnderDefined';
+      allFullyDefined = false;
+    }
+
+    comp.entityIds.forEach((id) => {
+      entityStates[id] = compState;
+    });
+  });
+
+  entities.forEach((entity) => {
+    if (!entityStates[entity.id]) {
       entityStates[entity.id] = 'UnderDefined';
     }
   });
+
+  if (hasConstrainedComponent) {
+    if (hasOverDefined || totalDof < 0) {
+      overallState = 'OverDefined';
+    } else if (allFullyDefined && totalDof === 0) {
+      overallState = 'FullyDefined';
+    } else {
+      overallState = 'UnderDefined';
+    }
+  } else {
+    overallState = 'UnderDefined';
+  }
 
   return {
     totalDof,
