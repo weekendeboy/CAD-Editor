@@ -43,11 +43,36 @@ async function initWorker(wasmBuffer?: ArrayBuffer) {
 
     let activeWasmBuffer = wasmBuffer;
     if (!activeWasmBuffer) {
-      const wasmRes = await fetch(wasmUrl);
-      if (!wasmRes.ok) {
-        throw new Error(`Failed to fetch OpenCASCADE WASM from ${wasmUrl}: ${wasmRes.statusText}`);
+      try {
+        const parts = [
+          'opencascade.wasm.part0.bin',
+          'opencascade.wasm.part1.bin',
+          'opencascade.wasm.part2.bin',
+          'opencascade.wasm.part3.bin',
+        ];
+        const buffers = await Promise.all(
+          parts.map(async (part) => {
+            const res = await fetch(`${baseUrl}occ/${part}`);
+            if (!res.ok) throw new Error(`Chunk ${part} fetch failed: ${res.status}`);
+            return res.arrayBuffer();
+          })
+        );
+        const total = buffers.reduce((acc, b) => acc + b.byteLength, 0);
+        const combined = new Uint8Array(total);
+        let offset = 0;
+        for (const b of buffers) {
+          combined.set(new Uint8Array(b), offset);
+          offset += b.byteLength;
+        }
+        activeWasmBuffer = combined.buffer;
+      } catch (chunkErr) {
+        console.warn('Worker chunk fetch failed, falling back to monolithic wasm:', chunkErr);
+        const wasmRes = await fetch(wasmUrl);
+        if (!wasmRes.ok) {
+          throw new Error(`Failed to fetch OpenCASCADE WASM from ${wasmUrl}: ${wasmRes.statusText}`);
+        }
+        activeWasmBuffer = await wasmRes.arrayBuffer();
       }
-      activeWasmBuffer = await wasmRes.arrayBuffer();
     }
 
     (self as any).opencascade = {
@@ -139,6 +164,88 @@ function getEdgeDirection(
   return 'other';
 }
 
+/**
+ * 輔助函式：從圓形、起點、終點與旋向安全構建 TopoDS_Edge 圓弧段
+ * 修正 OpenCASCADE.js embind 簽章：
+ * 1. 使用 GC_MakeArcOfCircle_3(circ, p1, p2, sense)（4個參數）
+ * 2. mkArc.Value() 回傳 Handle_Geom_TrimmedCurve，透過 Handle_Geom_Curve_2 向上轉型為 Handle_Geom_Curve
+ * 3. 傳入 BRepBuilderAPI_MakeEdge_24(curveHandle) 構建邊
+ * 4. 具備 BRepBuilderAPI_MakeEdge_10 與直線連通的健壯回退機制
+ */
+function createArcEdge(
+  occ: any,
+  circle: any,
+  p1: any,
+  p2: any,
+  sense: boolean
+): any {
+  // 方法一：標準 GC_MakeArcOfCircle_3 (gp_Circ, gp_Pnt, gp_Pnt, Standard_Boolean sense)
+  if (typeof occ.GC_MakeArcOfCircle_3 === 'function') {
+    try {
+      const mkArc = new occ.GC_MakeArcOfCircle_3(circle, p1, p2, sense);
+      if (mkArc.IsDone()) {
+        const trimmed = mkArc.Value();
+        let geomCurve: any = null;
+        if (typeof occ.Handle_Geom_Curve_2 === 'function') {
+          geomCurve = new occ.Handle_Geom_Curve_2(trimmed.get());
+        }
+        const curveHandle = geomCurve || trimmed;
+        if (typeof occ.BRepBuilderAPI_MakeEdge_24 === 'function') {
+          const mkEdge = new occ.BRepBuilderAPI_MakeEdge_24(curveHandle);
+          if (mkEdge.IsDone()) {
+            const edge = mkEdge.Edge();
+            mkEdge.delete();
+            if (geomCurve) geomCurve.delete();
+            trimmed.delete();
+            mkArc.delete();
+            return edge;
+          }
+          mkEdge.delete();
+        }
+        if (geomCurve) geomCurve.delete();
+        trimmed.delete();
+      }
+      mkArc.delete();
+    } catch (arcErr) {
+      console.warn('createArcEdge via GC_MakeArcOfCircle_3 failed:', arcErr);
+    }
+  }
+
+  // 方法二：直接以圓形與起迄點構建邊（BRepBuilderAPI_MakeEdge_10）
+  if (typeof occ.BRepBuilderAPI_MakeEdge_10 === 'function') {
+    try {
+      const mkEdge = sense
+        ? new occ.BRepBuilderAPI_MakeEdge_10(circle, p1, p2)
+        : new occ.BRepBuilderAPI_MakeEdge_10(circle, p2, p1);
+      if (mkEdge.IsDone()) {
+        const edge = mkEdge.Edge();
+        mkEdge.delete();
+        return edge;
+      }
+      mkEdge.delete();
+    } catch (edgeErr) {
+      console.warn('createArcEdge via BRepBuilderAPI_MakeEdge_10 failed:', edgeErr);
+    }
+  }
+
+  // 方法三：降級回退為直線段，確保拓撲閉合不崩潰
+  try {
+    const mkEdge = (typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function')
+      ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
+      : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
+    if (mkEdge.IsDone()) {
+      const edge = mkEdge.Edge();
+      mkEdge.delete();
+      return edge;
+    }
+    mkEdge.delete();
+  } catch (lineErr) {
+    console.warn('createArcEdge fallback line failed:', lineErr);
+  }
+
+  return null;
+}
+
 function buildWireFromSegments(segments: ProfileSegment[], occ: any): any {
   const wireMaker = new occ.BRepBuilderAPI_MakeWire_1();
 
@@ -161,15 +268,11 @@ function buildWireFromSegments(segments: ProfileSegment[], occ: any): any {
       const circle = new occ.gp_Circ_2(ax2, seg.radius);
 
       const sense = seg.sweepFlag !== undefined ? seg.sweepFlag === 1 : true;
-      const mkArc = new occ.GC_MakeArcOfCircle_4(circle, p1, p2, sense);
-      if (mkArc.IsDone()) {
-        const mkEdge = new occ.BRepBuilderAPI_MakeEdge_24(mkArc.Value());
-        if (mkEdge.IsDone()) {
-          wireMaker.Add_1(mkEdge.Edge());
-        }
-        mkEdge.delete();
+      const arcEdge = createArcEdge(occ, circle, p1, p2, sense);
+      if (arcEdge) {
+        wireMaker.Add_1(arcEdge);
+        arcEdge.delete();
       }
-      mkArc.delete();
       circle.delete();
       ax2.delete();
       dir.delete();
@@ -415,15 +518,11 @@ function buildPathWire(
         const circle = new occ.gp_Circ_2(ax2, radius);
 
         const sense = seg.sweepFlag !== undefined ? (seg.sweepFlag === 1 || seg.sweepFlag === true) : true;
-        const mkArc = new occ.GC_MakeArcOfCircle_4(circle, p1, p2, sense);
-        if (mkArc.IsDone()) {
-          const mkEdge = new occ.BRepBuilderAPI_MakeEdge_24(mkArc.Value());
-          if (mkEdge.IsDone()) {
-            wireMaker.Add_1(mkEdge.Edge());
-          }
-          mkEdge.delete();
+        const arcEdge = createArcEdge(occ, circle, p1, p2, sense);
+        if (arcEdge) {
+          wireMaker.Add_1(arcEdge);
+          arcEdge.delete();
         }
-        mkArc.delete();
         circle.delete();
         ax2.delete();
         dir.delete();

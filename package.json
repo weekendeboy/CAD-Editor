@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "postinstall": "node -e \"const fs = require('fs'); const srcJs = 'node_modules/opencascade.js/dist/opencascade.wasm.js'; const srcWasm = 'node_modules/opencascade.js/dist/opencascade.wasm.wasm'; if (fs.existsSync(srcJs)) { fs.mkdirSync('public/occ', { recursive: true }); fs.copyFileSync(srcJs, 'public/occ/opencascade.wasm.js'); if (fs.existsSync(srcWasm)) fs.copyFileSync(srcWasm, 'public/occ/opencascade.wasm.wasm'); let content = fs.readFileSync('public/occ/opencascade.wasm.js', 'utf8'); content = content.replace('export default opencascade;', 'self.initOpenCascade = opencascade;'); fs.writeFileSync('public/occ/opencascade.wasm.js', content); }\""
+    "postinstall": "node scripts/prepare-occ.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

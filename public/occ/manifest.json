@@ -1,0 +1,9 @@
+{
+  "totalSize": 65864037,
+  "parts": [
+    "opencascade.wasm.part0.bin",
+    "opencascade.wasm.part1.bin",
+    "opencascade.wasm.part2.bin",
+    "opencascade.wasm.part3.bin"
+  ]
+}

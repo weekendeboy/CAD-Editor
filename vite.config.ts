@@ -2,7 +2,51 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import fs from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 import {defineConfig, Plugin} from 'vite';
+
+function occStaticPlugin(): Plugin {
+  return {
+    name: 'vite-plugin-occ-static',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (req.url && (req.url.startsWith('/occ/') || req.url.includes('/occ/'))) {
+          const rawUrl = req.url.split('?')[0].split('#')[0];
+          const occIndex = rawUrl.indexOf('/occ/');
+          const subPath = rawUrl.substring(occIndex + '/occ/'.length);
+          const safeFileName = path.basename(subPath);
+          const filePath = path.resolve(__dirname, 'public', 'occ', safeFileName);
+
+          if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+            const ext = path.extname(filePath).toLowerCase();
+            const mimeMap: Record<string, string> = {
+              '.js': 'application/javascript',
+              '.wasm': 'application/wasm',
+              '.bin': 'application/octet-stream',
+              '.json': 'application/json',
+            };
+            const contentType = mimeMap[ext] || 'application/octet-stream';
+            res.setHeader('Content-Type', contentType);
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+
+            const acceptEncoding = req.headers['accept-encoding'] || '';
+            if (ext === '.wasm' && typeof acceptEncoding === 'string' && acceptEncoding.includes('gzip')) {
+              res.setHeader('Content-Encoding', 'gzip');
+              const gzip = zlib.createGzip();
+              fs.createReadStream(filePath).pipe(gzip).pipe(res);
+              return;
+            }
+
+            fs.createReadStream(filePath).pipe(res);
+            return;
+          }
+        }
+        next();
+      });
+    },
+  };
+}
 
 // LINT.IfChange(aistudio_media_plugin)
 function aistudioMediaPlugin(): Plugin {
@@ -67,7 +111,7 @@ function aistudioMediaPlugin(): Plugin {
 export default defineConfig(() => {
   return {
     base: './',
-    plugins: [react(), tailwindcss(), aistudioMediaPlugin()],
+    plugins: [react(), tailwindcss(), aistudioMediaPlugin(), occStaticPlugin()],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

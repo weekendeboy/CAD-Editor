@@ -84,13 +84,75 @@ export class SolidEngine {
   public async init(): Promise<void> {
     if (!this.initPromise) {
       this.initPromise = (async () => {
-        // Fetch the WASM binary on the main thread to ensure proper cookie handling and origin context
-        const baseUrl = (import.meta as any).env?.BASE_URL || '/';
-        const response = await fetch(`${baseUrl}occ/opencascade.wasm.wasm`);
-        if (!response.ok) {
-          throw new Error(`Failed to fetch WASM binary: ${response.status} ${response.statusText}`);
+        // Fetch the WASM binary on the main thread to ensure proper cookie handling and origin context.
+        // We load chunked parts (<20MB each) to strictly conform to Cloud Run's 32MB HTTP response limit.
+        const getOccBaseUrl = (): string => {
+          if (typeof window !== 'undefined' && window.location) {
+            const base = (import.meta as any).env?.BASE_URL || '/';
+            try {
+              return new URL('occ/', new URL(base, window.location.href)).href;
+            } catch {
+              return '/occ/';
+            }
+          }
+          return '/occ/';
+        };
+
+        const occBaseUrl = getOccBaseUrl();
+        let wasmBuffer: ArrayBuffer | null = null;
+
+        // Step 1: Try chunked loading via manifest or standard chunks
+        try {
+          let partNames = [
+            'opencascade.wasm.part0.bin',
+            'opencascade.wasm.part1.bin',
+            'opencascade.wasm.part2.bin',
+            'opencascade.wasm.part3.bin',
+          ];
+
+          try {
+            const manifestRes = await fetch(`${occBaseUrl}manifest.json`);
+            if (manifestRes.ok) {
+              const manifest = await manifestRes.json();
+              if (Array.isArray(manifest.parts) && manifest.parts.length > 0) {
+                partNames = manifest.parts;
+              }
+            }
+          } catch {
+            // Fallback to default partNames if manifest fails
+          }
+
+          const buffers = await Promise.all(
+            partNames.map(async (partName) => {
+              const res = await fetch(`${occBaseUrl}${partName}`);
+              if (!res.ok) {
+                throw new Error(`Failed to fetch chunk ${partName}: ${res.status} ${res.statusText}`);
+              }
+              return res.arrayBuffer();
+            })
+          );
+
+          const totalSize = buffers.reduce((acc, b) => acc + b.byteLength, 0);
+          const combined = new Uint8Array(totalSize);
+          let offset = 0;
+          for (const buf of buffers) {
+            combined.set(new Uint8Array(buf), offset);
+            offset += buf.byteLength;
+          }
+          wasmBuffer = combined.buffer;
+        } catch (chunkErr) {
+          console.warn('Chunked WASM load failed, attempting monolithic fallback:', chunkErr);
+          // Step 2: Fallback to monolithic wasm fetch (served with gzip stream by Vite middleware)
+          const response = await fetch(`${occBaseUrl}opencascade.wasm.wasm`);
+          if (!response.ok) {
+            throw new Error(`Failed to fetch WASM binary: ${response.status} ${response.statusText}`);
+          }
+          wasmBuffer = await response.arrayBuffer();
         }
-        const wasmBuffer = await response.arrayBuffer();
+
+        if (!wasmBuffer || wasmBuffer.byteLength === 0) {
+          throw new Error('Failed to load valid OpenCASCADE WASM binary buffer');
+        }
 
         await this.dispatch<void>('INIT', { wasmBuffer }, [wasmBuffer]);
       })();
