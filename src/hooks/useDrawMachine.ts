@@ -932,6 +932,7 @@ export function useDrawMachine() {
       let otrackPt: Point2D | null = null;
       let otrackGuideLines: TrackGuideLine[] = [];
       let otrackPolar: PolarTrackingResult | null = null;
+      let otrackSnap: SnapResult | null = null;
 
       if (otrackManagerRef.current) {
         const targetPolarAngles = polarTrackingEnabled
@@ -941,11 +942,19 @@ export function useDrawMachine() {
           worldPt,
           15 / scale,
           targetPolarAngles,
-          drawSession.isDrawing && drawSession.startPoint ? drawSession.startPoint : undefined
+          drawSession.isDrawing && drawSession.startPoint ? drawSession.startPoint : undefined,
+          currentEntities
         );
         if (trackingRes.guideLines.length > 0) {
           otrackPt = trackingRes.point;
           otrackGuideLines = trackingRes.guideLines;
+          if (trackingRes.snapType === 'intersection' || trackingRes.isIntersection) {
+            otrackSnap = {
+              point: trackingRes.point,
+              type: 'intersection',
+              entityId: trackingRes.entityId || 'otrack-intersection',
+            };
+          }
           if (drawSession.isDrawing && drawSession.startPoint) {
             const baseGuideline = otrackGuideLines.find(
               (gl) =>
@@ -1042,6 +1051,7 @@ export function useDrawMachine() {
         trackPoint = otrackPt;
         trackGuideLines = otrackGuideLines;
         trackPolar = otrackPolar;
+        trackSnap = otrackSnap;
       } else if (orthoPt) {
         trackPoint = orthoPt;
         trackInferredConstraint = orthoInferred;
@@ -1192,7 +1202,12 @@ export function useDrawMachine() {
       setPolarExtensionIntersection(res.polarExtensionIntersection || null);
 
       setDrawSession((prev) => {
-        if (!prev.isDrawing) return prev;
+        if (!prev.isDrawing) {
+          return {
+            ...prev,
+            currentCursor: res.point,
+          };
+        }
         let updatedStartPoint = prev.startPoint;
         if (deferredTangent && currentTool === 'LINE') {
           const tangentPt = getBestTangentPoint(
@@ -2506,8 +2521,7 @@ export function useDrawMachine() {
             if (firstEnt) {
               const isFirstLineOrArc = firstEnt.type === 'line' || firstEnt.type === 'arc';
               const isSecondLineOrArc = closestEntity.type === 'line' || closestEntity.type === 'arc';
-              const isArcArc = firstEnt.type === 'arc' && closestEntity.type === 'arc';
-              if (isFirstLineOrArc && isSecondLineOrArc && !isArcArc) {
+              if (isFirstLineOrArc && isSecondLineOrArc) {
                 applyFillet(filletFirstEntityId, closestEntity.id, filletRadius);
               }
             }
@@ -2905,7 +2919,68 @@ export function useDrawMachine() {
   const submitExactLength = useCallback(
     (length: number): boolean => {
       if (!activeSketchId) return false;
-      if (!drawSession.isDrawing || !drawSession.startPoint) return false;
+      if (!drawSession.isDrawing || !drawSession.startPoint) {
+        if (
+          currentTool === 'LINE' ||
+          currentTool === 'POLYLINE' ||
+          currentTool === 'CIRCLE' ||
+          currentTool === 'RECTANGLE' ||
+          currentTool === 'POLYGON' ||
+          currentTool === 'ARC_3P' ||
+          currentTool === 'ARC' ||
+          currentTool === 'ARC_CENTER'
+        ) {
+          let anchor: Point2D | null = null;
+          let angleRad: number | null = null;
+
+          if (otrackGuideLines && otrackGuideLines.length > 0) {
+            const guide = otrackGuideLines[0];
+            anchor = guide.anchor;
+            angleRad = (guide.angleDeg * Math.PI) / 180;
+          } else if (polarTracking) {
+            anchor = polarTracking.rayStart;
+            angleRad = (polarTracking.angleDeg * Math.PI) / 180;
+          }
+
+          if (anchor && angleRad !== null && length > 0) {
+            const newStartPoint: Point2D = {
+              x: anchor.x + length * Math.cos(angleRad),
+              y: anchor.y + length * Math.sin(angleRad),
+            };
+
+            if (currentTool === 'POLYLINE') {
+              setPolySegments([]);
+              setLastTangentDir(null);
+              setPolylineWarning(null);
+              setFirstEntityId(null);
+              setLastEntityId(null);
+            }
+            if (currentTool === 'ARC_3P' || currentTool === 'ARC') {
+              setSnapP1(null);
+              setSnapP2(null);
+            }
+            if (currentTool === 'ARC_CENTER') {
+              setSnapCenter(null);
+              setSnapP1(null);
+              setSnapP2(null);
+            }
+
+            setStartSnap(null);
+            setDrawSession({
+              isDrawing: true,
+              startPoint: newStartPoint,
+              secondPoint: null,
+              currentCursor: newStartPoint,
+              step: 1,
+              inferredConstraint: null,
+            });
+
+            clearOtrackAnchors();
+            return true;
+          }
+        }
+        return false;
+      }
       if (
         currentTool !== 'LINE' &&
         currentTool !== 'POLYLINE' &&
@@ -3182,6 +3257,7 @@ export function useDrawMachine() {
       rotateBasePoint,
       rotateEntities,
       clearOtrackAnchors,
+      otrackGuideLines,
     ]
   );
 

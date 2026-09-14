@@ -1,5 +1,10 @@
-import { Point2D } from '../../types/cad';
-import { calculateRayIntersection, Ray2D } from './GeometryMath';
+import { CADEntity2D, Point2D } from '../../types/cad';
+import {
+  calculateRayIntersection,
+  Ray2D,
+  intersectLineAndCircle,
+  intersectLineAndArc,
+} from './GeometryMath';
 
 export interface TrackAnchor {
   id: string;
@@ -17,6 +22,9 @@ export interface TrackGuideLine {
 export interface OTrackResult {
   point: Point2D;
   guideLines: TrackGuideLine[];
+  snapType?: 'intersection' | 'tracking';
+  entityId?: string;
+  isIntersection?: boolean;
 }
 
 function getDistance(p1: Point2D, p2: Point2D): number {
@@ -121,18 +129,21 @@ export class OTrackManager {
 
   /**
    * Evaluates object tracking alignments (orthogonal or polar) with existing tracking anchors and base point.
-   * Performs pairwise ray intersection solving across all active guides first, then falls back to single-ray candidate matching.
+   * Performs pairwise ray intersection solving across all active guides and scene circle/arc entities first,
+   * then falls back to single-ray candidate matching.
    *
    * @param mouseWorld Current mouse position in world coordinates
    * @param tolerance Alignment snap tolerance in world units
    * @param polarAngles Optional array of target polar angles (e.g. [0, 45, 90, 135, ...]).
    * @param basePoint Optional current drawing start point to allow 2-ray intersections with drawing origin.
+   * @param entities Optional array of visible CAD entities in the active sketch to calculate ray-circle/arc intersections.
    */
   public evaluateTracking(
     mouseWorld: Point2D,
     tolerance: number,
     polarAngles?: number[],
-    basePoint?: Point2D
+    basePoint?: Point2D,
+    entities?: CADEntity2D[]
   ): OTrackResult {
     const result: OTrackResult = {
       point: { ...mouseWorld },
@@ -208,16 +219,19 @@ export class OTrackManager {
       }
     }
 
-    // 1. Pairwise Intersection Evaluation (兩兩射線求交)
+    // 1. Intersection Candidates Evaluation
     interface IntersectionCandidate {
       guide1: ActiveGuide;
-      guide2: ActiveGuide;
+      guide2?: ActiveGuide | null;
+      entityId?: string;
       intersectionPoint: Point2D;
       distToMouse: number;
+      isEntityIntersection: boolean;
     }
 
     const intersectionCandidates: IntersectionCandidate[] = [];
 
+    // 1a. Pairwise Ray-Ray Intersections (兩兩追蹤射線求交)
     for (let i = 0; i < activeGuides.length; i++) {
       for (let j = i + 1; j < activeGuides.length; j++) {
         const g1 = activeGuides[i];
@@ -254,31 +268,95 @@ export class OTrackManager {
             guide2: g2,
             intersectionPoint: interPt,
             distToMouse,
+            isEntityIntersection: false,
           });
         }
       }
     }
 
-    // Priority 1: Force Snap to Intersection if mouse is within tolerance of any virtual intersection
+    // 1b. Ray vs Scene Circle & Arc Entities Intersections (追蹤射線與場景中圓/圓弧求交)
+    if (entities && entities.length > 0) {
+      for (const guide of activeGuides) {
+        const lineDir = { x: Math.cos(guide.rad), y: Math.sin(guide.rad) };
+
+        for (const entity of entities) {
+          if (entity.visible === false) {
+            continue;
+          }
+
+          let interPts: Point2D[] = [];
+
+          if (entity.type === 'circle') {
+            interPts = intersectLineAndCircle(
+              guide.anchor,
+              lineDir,
+              entity.center,
+              entity.radius
+            );
+          } else if (entity.type === 'arc') {
+            interPts = intersectLineAndArc(guide.anchor, lineDir, entity);
+          }
+
+          for (const pt of interPts) {
+            // Verify that the intersection point projects forward along the ray from anchor
+            const t =
+              (pt.x - guide.anchor.x) * lineDir.x +
+              (pt.y - guide.anchor.y) * lineDir.y;
+
+            if (t < -1e-3) {
+              continue; // Behind the ray origin
+            }
+
+            const distToMouse = getDistance(mouseWorld, pt);
+
+            if (distToMouse <= tolerance) {
+              intersectionCandidates.push({
+                guide1: guide,
+                guide2: null,
+                entityId: entity.id,
+                intersectionPoint: pt,
+                distToMouse,
+                isEntityIntersection: true,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // Priority 1: Force Snap to Intersection if mouse is within tolerance of any intersection
     if (intersectionCandidates.length > 0) {
       intersectionCandidates.sort((a, b) => a.distToMouse - b.distToMouse);
       const bestInter = intersectionCandidates[0];
 
       result.point = bestInter.intersectionPoint;
+      result.snapType = 'intersection';
+      result.isIntersection = true;
+      result.entityId = bestInter.entityId || 'otrack-intersection';
 
-      // Return BOTH guide lines that form this intersection
-      result.guideLines.push({
-        anchor: bestInter.guide1.anchor,
-        targetPoint: bestInter.intersectionPoint,
-        angleDeg: bestInter.guide1.angleDeg,
-        type: bestInter.guide1.type,
-      });
-      result.guideLines.push({
-        anchor: bestInter.guide2.anchor,
-        targetPoint: bestInter.intersectionPoint,
-        angleDeg: bestInter.guide2.angleDeg,
-        type: bestInter.guide2.type,
-      });
+      if (bestInter.guide2) {
+        // Return BOTH guide lines that form this ray-ray intersection
+        result.guideLines.push({
+          anchor: bestInter.guide1.anchor,
+          targetPoint: bestInter.intersectionPoint,
+          angleDeg: bestInter.guide1.angleDeg,
+          type: bestInter.guide1.type,
+        });
+        result.guideLines.push({
+          anchor: bestInter.guide2.anchor,
+          targetPoint: bestInter.intersectionPoint,
+          angleDeg: bestInter.guide2.angleDeg,
+          type: bestInter.guide2.type,
+        });
+      } else {
+        // Return the guide line from anchor to entity intersection point
+        result.guideLines.push({
+          anchor: bestInter.guide1.anchor,
+          targetPoint: bestInter.intersectionPoint,
+          angleDeg: bestInter.guide1.angleDeg,
+          type: bestInter.guide1.type,
+        });
+      }
 
       return result;
     }
@@ -340,6 +418,8 @@ export class OTrackManager {
       const bestRay = candidatesToUse[0];
 
       result.point = bestRay.targetPoint;
+      result.snapType = 'tracking';
+      result.isIntersection = false;
       result.guideLines.push({
         anchor: bestRay.guide.anchor,
         targetPoint: bestRay.targetPoint,
@@ -353,4 +433,5 @@ export class OTrackManager {
     return result;
   }
 }
+
 

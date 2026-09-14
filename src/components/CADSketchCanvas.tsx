@@ -233,10 +233,11 @@ export const CADSketchCanvas: React.FC = () => {
         return;
       }
 
-      if (
-        (currentTool === 'LINE' || currentTool === 'POLYLINE' || currentTool === 'CIRCLE' || currentTool === 'POLYGON' || currentTool === 'MOVE' || currentTool === 'COPY' || currentTool === 'SCALE' || currentTool === 'ROTATE') &&
-        drawSession.isDrawing
-      ) {
+      const isDrawingActive = drawSession.isDrawing;
+      const isTrackingActive = !drawSession.isDrawing && (otrackGuideLines.length > 0 || !!polarTracking);
+      const isEligibleTool = (currentTool === 'LINE' || currentTool === 'POLYLINE' || currentTool === 'CIRCLE' || currentTool === 'POLYGON' || currentTool === 'MOVE' || currentTool === 'COPY' || currentTool === 'SCALE' || currentTool === 'ROTATE');
+
+      if (isEligibleTool && (isDrawingActive || isTrackingActive)) {
         if (/^[0-9.-]$/.test(e.key)) {
           e.preventDefault();
           setHudInputLength(e.key);
@@ -249,7 +250,7 @@ export const CADSketchCanvas: React.FC = () => {
     return () => {
       window.removeEventListener('keydown', handleGlobalKeyDown, true);
     };
-  }, [currentTool, drawSession.isDrawing, isHudFocused]);
+  }, [currentTool, drawSession.isDrawing, otrackGuideLines.length, polarTracking, isHudFocused]);
 
   // Focus input when DDE becomes active
   useEffect(() => {
@@ -1219,16 +1220,25 @@ export const CADSketchCanvas: React.FC = () => {
 
       {/* AutoCAD style Direct Distance Entry (HUD Distance Input) */}
       {((currentTool === 'LINE' || (currentTool === 'POLYLINE' && polylineMode === 'LINE') || currentTool === 'MOVE' || currentTool === 'COPY') &&
-        drawSession.isDrawing &&
-        drawSession.startPoint) && (() => {
+        ((drawSession.isDrawing && drawSession.startPoint) || (!drawSession.isDrawing && (otrackGuideLines.length > 0 || polarTracking)))) && (() => {
+          const anchorPoint = drawSession.isDrawing && drawSession.startPoint
+            ? drawSession.startPoint
+            : (otrackGuideLines.length > 0 ? otrackGuideLines[0].anchor : polarTracking?.rayStart);
+          
+          if (!anchorPoint) return null;
+
+          const targetPt = drawSession.isDrawing && drawSession.currentCursor
+            ? drawSession.currentCursor
+            : mouseWorldPos;
+
           const midPointWorld = {
-            x: (drawSession.startPoint.x + drawSession.currentCursor.x) / 2,
-            y: (drawSession.startPoint.y + drawSession.currentCursor.y) / 2,
+            x: (anchorPoint.x + targetPt.x) / 2,
+            y: (anchorPoint.y + targetPt.y) / 2,
           };
           const midPointScreen = worldToScreen(midPointWorld);
           const liveDistance = Math.hypot(
-            drawSession.currentCursor.x - drawSession.startPoint.x,
-            drawSession.currentCursor.y - drawSession.startPoint.y
+            targetPt.x - anchorPoint.x,
+            targetPt.y - anchorPoint.y
           );
           const displayValue = isHudFocused ? hudInputLength : liveDistance.toFixed(1);
 

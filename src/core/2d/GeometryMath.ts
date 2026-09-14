@@ -1,4 +1,4 @@
-import { Point2D } from '../../types/cad';
+import { Point2D, ArcEntity } from '../../types/cad';
 
 export interface ProfileSegment {
   type: 'line' | 'arc';
@@ -385,4 +385,117 @@ export function calculateRayIntersection(ray1: Ray2D, ray2: Ray2D): Point2D | nu
     y: ray1.origin.y + t1 * v1.y,
   };
 }
+
+/**
+ * 求解無限長直線與圓的 0~2 個交點（幾何投影法與代數判定）。
+ *
+ * @param linePt 直線上的一點
+ * @param lineDir 直線的方向向量 (dx, dy)
+ * @param center 圓心座標
+ * @param radius 圓半徑
+ * @returns 交點座標陣列 (Point2D[])
+ */
+export function intersectLineAndCircle(
+  linePt: Point2D,
+  lineDir: Point2D,
+  center: Point2D,
+  radius: number
+): Point2D[] {
+  const dirLen = Math.hypot(lineDir.x, lineDir.y);
+  if (dirLen < 1e-10 || radius < 1e-10) {
+    return [];
+  }
+
+  // 單位方向向量
+  const ux = lineDir.x / dirLen;
+  const uy = lineDir.y / dirLen;
+
+  // linePt 到圓心向量
+  const wx = center.x - linePt.x;
+  const wy = center.y - linePt.y;
+
+  // 投影長度 tProj
+  const tProj = wx * ux + wy * uy;
+  const pClosest: Point2D = {
+    x: linePt.x + tProj * ux,
+    y: linePt.y + tProj * uy,
+  };
+
+  // 圓心至直線距離的平方
+  const distSq =
+    (pClosest.x - center.x) * (pClosest.x - center.x) +
+    (pClosest.y - center.y) * (pClosest.y - center.y);
+  const rSq = radius * radius;
+  const eps = 1e-7;
+
+  // 距離大於半徑：無交點
+  if (distSq > rSq + eps) {
+    return [];
+  }
+
+  // 切點（單一交點）
+  if (Math.abs(distSq - rSq) <= eps) {
+    return [pClosest];
+  }
+
+  // 割線（兩個交點）
+  const h = Math.sqrt(Math.max(0, rSq - distSq));
+  const p1: Point2D = {
+    x: pClosest.x + h * ux,
+    y: pClosest.y + h * uy,
+  };
+  const p2: Point2D = {
+    x: pClosest.x - h * ux,
+    y: pClosest.y - h * uy,
+  };
+
+  if (Math.hypot(p1.x - p2.x, p1.y - p2.y) < 1e-5) {
+    return [pClosest];
+  }
+
+  return [p1, p2];
+}
+
+/**
+ * 求解無限長直線與圓弧的交點。
+ * 先求出與圓的交點，再利用 atan2 驗證交點是否落在圓弧的 startAngle 與 endAngle 的掃掠範圍內。
+ *
+ * @param linePt 直線上的一點
+ * @param lineDir 直線的方向向量 (dx, dy)
+ * @param arc 圓弧實體 (ArcEntity)
+ * @returns 交點座標陣列 (Point2D[])
+ */
+export function intersectLineAndArc(
+  linePt: Point2D,
+  lineDir: Point2D,
+  arc: ArcEntity
+): Point2D[] {
+  const circleIntersections = intersectLineAndCircle(
+    linePt,
+    lineDir,
+    arc.center,
+    arc.radius
+  );
+
+  if (circleIntersections.length === 0) {
+    return [];
+  }
+
+  // 若圓弧為完整封閉 360° 圓
+  const isFullCircle = Math.abs(arc.endAngle - arc.startAngle) >= 2 * Math.PI - 1e-5;
+  if (isFullCircle) {
+    return circleIntersections;
+  }
+
+  const validPoints: Point2D[] = [];
+  for (const pt of circleIntersections) {
+    const theta = Math.atan2(pt.y - arc.center.y, pt.x - arc.center.x);
+    if (isAngleInArcSweep(theta, arc.startAngle, arc.endAngle, false)) {
+      validPoints.push(pt);
+    }
+  }
+
+  return validPoints;
+}
+
 
