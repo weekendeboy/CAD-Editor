@@ -121,6 +121,7 @@ export interface CADActions {
   updateDimensionPosition: (dimensionId: string, newPosition: Point2D) => void;
   updateDimensionPositionLive: (dimensionId: string, newPosition: Point2D) => void;
   removeConstraint: (constraintId: string) => void;
+  removeDimension: (dimensionId: string) => void;
   updateConstraintValue: (constraintId: string, value: number) => void;
 
   // 控制點拖曳 Actions

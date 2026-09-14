@@ -12,6 +12,8 @@ interface DimensionRendererProps {
   worldToScreen: (pt: Point2D) => Point2D;
   onEditDimension: (dim: Dimension) => void;
   onStartDragDimensionText?: (dim: Dimension, e: React.PointerEvent) => void;
+  onSelectDimension?: (id: string, e: React.MouseEvent | React.PointerEvent) => void;
+  selectedDimensionIds?: string[];
 }
 
 function getEntityPoints(entity: CADEntity2D): Point2D[] {
@@ -58,11 +60,13 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
   worldToScreen,
   onEditDimension,
   onStartDragDimensionText,
+  onSelectDimension,
+  selectedDimensionIds = [],
 }) => {
   if (!dimensions || dimensions.length === 0) return null;
 
   const occupiedCircles: { x: number; y: number; r: number }[] = [];
-  function checkOverlap(c1: { x: number, y: number, r: number }) {
+  function checkOverlap(c1: { x: number; y: number; r: number }) {
     return occupiedCircles.some(c2 => Math.hypot(c1.x - c2.x, c1.y - c2.y) < (c1.r + c2.r - 2));
   }
 
@@ -71,9 +75,12 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
       {dimensions.map((dim) => {
         if (!dim.points || dim.points.length === 0) return null;
         
+        const isSelected = selectedDimensionIds.includes(dim.id);
         const isReference = !!(dim as any).isReference;
-        const strokeColor = isReference ? '#67e8f9' : '#10b981';
-        const textColor = isReference ? '#cffafe' : '#34d399';
+
+        // 色彩定義：選取狀態使用醒目的藍色
+        const strokeColor = isSelected ? '#3b82f6' : isReference ? '#67e8f9' : '#10b981';
+        const textColor = isSelected ? '#60a5fa' : isReference ? '#cffafe' : '#34d399';
 
         try {
           if (dim.type === 'linear') {
@@ -156,14 +163,70 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
             occupiedCircles.push({ x: layout.textCenter.x, y: layout.textCenter.y, r: collisionRadius });
 
             return (
-              <g key={dim.id} id={`dimension-linear-${dim.id}`}>
+              <g
+                key={dim.id}
+                id={`dimension-linear-${dim.id}`}
+                style={{ pointerEvents: 'all', cursor: 'pointer' }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSelectDimension?.(dim.id, e);
+                }}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                }}
+              >
+                {/* 隱形 Hitbox 感應層 (strokeWidth = 10, stroke = transparent) */}
+                <line
+                  x1={layout.extension1.start.x}
+                  y1={layout.extension1.start.y}
+                  x2={layout.extension1.end.x}
+                  y2={layout.extension1.end.y}
+                  stroke="transparent"
+                  strokeWidth="10"
+                />
+                <line
+                  x1={layout.extension2.start.x}
+                  y1={layout.extension2.start.y}
+                  x2={layout.extension2.end.x}
+                  y2={layout.extension2.end.y}
+                  stroke="transparent"
+                  strokeWidth="10"
+                />
+                <line
+                  x1={layout.dimensionLine.start.x}
+                  y1={layout.dimensionLine.start.y}
+                  x2={layout.dimensionLine.end.x}
+                  y2={layout.dimensionLine.end.y}
+                  stroke="transparent"
+                  strokeWidth="10"
+                />
+                {layout.leaderPoints && layout.leaderPoints.length >= 2 && (
+                  <polyline
+                    points={layout.leaderPoints.map((p) => `${p.x},${p.y}`).join(' ')}
+                    fill="none"
+                    stroke="transparent"
+                    strokeWidth="10"
+                  />
+                )}
+                {layout.landingLine && (
+                  <line
+                    x1={layout.landingLine.start.x}
+                    y1={layout.landingLine.start.y}
+                    x2={layout.landingLine.end.x}
+                    y2={layout.landingLine.end.y}
+                    stroke="transparent"
+                    strokeWidth="10"
+                  />
+                )}
+
+                {/* 可見尺寸圖元 */}
                 <line
                   x1={layout.extension1.start.x}
                   y1={layout.extension1.start.y}
                   x2={layout.extension1.end.x}
                   y2={layout.extension1.end.y}
                   stroke={strokeColor}
-                  strokeWidth="1"
+                  strokeWidth={isSelected ? '2' : '1'}
                   className="pointer-events-none"
                 />
                 <line
@@ -172,7 +235,7 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                   x2={layout.extension2.end.x}
                   y2={layout.extension2.end.y}
                   stroke={strokeColor}
-                  strokeWidth="1"
+                  strokeWidth={isSelected ? '2' : '1'}
                   className="pointer-events-none"
                 />
                 <line
@@ -181,7 +244,7 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                   x2={layout.dimensionLine.end.x}
                   y2={layout.dimensionLine.end.y}
                   stroke={strokeColor}
-                  strokeWidth="1"
+                  strokeWidth={isSelected ? '2' : '1'}
                   className="pointer-events-none"
                 />
                 {layout.leaderPoints && layout.leaderPoints.length >= 2 && (
@@ -189,7 +252,7 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                     points={layout.leaderPoints.map((p) => `${p.x},${p.y}`).join(' ')}
                     fill="none"
                     stroke={strokeColor}
-                    strokeWidth="1"
+                    strokeWidth={isSelected ? '2' : '1'}
                     className="pointer-events-none"
                   />
                 )}
@@ -200,7 +263,7 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                     x2={layout.landingLine.end.x}
                     y2={layout.landingLine.end.y}
                     stroke={strokeColor}
-                    strokeWidth="1"
+                    strokeWidth={isSelected ? '2' : '1'}
                     className="pointer-events-none"
                   />
                 )}
@@ -214,6 +277,8 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                   fill={strokeColor}
                   className="pointer-events-none"
                 />
+
+                {/* 尺寸文字群組 */}
                 <g
                   transform={`translate(${layout.textCenter.x}, ${layout.textCenter.y}) rotate(${(layout.textRotation * 180) / Math.PI})`}
                   onPointerDown={(e) => {
@@ -222,7 +287,10 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                       onStartDragDimensionText?.(dim, e);
                     }
                   }}
-                  onClick={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectDimension?.(dim.id, e);
+                  }}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
                     onEditDimension(dim);
@@ -238,7 +306,7 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                     rx="4"
                     fill="#1e293b"
                     stroke={strokeColor}
-                    strokeWidth="1"
+                    strokeWidth={isSelected ? '2' : '1'}
                     opacity="0.95"
                     className="hover:stroke-cyan-400 transition-colors"
                   />
@@ -304,12 +372,42 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
               .join(' ');
 
             return (
-              <g key={dim.id} id={`dimension-radial-${dim.id}`}>
+              <g
+                key={dim.id}
+                id={`dimension-radial-${dim.id}`}
+                style={{ pointerEvents: 'all', cursor: 'pointer' }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSelectDimension?.(dim.id, e);
+                }}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                }}
+              >
+                {/* 隱形 Hitbox 感應層 (strokeWidth = 10, stroke = transparent) */}
+                <polyline
+                  points={polylinePoints}
+                  fill="none"
+                  stroke="transparent"
+                  strokeWidth="10"
+                />
+                {layout.landingLine && (
+                  <line
+                    x1={layout.landingLine.start.x}
+                    y1={layout.landingLine.start.y}
+                    x2={layout.landingLine.end.x}
+                    y2={layout.landingLine.end.y}
+                    stroke="transparent"
+                    strokeWidth="10"
+                  />
+                )}
+
+                {/* 可見尺寸圖元 */}
                 <polyline
                   points={polylinePoints}
                   fill="none"
                   stroke={strokeColor}
-                  strokeWidth="1"
+                  strokeWidth={isSelected ? '2' : '1'}
                   className="pointer-events-none"
                 />
                 {layout.landingLine && (
@@ -319,7 +417,7 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                     x2={layout.landingLine.end.x}
                     y2={layout.landingLine.end.y}
                     stroke={strokeColor}
-                    strokeWidth="1"
+                    strokeWidth={isSelected ? '2' : '1'}
                     className="pointer-events-none"
                   />
                 )}
@@ -337,6 +435,8 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                     className="pointer-events-none"
                   />
                 )}
+
+                {/* 尺寸文字群組 */}
                 <g
                   transform={`translate(${layout.textCenter.x}, ${layout.textCenter.y}) rotate(${(layout.textRotation * 180) / Math.PI})`}
                   onPointerDown={(e) => {
@@ -345,7 +445,10 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                       onStartDragDimensionText?.(dim, e);
                     }
                   }}
-                  onClick={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectDimension?.(dim.id, e);
+                  }}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
                     onEditDimension(dim);
@@ -361,7 +464,7 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                     rx="4"
                     fill="#1e293b"
                     stroke={strokeColor}
-                    strokeWidth="1"
+                    strokeWidth={isSelected ? '2' : '1'}
                     opacity="0.95"
                     className="hover:stroke-cyan-400 transition-colors"
                   />
@@ -421,10 +524,46 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
               occupiedCircles.push({ x: layout.textCenter.x, y: layout.textCenter.y, r: collisionRadius });
 
               return (
-                <g key={dim.id} id={`dimension-angular-${dim.id}`}>
-                  <path d={layout.arcPath} fill="none" stroke={strokeColor} strokeWidth="1" className="pointer-events-none" />
-                  <polygon points={`${layout.arrow1.tip.x},${layout.arrow1.tip.y} ${layout.arrow1.wing1.x},${layout.arrow1.wing1.y} ${layout.arrow1.wing2.x},${layout.arrow1.wing2.y}`} fill={strokeColor} className="pointer-events-none" />
-                  <polygon points={`${layout.arrow2.tip.x},${layout.arrow2.tip.y} ${layout.arrow2.wing1.x},${layout.arrow2.wing1.y} ${layout.arrow2.wing2.x},${layout.arrow2.wing2.y}`} fill={strokeColor} className="pointer-events-none" />
+                <g
+                  key={dim.id}
+                  id={`dimension-angular-${dim.id}`}
+                  style={{ pointerEvents: 'all', cursor: 'pointer' }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectDimension?.(dim.id, e);
+                  }}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                  }}
+                >
+                  {/* 隱形 Hitbox 感應層 (strokeWidth = 10, stroke = transparent) */}
+                  <path
+                    d={layout.arcPath}
+                    fill="none"
+                    stroke="transparent"
+                    strokeWidth="10"
+                  />
+
+                  {/* 可見尺寸圖元 */}
+                  <path
+                    d={layout.arcPath}
+                    fill="none"
+                    stroke={strokeColor}
+                    strokeWidth={isSelected ? '2' : '1'}
+                    className="pointer-events-none"
+                  />
+                  <polygon
+                    points={`${layout.arrow1.tip.x},${layout.arrow1.tip.y} ${layout.arrow1.wing1.x},${layout.arrow1.wing1.y} ${layout.arrow1.wing2.x},${layout.arrow1.wing2.y}`}
+                    fill={strokeColor}
+                    className="pointer-events-none"
+                  />
+                  <polygon
+                    points={`${layout.arrow2.tip.x},${layout.arrow2.tip.y} ${layout.arrow2.wing1.x},${layout.arrow2.wing1.y} ${layout.arrow2.wing2.x},${layout.arrow2.wing2.y}`}
+                    fill={strokeColor}
+                    className="pointer-events-none"
+                  />
+
+                  {/* 尺寸文字群組 */}
                   <g
                     transform={`translate(${layout.textCenter.x}, ${layout.textCenter.y}) rotate(${(layout.textRotation * 180) / Math.PI})`}
                     onPointerDown={(e) => {
@@ -433,7 +572,10 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                         onStartDragDimensionText?.(dim, e);
                       }
                     }}
-                    onClick={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSelectDimension?.(dim.id, e);
+                    }}
                     onDoubleClick={(e) => {
                       e.stopPropagation();
                       onEditDimension(dim);
@@ -441,8 +583,28 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
                     style={{ cursor: 'move', pointerEvents: 'all' }}
                     className="cad-dim-text group"
                   >
-                    <rect x={-rectWidth / 2} y={-rectHeight / 2} width={rectWidth} height={rectHeight} rx="4" fill="#1e293b" stroke={strokeColor} strokeWidth="1" opacity="0.95" className="hover:stroke-cyan-400 transition-colors" />
-                    <text x={0} y={0} fill={textColor} fontSize="11" fontFamily="monospace" fontWeight="bold" textAnchor="middle" dominantBaseline="central">
+                    <rect
+                      x={-rectWidth / 2}
+                      y={-rectHeight / 2}
+                      width={rectWidth}
+                      height={rectHeight}
+                      rx="4"
+                      fill="#1e293b"
+                      stroke={strokeColor}
+                      strokeWidth={isSelected ? '2' : '1'}
+                      opacity="0.95"
+                      className="hover:stroke-cyan-400 transition-colors"
+                    />
+                    <text
+                      x={0}
+                      y={0}
+                      fill={textColor}
+                      fontSize="11"
+                      fontFamily="monospace"
+                      fontWeight="bold"
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                    >
                       {textStr}
                     </text>
                   </g>

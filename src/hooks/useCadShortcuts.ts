@@ -104,7 +104,21 @@ export function useCadShortcuts() {
           case 'backspace':
             if (selectedEntityIds.length > 0) {
               event.preventDefault();
-              selectedEntityIds.forEach((id) => removeEntity(id));
+              const activeSketch = store.document.featureTree.find(
+                (f) => f.id === store.activeSketchId && f.type === 'SKETCH'
+              ) as any;
+              const dims = activeSketch?.dimensions || [];
+              const ents = activeSketch?.entities || [];
+
+              const idsToRemove = [...selectedEntityIds];
+              idsToRemove.forEach((id) => {
+                if (dims.some((d: any) => d.id === id)) {
+                  store.removeDimension(id);
+                } else {
+                  store.removeEntity(id);
+                }
+              });
+              clearSelection();
             }
             break;
           default:

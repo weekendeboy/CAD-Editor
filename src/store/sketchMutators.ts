@@ -152,6 +152,34 @@ export function removeConstraintFromSketch(doc: CADDocument, sketchId: string, c
   };
 }
 
+export function removeDimensionFromSketch(doc: CADDocument, sketchId: string, dimensionId: string): CADDocument {
+  return {
+    ...doc,
+    featureTree: doc.featureTree.map((feature) => {
+      if (feature.id === sketchId && feature.type === 'SKETCH') {
+        const sketch = feature as SketchFeature;
+        const targetDim = sketch.dimensions?.find((d) => d.id === dimensionId);
+        if (!targetDim) return feature;
+
+        const constraintId = targetDim.constraintId;
+
+        const updatedDimensions = (sketch.dimensions || []).filter((d) => d.id !== dimensionId);
+        const updatedConstraints = constraintId
+          ? sketch.constraints.filter((c) => c.id !== constraintId)
+          : sketch.constraints;
+
+        const updatedSketch: SketchFeature = {
+          ...sketch,
+          dimensions: updatedDimensions,
+          constraints: updatedConstraints,
+        };
+        return applyConstraintsToSketch(updatedSketch);
+      }
+      return feature;
+    }),
+  };
+}
+
 export function applyFilletToSketch(
   sketch: SketchFeature,
   entityId1: string,

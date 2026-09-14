@@ -258,6 +258,57 @@ export const CADSketchCanvas: React.FC = () => {
     }
   }, [isHudFocused]);
 
+  // Keydown listener to capture Delete / Backspace for dimensions and entities
+  useEffect(() => {
+    const handleCanvasKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const store = useCADStore.getState();
+        const { selectedEntityIds, activeSketchId, document, removeDimension, removeEntity, clearSelection } = store;
+
+        if (selectedEntityIds.length > 0 && activeSketchId) {
+          const sketch = document.featureTree.find(
+            (f) => f.id === activeSketchId && f.type === 'SKETCH'
+          ) as SketchFeature | undefined;
+
+          if (sketch) {
+            const dims = sketch.dimensions || [];
+            const idsToRemove = [...selectedEntityIds];
+            let hasRemoved = false;
+
+            idsToRemove.forEach((id) => {
+              if (dims.some((d) => d.id === id)) {
+                removeDimension(id);
+                hasRemoved = true;
+              } else if (sketch.entities.some((ent) => ent.id === id)) {
+                removeEntity(id);
+                hasRemoved = true;
+              }
+            });
+
+            if (hasRemoved) {
+              e.preventDefault();
+              clearSelection();
+            }
+          }
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleCanvasKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleCanvasKeyDown);
+    };
+  }, []);
+
   const {
     pan,
     scale,
@@ -785,6 +836,8 @@ export const CADSketchCanvas: React.FC = () => {
               worldToScreen={worldToScreen}
               onEditDimension={handleEditDimension}
               onStartDragDimensionText={handleStartDragDimensionText}
+              onSelectDimension={(id, e) => handleSelectEntity(id, e as any)}
+              selectedDimensionIds={selectedEntityIds}
             />
           </g>
           {/* 疊加繪圖預覽層 */}

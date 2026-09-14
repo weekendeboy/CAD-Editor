@@ -16,6 +16,7 @@ export interface EntityRendererProps {
 /**
  * EntityRenderer
  * 純函數渲染元件，支援渲染 line, circle, arc, polyline 等 CAD 圖元。
+ * - 採用雙重渲染（Double Render）機制：外層 <g> 包覆隱形加粗的感應區（Hitbox）與可見圖元。
  * - isConstruction 為 true 時以紫色虛線渲染。
  * - 在 selectedIds 內時以亮藍色選取高亮狀態渲染。
  */
@@ -80,17 +81,19 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
     const pointerEvents = (isSelectMode && !isLocked) ? 'all' : 'none';
     const opacity = (isSelectMode && isLocked) ? 0.6 : 1.0;
 
-    const commonProps = {
-      stroke: strokeColor,
-      strokeWidth,
-      strokeDasharray,
+    // Hitbox 屬性（感應區加寬至 12px，負責接收滑鼠事件）
+    const hitboxProps = {
+      stroke: 'transparent',
       fill: 'none',
-      opacity,
+      strokeWidth: 12,
+      strokeLinecap: 'round' as const,
+      strokeLinejoin: 'round' as const,
+      opacity: 1,
       style: {
         cursor: (isSelectMode && !isLocked) ? 'pointer' : 'crosshair',
         pointerEvents: pointerEvents as React.CSSProperties['pointerEvents'],
       },
-      className: `cad-entity cad-entity-${entity.type} ${isSelected ? 'cad-entity-selected' : ''} ${isLocked ? 'cad-entity-locked' : ''}`,
+      className: `cad-entity cad-entity-hitbox cad-entity-${entity.type}`,
       onClick: (e: React.MouseEvent) => {
         if (isSelectMode && !isLocked) {
           e.stopPropagation();
@@ -101,20 +104,42 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
       },
     };
 
+    // 可見圖元屬性（純視覺展示，設定 pointerEvents: 'none'）
+    const commonProps = {
+      stroke: strokeColor,
+      strokeWidth,
+      strokeDasharray,
+      fill: 'none',
+      opacity,
+      style: {
+        pointerEvents: 'none' as React.CSSProperties['pointerEvents'],
+      },
+      className: `cad-entity cad-entity-visible cad-entity-${entity.type} ${isSelected ? 'cad-entity-selected' : ''} ${isLocked ? 'cad-entity-locked' : ''}`,
+    };
+
     switch (entity.type) {
       case 'line': {
         const start = worldToScreen(entity.start);
         const end = worldToScreen(entity.end);
         return (
-          <line
-            key={entity.id}
-            id={`cad-entity-${entity.id}`}
-            x1={start.x}
-            y1={start.y}
-            x2={end.x}
-            y2={end.y}
-            {...commonProps}
-          />
+          <g key={entity.id} id={`cad-entity-${entity.id}`} className="cad-entity-group">
+            {/* 隱形感應區 (Hitbox) */}
+            <line
+              x1={start.x}
+              y1={start.y}
+              x2={end.x}
+              y2={end.y}
+              {...hitboxProps}
+            />
+            {/* 可見細線圖形 */}
+            <line
+              x1={start.x}
+              y1={start.y}
+              x2={end.x}
+              y2={end.y}
+              {...commonProps}
+            />
+          </g>
         );
       }
 
@@ -122,14 +147,22 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
         const center = worldToScreen(entity.center);
         const screenRadius = entity.radius * scale;
         return (
-          <circle
-            key={entity.id}
-            id={`cad-entity-${entity.id}`}
-            cx={center.x}
-            cy={center.y}
-            r={screenRadius}
-            {...commonProps}
-          />
+          <g key={entity.id} id={`cad-entity-${entity.id}`} className="cad-entity-group">
+            {/* 隱形感應區 (Hitbox) */}
+            <circle
+              cx={center.x}
+              cy={center.y}
+              r={screenRadius}
+              {...hitboxProps}
+            />
+            {/* 可見細線圖形 */}
+            <circle
+              cx={center.x}
+              cy={center.y}
+              r={screenRadius}
+              {...commonProps}
+            />
+          </g>
         );
       }
 
@@ -160,12 +193,18 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
         const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
 
         return (
-          <path
-            key={entity.id}
-            id={`cad-entity-${entity.id}`}
-            d={pathData}
-            {...commonProps}
-          />
+          <g key={entity.id} id={`cad-entity-${entity.id}`} className="cad-entity-group">
+            {/* 隱形感應區 (Hitbox) */}
+            <path
+              d={pathData}
+              {...hitboxProps}
+            />
+            {/* 可見細線圖形 */}
+            <path
+              d={pathData}
+              {...commonProps}
+            />
+          </g>
         );
       }
 
@@ -174,12 +213,18 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
         if (!pathData) return null;
 
         return (
-          <path
-            key={entity.id}
-            id={`cad-entity-${entity.id}`}
-            d={pathData}
-            {...commonProps}
-          />
+          <g key={entity.id} id={`cad-entity-${entity.id}`} className="cad-entity-group">
+            {/* 隱形感應區 (Hitbox) */}
+            <path
+              d={pathData}
+              {...hitboxProps}
+            />
+            {/* 可見細線圖形 */}
+            <path
+              d={pathData}
+              {...commonProps}
+            />
+          </g>
         );
       }
 
@@ -194,4 +239,3 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
     </g>
   );
 };
-

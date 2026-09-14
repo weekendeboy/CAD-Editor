@@ -22,6 +22,7 @@ import {
   addConstraintToSketch,
   addDimensionToSketch,
   removeConstraintFromSketch,
+  removeDimensionFromSketch,
   applyConstraintsToSketch,
   applyFilletToSketch,
   applyChamferToSketch,
@@ -1178,6 +1179,15 @@ export const useCADStore = create<CADState>((set, get) => ({
     return {
       ...pushUndoState(state),
       document: removeConstraintFromSketch(state.document, state.activeSketchId, constraintId),
+    };
+  }),
+
+  removeDimension: (dimensionId) => set((state) => {
+    if (!state.activeSketchId) return state;
+    return {
+      ...pushUndoState(state),
+      document: removeDimensionFromSketch(state.document, state.activeSketchId, dimensionId),
+      selectedEntityIds: state.selectedEntityIds.filter((id) => id !== dimensionId),
     };
   }),
 

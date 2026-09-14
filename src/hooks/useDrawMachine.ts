@@ -897,14 +897,19 @@ export function useDrawMachine() {
 
   const resolveEffectiveCursor = useCallback(
     (worldPt: Point2D, scale: number = 1.0) => {
-      let snap: SnapResult | null = null;
-      let resolvedPt = worldPt;
-      let inferredConstraint: 'horizontal' | 'vertical' | null = null;
-      let activePolar: PolarTrackingResult | null = null;
-      let activeGuideLines: TrackGuideLine[] = [];
-      let polarExt: PolarExtensionIntersection | null = null;
+      // 1. 獨立計算 OSnap 實體鎖點
+      const osnapResult = osnapEnabled
+        ? findSnapPoint(
+            worldPt,
+            currentEntities,
+            scale,
+            15,
+            drawSession.startPoint || undefined,
+            osnapSettings
+          )
+        : null;
 
-      // 1. Check double intersection: Polar Tracking & Entity Extension line (Highest priority!)
+      // 2. 獨立計算 OTrack / 極軸追蹤 / 延伸線交點 / 正交 / 自動推導
       let activePolarExt: PolarExtensionIntersection | null = null;
       if (
         drawSession.isDrawing &&
@@ -916,7 +921,7 @@ export function useDrawMachine() {
           drawSession.startPoint,
           worldPt,
           currentEntities,
-          otrackManagerRef.current?.anchors || [], // 傳入 OTrack
+          otrackManagerRef.current?.anchors || [],
           polarAngleStep,
           customPolarAngles,
           scale,
@@ -924,10 +929,102 @@ export function useDrawMachine() {
         );
       }
 
-      // 如果命中了極軸與延伸線交點！
+      let otrackPt: Point2D | null = null;
+      let otrackGuideLines: TrackGuideLine[] = [];
+      let otrackPolar: PolarTrackingResult | null = null;
+
+      if (otrackManagerRef.current) {
+        const targetPolarAngles = polarTrackingEnabled
+          ? getNormalizedPolarAngles(polarAngleStep, customPolarAngles)
+          : undefined;
+        const trackingRes = otrackManagerRef.current.evaluateTracking(
+          worldPt,
+          15 / scale,
+          targetPolarAngles,
+          drawSession.isDrawing && drawSession.startPoint ? drawSession.startPoint : undefined
+        );
+        if (trackingRes.guideLines.length > 0) {
+          otrackPt = trackingRes.point;
+          otrackGuideLines = trackingRes.guideLines;
+          if (drawSession.isDrawing && drawSession.startPoint) {
+            const baseGuideline = otrackGuideLines.find(
+              (gl) =>
+                Math.abs(gl.anchor.x - drawSession.startPoint!.x) < 1e-4 &&
+                Math.abs(gl.anchor.y - drawSession.startPoint!.y) < 1e-4
+            );
+            if (baseGuideline) {
+              const rad = (baseGuideline.angleDeg * Math.PI) / 180;
+              otrackPolar = {
+                snappedPoint: trackingRes.point,
+                rayStart: drawSession.startPoint,
+                rayEnd: {
+                  x: drawSession.startPoint.x + 50000 * Math.cos(rad),
+                  y: drawSession.startPoint.y + 50000 * Math.sin(rad),
+                },
+                angleDeg: baseGuideline.angleDeg,
+              };
+            }
+          }
+        }
+      }
+
+      let orthoPt: Point2D | null = null;
+      let orthoInferred: 'horizontal' | 'vertical' | null = null;
+      if (orthoEnabled && drawSession.isDrawing && drawSession.startPoint) {
+        const dx = worldPt.x - drawSession.startPoint.x;
+        const dy = worldPt.y - drawSession.startPoint.y;
+        if (Math.abs(dx) >= Math.abs(dy)) {
+          orthoPt = { x: worldPt.x, y: drawSession.startPoint.y };
+          orthoInferred = 'horizontal';
+        } else {
+          orthoPt = { x: drawSession.startPoint.x, y: worldPt.y };
+          orthoInferred = 'vertical';
+        }
+      }
+
+      let activePolar: PolarTrackingResult | null = null;
+      if (drawSession.isDrawing && drawSession.startPoint && polarTrackingEnabled && !orthoEnabled) {
+        activePolar = calculatePolarTracking(
+          drawSession.startPoint,
+          worldPt,
+          polarAngleStep,
+          customPolarAngles
+        );
+      }
+
+      let autoInferredPt: Point2D | null = null;
+      let autoInferredConstraint: 'horizontal' | 'vertical' | null = null;
+      if (
+        drawSession.isDrawing &&
+        drawSession.startPoint &&
+        (currentTool === 'LINE' || (currentTool === 'POLYLINE' && polylineMode === 'LINE'))
+      ) {
+        const dx = worldPt.x - drawSession.startPoint.x;
+        const dy = worldPt.y - drawSession.startPoint.y;
+        const thetaRad = Math.atan2(dy, dx);
+        const thetaDeg = thetaRad * (180 / Math.PI);
+
+        if (Math.abs(thetaDeg) < 2.5 || Math.abs(Math.abs(thetaDeg) - 180) < 2.5) {
+          autoInferredPt = { x: worldPt.x, y: drawSession.startPoint.y };
+          autoInferredConstraint = 'horizontal';
+        } else if (Math.abs(Math.abs(thetaDeg) - 90) < 2.5) {
+          autoInferredPt = { x: drawSession.startPoint.x, y: worldPt.y };
+          autoInferredConstraint = 'vertical';
+        }
+      }
+
+      // 組合追蹤邏輯結果 (優先順序: activePolarExt > otrackGuideLines > orthoPt > activePolar > autoInferredPt)
+      let trackPoint: Point2D | null = null;
+      let trackGuideLines: TrackGuideLine[] = [];
+      let trackPolar: PolarTrackingResult | null = null;
+      let trackPolarExt: PolarExtensionIntersection | null = null;
+      let trackInferredConstraint: 'horizontal' | 'vertical' | null = null;
+      let trackSnap: SnapResult | null = null;
+
       if (activePolarExt) {
-        resolvedPt = activePolarExt.point;
-        activePolar = {
+        trackPoint = activePolarExt.point;
+        trackPolarExt = activePolarExt;
+        trackPolar = {
           snappedPoint: activePolarExt.point,
           rayStart: drawSession.startPoint!,
           rayEnd: {
@@ -936,112 +1033,82 @@ export function useDrawMachine() {
           },
           angleDeg: activePolarExt.polarAngleDeg,
         };
-        snap = {
+        trackSnap = {
           point: activePolarExt.point,
           type: 'intersection',
           entityId: activePolarExt.entityId,
         };
-        polarExt = activePolarExt;
-      } else {
-        // 2. 檢查 OSnap 實體鎖點
-        if (osnapEnabled) {
-          snap = findSnapPoint(
-            worldPt,
-            currentEntities,
-            scale,
-            15,
-            drawSession.startPoint || undefined,
-            osnapSettings
-          );
-        }
-
-        if (snap) {
-          resolvedPt = snap.point;
-        } else {
-          // 3. 檢查 OTrack 十字追蹤線：若 activeGuideLines.length > 0，則 resolvedPt = trackingPt
-          let trackingPt = worldPt;
-          if (otrackManagerRef.current) {
-            const targetPolarAngles = polarTrackingEnabled
-              ? getNormalizedPolarAngles(polarAngleStep, customPolarAngles)
-              : undefined;
-            const trackingRes = otrackManagerRef.current.evaluateTracking(
-              worldPt,
-              15 / scale,
-              targetPolarAngles,
-              drawSession.isDrawing && drawSession.startPoint ? drawSession.startPoint : undefined
-            );
-            trackingPt = trackingRes.point;
-            activeGuideLines = trackingRes.guideLines;
-          }
-
-          if (activeGuideLines.length > 0) {
-            resolvedPt = trackingPt;
-            if (drawSession.isDrawing && drawSession.startPoint) {
-              const baseGuideline = activeGuideLines.find(
-                (gl) =>
-                  Math.abs(gl.anchor.x - drawSession.startPoint!.x) < 1e-4 &&
-                  Math.abs(gl.anchor.y - drawSession.startPoint!.y) < 1e-4
-              );
-              if (baseGuideline) {
-                const rad = (baseGuideline.angleDeg * Math.PI) / 180;
-                activePolar = {
-                  snappedPoint: trackingPt,
-                  rayStart: drawSession.startPoint,
-                  rayEnd: {
-                    x: drawSession.startPoint.x + 50000 * Math.cos(rad),
-                    y: drawSession.startPoint.y + 50000 * Math.sin(rad),
-                  },
-                  angleDeg: baseGuideline.angleDeg,
-                };
-              }
-            }
-          } else if (orthoEnabled && drawSession.isDrawing && drawSession.startPoint) {
-            // 4. 若上述皆未命中，才檢查 orthoEnabled（執行強制的正交 X/Y 鎖定）
-            const dx = worldPt.x - drawSession.startPoint.x;
-            const dy = worldPt.y - drawSession.startPoint.y;
-            if (Math.abs(dx) >= Math.abs(dy)) {
-              resolvedPt = { x: worldPt.x, y: drawSession.startPoint.y };
-              inferredConstraint = 'horizontal';
-            } else {
-              resolvedPt = { x: drawSession.startPoint.x, y: worldPt.y };
-              inferredConstraint = 'vertical';
-            }
-          } else if (drawSession.isDrawing && drawSession.startPoint && polarTrackingEnabled) {
-            // 5. 接著檢查 polarTrackingEnabled
-            activePolar = calculatePolarTracking(
-              drawSession.startPoint,
-              worldPt,
-              polarAngleStep,
-              customPolarAngles
-            );
-            if (activePolar) {
-              resolvedPt = activePolar.snappedPoint;
-            }
-          } else {
-            // 6. 最後執行 Auto-inference（2.5度水平垂直推導）
-            if (
-              drawSession.isDrawing &&
-              drawSession.startPoint &&
-              (currentTool === 'LINE' || (currentTool === 'POLYLINE' && polylineMode === 'LINE'))
-            ) {
-              const dx = worldPt.x - drawSession.startPoint.x;
-              const dy = worldPt.y - drawSession.startPoint.y;
-              const thetaRad = Math.atan2(dy, dx);
-              const thetaDeg = thetaRad * (180 / Math.PI);
-
-              if (Math.abs(thetaDeg) < 2.5 || Math.abs(Math.abs(thetaDeg) - 180) < 2.5) {
-                resolvedPt = { x: worldPt.x, y: drawSession.startPoint.y };
-                inferredConstraint = 'horizontal';
-              } else if (Math.abs(Math.abs(thetaDeg) - 90) < 2.5) {
-                resolvedPt = { x: drawSession.startPoint.x, y: worldPt.y };
-                inferredConstraint = 'vertical';
-              }
-            }
-          }
-        }
+      } else if (otrackGuideLines.length > 0 && otrackPt) {
+        trackPoint = otrackPt;
+        trackGuideLines = otrackGuideLines;
+        trackPolar = otrackPolar;
+      } else if (orthoPt) {
+        trackPoint = orthoPt;
+        trackInferredConstraint = orthoInferred;
+      } else if (activePolar) {
+        trackPoint = activePolar.snappedPoint;
+        trackPolar = activePolar;
+      } else if (autoInferredPt) {
+        trackPoint = autoInferredPt;
+        trackInferredConstraint = autoInferredConstraint;
       }
 
-      // Snapping to first point of polyline (closing the loop)
+      // 3. 雙棲共存 Pipeline 決策機制 (Coexistence Pipeline)
+      let finalPoint = worldPt;
+      let finalSnap: SnapResult | null = null;
+      let finalGuideLines: TrackGuideLine[] = [];
+      let finalPolar: PolarTrackingResult | null = null;
+      let finalPolarExt: PolarExtensionIntersection | null = null;
+      let finalInferredConstraint: 'horizontal' | 'vertical' | null = null;
+
+      const worldThreshold = 25 / scale;
+
+      if (osnapResult && trackPoint) {
+        const dist = Math.hypot(osnapResult.point.x - trackPoint.x, osnapResult.point.y - trackPoint.y);
+        if (dist < worldThreshold) {
+          // 距離極近：端點落在追蹤線上/點上！雙棲共存：
+          // 以 osnapResult 為主（保留實體座標與 entityId 以利建立重合約束），「同時保留」追蹤導引線與極軸狀態供畫面渲染
+          finalPoint = osnapResult.point;
+          finalSnap = osnapResult;
+          finalGuideLines = trackGuideLines;
+          finalPolar = trackPolar;
+          finalPolarExt = trackPolarExt;
+          finalInferredConstraint = trackInferredConstraint;
+        } else {
+          // 距離較遠：實體鎖點磁吸力優先
+          finalPoint = osnapResult.point;
+          finalSnap = osnapResult;
+          finalGuideLines = [];
+          finalPolar = null;
+          finalPolarExt = null;
+          finalInferredConstraint = null;
+        }
+      } else if (osnapResult) {
+        // 只有 OSnap 實體鎖點
+        finalPoint = osnapResult.point;
+        finalSnap = osnapResult;
+        finalGuideLines = [];
+        finalPolar = null;
+        finalPolarExt = null;
+        finalInferredConstraint = null;
+      } else if (trackPoint) {
+        // 只有 虛擬追蹤/極軸
+        finalPoint = trackPoint;
+        finalSnap = trackSnap;
+        finalGuideLines = trackGuideLines;
+        finalPolar = trackPolar;
+        finalPolarExt = trackPolarExt;
+        finalInferredConstraint = trackInferredConstraint;
+      } else {
+        finalPoint = worldPt;
+        finalSnap = null;
+        finalGuideLines = [];
+        finalPolar = null;
+        finalPolarExt = null;
+        finalInferredConstraint = null;
+      }
+
+      // 多段線首點閉合鎖定
       if (
         currentTool === 'POLYLINE' &&
         drawSession.isDrawing &&
@@ -1068,20 +1135,20 @@ export function useDrawMachine() {
 
         const snapDist = 15 / scale;
         if (polyStartPt) {
-          const distToStart = Math.hypot(resolvedPt.x - polyStartPt.x, resolvedPt.y - polyStartPt.y);
+          const distToStart = Math.hypot(finalPoint.x - polyStartPt.x, finalPoint.y - polyStartPt.y);
           if (distToStart < snapDist) {
-            resolvedPt = polyStartPt;
+            finalPoint = polyStartPt;
           }
         }
       }
 
       return {
-        point: resolvedPt,
-        snap,
-        inferredConstraint,
-        polarTracking: activePolar,
-        otrackGuideLines: activeGuideLines,
-        polarExtensionIntersection: polarExt,
+        point: finalPoint,
+        snap: finalSnap,
+        inferredConstraint: finalInferredConstraint,
+        polarTracking: finalPolar,
+        otrackGuideLines: finalGuideLines,
+        polarExtensionIntersection: finalPolarExt,
       };
     },
     [

@@ -28,6 +28,19 @@ interface SnapCandidate {
   distance: number;
 }
 
+export const SNAP_PRIORITY: Record<string, number> = {
+  endpoint: 1,
+  center: 2,
+  midpoint: 3,
+  quadrant: 4,
+  intersection: 5,
+  perpendicular: 6,
+  tangent: 7,
+  extension: 8,
+  parallel: 9,
+  nearest: 10
+};
+
 function getDistance(p1: Point2D, p2: Point2D): number {
   const dx = p1.x - p2.x;
   const dy = p1.y - p2.y;
@@ -40,19 +53,6 @@ function getMidpoint(p1: Point2D, p2: Point2D): Point2D {
     y: (p1.y + p2.y) / 2,
   };
 }
-
-export const SNAP_PRIORITY: Record<SnapType, number> = {
-  endpoint: 1,
-  center: 2,
-  midpoint: 3,
-  quadrant: 4,
-  intersection: 5,
-  perpendicular: 6,
-  tangent: 7,
-  extension: 8,
-  parallel: 9,
-  nearest: 10,
-};
 
 export function findSnapPoint(
   mouseWorld: Point2D,
@@ -196,7 +196,6 @@ export function findSnapPoint(
 
       // Tangent snap
       if (basePoint) {
-        // 情況 A：已有 basePoint，維持現有的連心線反算精確切點
         const C = entity.center;
         const R = entity.radius;
         const dx = basePoint.x - C.x;
@@ -221,7 +220,6 @@ export function findSnapPoint(
           checkSnap(t2, 'tangent', entity.id);
         }
       } else {
-        // 情況 B：basePoint 為空（繪製第一個點），遞延切點捕捉（Deferred Tangent Snap）
         const C = entity.center;
         const R = entity.radius;
         const d = Math.hypot(mouseWorld.x - C.x, mouseWorld.y - C.y);
@@ -275,7 +273,6 @@ export function findSnapPoint(
 
       // Tangent snap
       if (basePoint) {
-        // 情況 A：已有 basePoint，維持現有的連心線反算精確切點
         const C = entity.center;
         const R = entity.radius;
         const dx = basePoint.x - C.x;
@@ -304,7 +301,6 @@ export function findSnapPoint(
           }
         }
       } else {
-        // 情況 B：basePoint 為空（繪製第一個點），遞延切點捕捉（Deferred Tangent Snap）
         const C = entity.center;
         const R = entity.radius;
         const d = Math.hypot(mouseWorld.x - C.x, mouseWorld.y - C.y);
@@ -447,15 +443,7 @@ export function findSnapPoint(
   }
 
   // Dual-sorting: priority first (smaller value = higher priority), then distance (closer = higher priority)
-  candidates.sort((a, b) => {
-    const priorityA = SNAP_PRIORITY[a.type] ?? 10;
-    const priorityB = SNAP_PRIORITY[b.type] ?? 10;
-
-    if (priorityA !== priorityB) {
-      return priorityA - priorityB;
-    }
-    return a.distance - b.distance;
-  });
+  candidates.sort((a, b) => (SNAP_PRIORITY[a.type] - SNAP_PRIORITY[b.type]) || (a.distance - b.distance));
 
   const best = candidates[0];
   return {
