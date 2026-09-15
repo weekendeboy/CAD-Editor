@@ -5,6 +5,7 @@ import { ViewportTransform } from '../core/2d/ViewportTransform';
 export interface UseViewportOptions {
   initialPan?: Point2D;
   initialScale?: number;
+  onMiddleDoubleClick?: () => void;
 }
 
 export interface CadZoomToBboxEventDetail {
@@ -15,9 +16,30 @@ export interface CadZoomToBboxEventDetail {
 export function useViewport({
   initialPan = { x: 0, y: 0 },
   initialScale = 1.0,
+  onMiddleDoubleClick,
 }: UseViewportOptions = {}) {
   const [pan, setPan] = useState<Point2D>(initialPan);
   const [scale, setScale] = useState<number>(initialScale);
+
+  const panRef = useRef<Point2D>(pan);
+  const scaleRef = useRef<number>(scale);
+  const animFrameRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    panRef.current = pan;
+  }, [pan]);
+
+  useEffect(() => {
+    scaleRef.current = scale;
+  }, [scale]);
+
+  useEffect(() => {
+    return () => {
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+      }
+    };
+  }, []);
 
   // 使用 ref 來儲存拖曳狀態，避免不必要的重新渲染
   const dragState = useRef({
@@ -25,6 +47,18 @@ export function useViewport({
     startPointer: { x: 0, y: 0 },
     startPan: { x: 0, y: 0 },
   });
+
+  // 記錄前一次滑鼠中鍵點擊時間與座標，用於偵測「滑鼠中鍵雙擊 (Middle Double Click)」
+  const lastMiddleClickRef = useRef<{ time: number; x: number; y: number }>({
+    time: 0,
+    x: 0,
+    y: 0,
+  });
+
+  const onMiddleDoubleClickRef = useRef(onMiddleDoubleClick);
+  useEffect(() => {
+    onMiddleDoubleClickRef.current = onMiddleDoubleClick;
+  }, [onMiddleDoubleClick]);
 
   const handleWheel = useCallback(
     (e: React.WheelEvent<Element>) => {
@@ -64,6 +98,29 @@ export function useViewport({
       // 按下滑鼠中鍵 (button 為 1)
       if (e.button === 1) {
         e.preventDefault();
+
+        // 偵測滑鼠中鍵雙擊 (Middle Button Double Click)
+        const now = performance.now();
+        const dt = now - lastMiddleClickRef.current.time;
+        const dist = Math.hypot(
+          e.clientX - lastMiddleClickRef.current.x,
+          e.clientY - lastMiddleClickRef.current.y
+        );
+
+        if (dt < 400 && dist < 30) {
+          // 判定為中鍵連點兩下
+          lastMiddleClickRef.current = { time: 0, x: 0, y: 0 };
+          dragState.current.isDragging = false;
+          if (onMiddleDoubleClickRef.current) {
+            onMiddleDoubleClickRef.current();
+          } else {
+            window.dispatchEvent(new CustomEvent('cad-zoom-to-fit'));
+          }
+          return;
+        }
+
+        lastMiddleClickRef.current = { time: now, x: e.clientX, y: e.clientY };
+
         dragState.current = {
           isDragging: true,
           startPointer: { x: e.clientX, y: e.clientY },
@@ -75,6 +132,14 @@ export function useViewport({
     },
     [pan]
   );
+
+  const handleAuxClick = useCallback((e: React.MouseEvent<Element>) => {
+    // 阻止中鍵點擊觸發瀏覽器原生滾動圖示 (Windows / Linux 自動捲動圖示)
+    if (e.button === 1) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }, []);
 
   const handlePointerMove = useCallback((e: React.PointerEvent<Element>) => {
     if (dragState.current.isDragging) {
@@ -123,7 +188,8 @@ export function useViewport({
       bbox: BoundingBox2D,
       arg2?: number,
       arg3?: number,
-      arg4?: number
+      arg4?: number,
+      animate: boolean = true
     ) => {
       let viewWidth = typeof window !== 'undefined' ? window.innerWidth : 1000;
       let viewHeight = typeof window !== 'undefined' ? Math.max(1, window.innerHeight - 56) : 800;
@@ -139,15 +205,50 @@ export function useViewport({
         padding = arg2;
       }
 
-      const { pan: newPan, scale: newScale } = ViewportTransform.getZoomExtents(
+      const { pan: targetPan, scale: targetScale } = ViewportTransform.getZoomExtents(
         bbox,
         viewWidth,
         viewHeight,
         padding
       );
-      const clampedScale = Math.max(0.001, Math.min(1000, newScale));
-      setPan(newPan);
-      setScale(clampedScale);
+      const clampedScale = Math.max(0.001, Math.min(1000, targetScale));
+
+      if (!animate) {
+        setPan(targetPan);
+        setScale(clampedScale);
+        return;
+      }
+
+      // 平滑緩動過渡 (Smooth Cubic Ease-out Animation)
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+      }
+
+      const startPan = { ...panRef.current };
+      const startScale = scaleRef.current;
+      const startTime = performance.now();
+      const duration = 250;
+
+      const step = (now: number) => {
+        const elapsed = now - startTime;
+        const p = Math.min(1, elapsed / duration);
+        const ease = 1 - Math.pow(1 - p, 3);
+
+        setPan({
+          x: startPan.x + (targetPan.x - startPan.x) * ease,
+          y: startPan.y + (targetPan.y - startPan.y) * ease,
+        });
+        setScale(startScale + (clampedScale - startScale) * ease);
+
+        if (p < 1) {
+          animFrameRef.current = requestAnimationFrame(step);
+        } else {
+          setPan(targetPan);
+          setScale(clampedScale);
+        }
+      };
+
+      animFrameRef.current = requestAnimationFrame(step);
     },
     []
   );
@@ -182,6 +283,8 @@ export function useViewport({
       onPointerMove: handlePointerMove,
       onPointerUp: handlePointerUp,
       onPointerCancel: handlePointerCancel,
+      onAuxClick: handleAuxClick,
     },
   };
 }
+

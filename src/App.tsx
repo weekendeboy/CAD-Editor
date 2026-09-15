@@ -21,6 +21,8 @@ import { SweepLoftModal } from './components/SweepLoftModal';
 import { exportSketchToDxf, downloadDxfFile } from './core/dxf/DxfWriter';
 import { parseDxfContent } from './core/dxf/DxfParser';
 import { solidEngine } from './core/3d/SolidEngine';
+import { createPlaneFromFaceNormal } from './core/3d/DatumPlaneEngine';
+import { computeEntitiesBoundingBox } from './core/2d/ViewportTransform';
 import {
   MousePointer2,
   Pencil,
@@ -60,55 +62,8 @@ import {
   Route,
   Layers,
   Disc,
+  BoxSelect,
 } from 'lucide-react';
-
-/**
- * 輔助函式：計算匯入圖元的包圍盒 (BoundingBox2D)
- * 若圖元清單為空，回傳預設包圍盒 { min: { x: -100, y: -100 }, max: { x: 100, y: 100 } }
- */
-function computeEntitiesBoundingBox(entities: CADEntity2D[]): BoundingBox2D {
-  if (!entities || entities.length === 0) {
-    return { min: { x: -100, y: -100 }, max: { x: 100, y: 100 } };
-  }
-
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-
-  const updateMinMax = (x: number, y: number) => {
-    if (x < minX) minX = x;
-    if (x > maxX) maxX = x;
-    if (y < minY) minY = y;
-    if (y > maxY) maxY = y;
-  };
-
-  for (const entity of entities) {
-    if (entity.type === 'line') {
-      updateMinMax(entity.start.x, entity.start.y);
-      updateMinMax(entity.end.x, entity.end.y);
-    } else if (entity.type === 'circle') {
-      updateMinMax(entity.center.x - entity.radius, entity.center.y - entity.radius);
-      updateMinMax(entity.center.x + entity.radius, entity.center.y + entity.radius);
-    } else if (entity.type === 'arc') {
-      updateMinMax(entity.center.x - entity.radius, entity.center.y - entity.radius);
-      updateMinMax(entity.center.x + entity.radius, entity.center.y + entity.radius);
-    } else if (entity.type === 'polyline') {
-      for (const pt of entity.points) {
-        updateMinMax(pt.x, pt.y);
-      }
-    }
-  }
-
-  if (minX === Infinity || minY === Infinity || maxX === -Infinity || maxY === -Infinity) {
-    return { min: { x: -100, y: -100 }, max: { x: 100, y: 100 } };
-  }
-
-  return {
-    min: { x: minX, y: minY },
-    max: { x: maxX, y: maxY },
-  };
-}
 
 export default function App() {
   // 啟用全域快速鍵
@@ -186,6 +141,12 @@ export default function App() {
     importDxfData,
     showProfiles,
     toggleShowProfiles,
+    show3DEdges,
+    toggleShow3DEdges,
+    selectedFaceInfo,
+    setSelectedFaceInfo,
+    createSketchOnFacePlane,
+    setViewMode,
   } = useCADStore();
 
   // 清除彈窗 Timer 清理機制
@@ -1115,6 +1076,37 @@ export default function App() {
               <span>Toggle Profiles</span>
             </button>
 
+            {/* Toggle 3D Edges Button */}
+            {viewMode === '3D' && (
+              <button
+                onClick={toggleShow3DEdges}
+                className={`px-3 py-1 rounded text-xs font-semibold border transition-colors shadow-sm flex items-center gap-1.5 ${
+                  show3DEdges
+                    ? 'bg-neutral-800 hover:bg-neutral-700 text-indigo-400 border-indigo-600/50'
+                    : 'bg-neutral-900 hover:bg-neutral-800 text-neutral-500 border-neutral-800'
+                }`}
+                title="3D 實體模型特徵邊線 (Toggle 3D Model Edges)"
+              >
+                <BoxSelect size={15} className={show3DEdges ? 'text-indigo-400' : 'text-neutral-500'} />
+                <span>3D 邊線: {show3DEdges ? 'ON' : 'OFF'}</span>
+              </button>
+            )}
+
+            {/* 當處於 2D 編輯模式且有 activeSketch 時，顯示當前草圖狀態與返回 3D 按鈕 */}
+            {viewMode === '2D' && activeSketch && (
+              <div className="flex items-center gap-2 bg-amber-950/80 border border-amber-500/70 px-2.5 py-1 rounded text-xs text-amber-200 shadow-sm">
+                <Pencil size={12} className="text-amber-400" />
+                <span>草圖: <span className="font-semibold text-white">{activeSketch.name}</span></span>
+                <button
+                  onClick={() => setViewMode('3D')}
+                  className="ml-1.5 px-2 py-0.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded text-[11px] transition-colors shadow cursor-pointer active:scale-95"
+                  title="完成草圖繪製並返回 3D 視角"
+                >
+                  完成並返回 3D
+                </button>
+              </div>
+            )}
+
             {/* 2D/3D Toggle Button */}
             <button
               onClick={() => useCADStore.getState().setViewMode(viewMode === '2D' ? '3D' : '2D')}
@@ -1132,6 +1124,17 @@ export default function App() {
               <Maximize size={14} className="mr-2" />
               {viewMode} Mode
             </div>
+
+            {/* 縮放至全圖按鈕 (支援點擊或雙擊滑鼠中鍵) */}
+            <button
+              onClick={() => window.dispatchEvent(new CustomEvent('cad-zoom-to-fit'))}
+              className="flex items-center gap-1.5 px-2.5 py-1 bg-neutral-900 hover:bg-neutral-800 text-neutral-200 border border-neutral-700 hover:border-amber-500/80 rounded text-xs font-semibold transition-all shadow-sm cursor-pointer group active:scale-95"
+              title="縮放至全圖範圍 (提示: 於 2D 或 3D 視窗雙擊滑鼠中鍵 / Zoom to Fit)"
+            >
+              <Maximize size={13} className="text-amber-400 group-hover:scale-110 transition-transform" />
+              <span>全圖置中</span>
+              <span className="text-[10px] text-neutral-400 font-mono hidden sm:inline">(中鍵雙擊)</span>
+            </button>
           </div>
         </div>
 
@@ -1221,6 +1224,38 @@ export default function App() {
             >
               <FlipHorizontal size={18} />
             </button>
+
+            {/* 若當前在 3D 選取了模型面，在此處顯著顯示「在此面建立草圖」按鈕 */}
+            {selectedFaceInfo && (
+              <>
+                <div className="w-px h-4 bg-neutral-700 mx-1" />
+                <div className="flex items-center gap-1.5 pl-1">
+                  <button
+                    id="btn-toolbar-create-sketch-on-face"
+                    onClick={() => {
+                      const newPlane = createPlaneFromFaceNormal(
+                        selectedFaceInfo.point,
+                        selectedFaceInfo.normal
+                      );
+                      createSketchOnFacePlane(newPlane);
+                      setSelectedFaceInfo(null);
+                    }}
+                    className="flex items-center gap-1.5 px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded transition-colors shadow cursor-pointer active:scale-95"
+                    title="在目前選取的模型面上建立 2D 草圖"
+                  >
+                    <Pencil size={13} className="stroke-[2.5]" />
+                    <span>在此面建立草圖</span>
+                  </button>
+                  <button
+                    onClick={() => setSelectedFaceInfo(null)}
+                    className="p-1 text-neutral-400 hover:text-white rounded hover:bg-neutral-800"
+                    title="取消選取面"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </header>

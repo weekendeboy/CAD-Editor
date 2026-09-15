@@ -35,6 +35,7 @@ export const FeatureTreePanel: React.FC = () => {
     createSketchOnPlane,
     activeSketchId,
     setActiveSketch,
+    setViewMode,
   } = useCADStore();
 
   const featureTree = document?.featureTree || [];
@@ -340,13 +341,14 @@ export const FeatureTreePanel: React.FC = () => {
                       onClick={(e) => {
                         e.stopPropagation();
                         setActiveSketch(feature.id);
+                        setViewMode('2D');
                       }}
                       className={`absolute right-12 top-2 p-1 rounded transition-all z-10 ${
                         activeSketchId === feature.id
                           ? 'opacity-100 text-amber-400'
                           : 'opacity-0 group-hover/tree-item:opacity-100 hover:bg-neutral-700 hover:text-white text-neutral-400'
                       }`}
-                      title={activeSketchId === feature.id ? '目前活躍草圖' : '設為活躍草圖'}
+                      title="編輯此草圖 (切換至 2D)"
                     >
                       <Pencil className="w-3.5 h-3.5" />
                     </button>

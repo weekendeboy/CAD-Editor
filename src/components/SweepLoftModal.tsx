@@ -239,7 +239,7 @@ export const SweepLoftModal: React.FC<SweepLoftModalProps> = ({
         </div>
 
         {/* 表單主體 */}
-        <form onSubmit={handleConfirm} className="p-4 space-y-4 max-h-[80vh] overflow-y-auto">
+        <form onSubmit={handleConfirm} noValidate className="p-4 space-y-4 max-h-[80vh] overflow-y-auto">
           {/* 特徵名稱 */}
           <div>
             <label className="block text-xs font-semibold text-neutral-300 mb-1">

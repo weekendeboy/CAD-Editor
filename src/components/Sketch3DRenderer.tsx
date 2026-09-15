@@ -1,0 +1,157 @@
+import React, { useMemo } from 'react';
+import * as THREE from 'three';
+import { useCADStore } from '../store/cadStore';
+import {
+  SketchFeature,
+  CustomPlane,
+  DatumFrontPlane,
+  LineEntity,
+  CircleEntity,
+  ArcEntity,
+  PolylineEntity,
+  Point2D,
+} from '../types/cad';
+import { mapPoint2DTo3D } from '../core/3d/FeaturePipelineAdapter';
+
+/**
+ * 在 3D 視圖中將草圖圖元投影至對應基準面呈現 3D 線條
+ * 讓使用者在進行 3D 建模、拉伸長料與除料時，能清晰辨識草圖輪廓與幾何位置。
+ */
+export const Sketch3DRenderer: React.FC = () => {
+  const featureTree = useCADStore((state) => state.document.featureTree);
+  const activeSketchId = useCADStore((state) => state.activeSketchId);
+  const extrudePreview = useCADStore((state) => state.extrudePreview);
+
+  const sketches = useMemo(() => {
+    return (featureTree || []).filter(
+      (f): f is SketchFeature => f.type === 'SKETCH' && !f.suppressed && f.visible !== false
+    );
+  }, [featureTree]);
+
+  // 為每個草圖建構 3D 頂點段 (每 2 頂點構成一條線段，供 lineSegments 批次渲染)
+  const sketchMeshes = useMemo(() => {
+    const results: {
+      id: string;
+      isActive: boolean;
+      isTarget: boolean;
+      geometry: THREE.BufferGeometry;
+    }[] = [];
+
+    sketches.forEach((sketch) => {
+      const plane: CustomPlane = sketch.plane || DatumFrontPlane;
+      const isActive = sketch.id === activeSketchId;
+      const isTarget = sketch.id === extrudePreview?.sketchId;
+      const segmentPoints: THREE.Vector3[] = [];
+
+      (sketch.entities || []).forEach((entity) => {
+        if (!entity.visible && entity.visible !== undefined) return;
+
+        if (entity.type === 'line') {
+          const line = entity as LineEntity;
+          const p1 = mapPoint2DTo3D(line.start, plane);
+          const p2 = mapPoint2DTo3D(line.end, plane);
+          segmentPoints.push(new THREE.Vector3(p1.x, p1.y, p1.z));
+          segmentPoints.push(new THREE.Vector3(p2.x, p2.y, p2.z));
+        } else if (entity.type === 'circle') {
+          const circle = entity as CircleEntity;
+          const segments = 48;
+          let prevPt: THREE.Vector3 | null = null;
+          for (let i = 0; i <= segments; i++) {
+            const angle = (i / segments) * Math.PI * 2;
+            const pt2d: Point2D = {
+              x: circle.center.x + circle.radius * Math.cos(angle),
+              y: circle.center.y + circle.radius * Math.sin(angle),
+            };
+            const p3 = mapPoint2DTo3D(pt2d, plane);
+            const currentPt = new THREE.Vector3(p3.x, p3.y, p3.z);
+            if (prevPt) {
+              segmentPoints.push(prevPt);
+              segmentPoints.push(currentPt);
+            }
+            prevPt = currentPt;
+          }
+        } else if (entity.type === 'arc') {
+          const arc = entity as ArcEntity;
+          const segments = 32;
+          let startAngle = arc.startAngle;
+          let endAngle = arc.endAngle;
+          // 正規化角度跨越
+          if (endAngle < startAngle) {
+            endAngle += Math.PI * 2;
+          }
+          const diff = endAngle - startAngle;
+
+          let prevPt: THREE.Vector3 | null = null;
+          for (let i = 0; i <= segments; i++) {
+            const t = i / segments;
+            const angle = startAngle + diff * t;
+            const pt2d: Point2D = {
+              x: arc.center.x + arc.radius * Math.cos(angle),
+              y: arc.center.y + arc.radius * Math.sin(angle),
+            };
+            const p3 = mapPoint2DTo3D(pt2d, plane);
+            const currentPt = new THREE.Vector3(p3.x, p3.y, p3.z);
+            if (prevPt) {
+              segmentPoints.push(prevPt);
+              segmentPoints.push(currentPt);
+            }
+            prevPt = currentPt;
+          }
+        } else if (entity.type === 'polyline') {
+          const poly = entity as PolylineEntity;
+          if (poly.points && poly.points.length >= 2) {
+            for (let i = 0; i < poly.points.length - 1; i++) {
+              const p1 = mapPoint2DTo3D(poly.points[i], plane);
+              const p2 = mapPoint2DTo3D(poly.points[i + 1], plane);
+              segmentPoints.push(new THREE.Vector3(p1.x, p1.y, p1.z));
+              segmentPoints.push(new THREE.Vector3(p2.x, p2.y, p2.z));
+            }
+            if (poly.closed && poly.points.length > 2) {
+              const p1 = mapPoint2DTo3D(poly.points[poly.points.length - 1], plane);
+              const p2 = mapPoint2DTo3D(poly.points[0], plane);
+              segmentPoints.push(new THREE.Vector3(p1.x, p1.y, p1.z));
+              segmentPoints.push(new THREE.Vector3(p2.x, p2.y, p2.z));
+            }
+          }
+        }
+      });
+
+      if (segmentPoints.length > 0) {
+        const geom = new THREE.BufferGeometry().setFromPoints(segmentPoints);
+        results.push({
+          id: sketch.id,
+          isActive,
+          isTarget,
+          geometry: geom,
+        });
+      }
+    });
+
+    return results;
+  }, [sketches, activeSketchId, extrudePreview?.sketchId]);
+
+  return (
+    <group name="sketch-3d-renderer">
+      {sketchMeshes.map(({ id, isActive, isTarget, geometry }) => {
+        let color = '#94a3b8'; // 預設草圖灰色
+        if (isTarget) {
+          color = '#fbbf24'; // 即將拉伸的目標草圖亮黃色
+        } else if (isActive) {
+          color = '#38bdf8'; // 當前作用中的草圖亮天藍色
+        }
+
+        return (
+          <lineSegments key={id} geometry={geometry}>
+            <lineBasicMaterial
+              color={color}
+              linewidth={isActive || isTarget ? 2 : 1}
+              depthTest={true}
+            />
+          </lineSegments>
+        );
+      })}
+    </group>
+  );
+};
+
+export default Sketch3DRenderer;

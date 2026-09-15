@@ -148,7 +148,7 @@ export const CircularArrayPanel: React.FC<CircularArrayPanelProps> = ({
             <input
               id="array-angle-input"
               type="number"
-              step={1}
+              step="any"
               value={arrayFillAngle}
               onChange={handleAngleChange}
               className="w-full bg-neutral-950 border border-neutral-700 focus:border-purple-500 focus:ring-1 focus:ring-purple-500 text-neutral-100 font-mono text-sm py-1.5 px-3 pr-8 rounded-md outline-none transition-colors"

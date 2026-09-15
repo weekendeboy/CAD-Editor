@@ -14,6 +14,7 @@ import { ConstraintBadgeRenderer } from './ConstraintBadgeRenderer';
 import { createFillet } from '../core/2d/FilletManager';
 import { createChamfer } from '../core/2d/ChamferManager';
 import { isAngleOnArc } from '../core/2d/IntersectionEngine';
+import { computeEntitiesBoundingBox } from '../core/2d/ViewportTransform';
 import { CircularArrayPanel } from './CircularArrayPanel';
 import { RectangularArrayPanel } from './RectangularArrayPanel';
 import { GripRenderer } from './GripRenderer';
@@ -345,13 +346,22 @@ export const CADSketchCanvas: React.FC = () => {
     };
   }, []);
 
+  const handleZoomToFitRef = useRef<() => void>(() => {});
+
   const {
     pan,
     scale,
     worldToScreen,
     screenToWorld,
+    zoomExtents,
     handlers: viewportHandlers,
-  } = useViewport({ initialPan: { x: 0, y: 0 }, initialScale: 1.0 });
+  } = useViewport({
+    initialPan: { x: 0, y: 0 },
+    initialScale: 1.0,
+    onMiddleDoubleClick: () => {
+      handleZoomToFitRef.current?.();
+    },
+  });
 
   // 清除 filletError / chamferError 當切換工具或第一條線被取消選取時
   useEffect(() => {
@@ -560,6 +570,34 @@ export const CADSketchCanvas: React.FC = () => {
       currentSolverState = sketch.solverState;
     }
   }
+
+  // 縮放至全圖居中 (Zoom to Fit / Zoom Extents)
+  const handleZoomToFit = useCallback(() => {
+    let entitiesToFit = rawEntities;
+    if (!entitiesToFit || entitiesToFit.length === 0) {
+      const allSketches =
+        (document?.featureTree?.filter((f) => f.type === 'SKETCH') as SketchFeature[]) || [];
+      entitiesToFit = allSketches.flatMap((s) => s.entities || []);
+    }
+    const bbox = computeEntitiesBoundingBox(entitiesToFit);
+    const containerW = containerRef.current?.clientWidth || window.innerWidth;
+    const containerH = containerRef.current?.clientHeight || window.innerHeight;
+    zoomExtents(bbox, containerW, containerH, 80, true);
+  }, [rawEntities, document?.featureTree, zoomExtents]);
+
+  useEffect(() => {
+    handleZoomToFitRef.current = handleZoomToFit;
+  }, [handleZoomToFit]);
+
+  useEffect(() => {
+    const onZoomFit = () => {
+      handleZoomToFit();
+    };
+    window.addEventListener('cad-zoom-to-fit', onZoomFit);
+    return () => {
+      window.removeEventListener('cad-zoom-to-fit', onZoomFit);
+    };
+  }, [handleZoomToFit]);
 
   // 3D 實體投影至當前草圖基準面的 2D 幾何資料
   const projectedSolidData = useMemo(() => {
@@ -1022,6 +1060,7 @@ export const CADSketchCanvas: React.FC = () => {
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerCancel}
+      onAuxClick={viewportHandlers.onAuxClick}
       style={{ touchAction: 'none' }}
     >
       {dimensions.width > 0 && dimensions.height > 0 && (
@@ -1968,8 +2007,8 @@ export const CADSketchCanvas: React.FC = () => {
           <div className="flex items-center bg-neutral-950 border border-neutral-700 hover:border-amber-500 focus-within:border-amber-500 rounded px-1.5 py-0.5 transition-colors">
             <input
               type="number"
-              min="0.1"
-              step="0.5"
+              min="0.001"
+              step="any"
               className="w-14 text-center text-amber-400 bg-transparent border-none focus:outline-none focus:ring-0 font-bold font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none p-0"
               value={filletRadius === 0 ? '' : filletRadius}
               onChange={(e) => {
@@ -2004,8 +2043,8 @@ export const CADSketchCanvas: React.FC = () => {
           <div className="flex items-center bg-neutral-950 border border-neutral-700 hover:border-purple-500 focus-within:border-purple-500 rounded px-1.5 py-0.5 transition-colors">
             <input
               type="number"
-              min="0.1"
-              step="0.5"
+              min="0.001"
+              step="any"
               className="w-14 text-center text-purple-400 bg-transparent border-none focus:outline-none focus:ring-0 font-bold font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none p-0"
               value={chamferDistance === 0 ? '' : chamferDistance}
               onChange={(e) => {
@@ -2040,8 +2079,8 @@ export const CADSketchCanvas: React.FC = () => {
           <div className="flex items-center bg-neutral-950 border border-neutral-700 hover:border-sky-500 focus-within:border-sky-500 rounded px-1.5 py-0.5 transition-colors">
             <input
               type="number"
-              min="0.1"
-              step="0.5"
+              min="0.001"
+              step="any"
               className="w-14 text-center text-sky-400 bg-transparent border-none focus:outline-none focus:ring-0 font-bold font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none p-0"
               value={offsetDistance === 0 ? '' : offsetDistance}
               onChange={(e) => {

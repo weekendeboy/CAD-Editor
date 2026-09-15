@@ -1,4 +1,4 @@
-import { Point2D, BoundingBox2D } from '../../types/cad';
+import { Point2D, BoundingBox2D, CADEntity2D } from '../../types/cad';
 
 export class ViewportTransform {
   public pan: Point2D;
@@ -87,4 +87,65 @@ export class ViewportTransform {
 
     return { pan, scale };
   }
+}
+
+/**
+ * 計算給定 2D 圖元集合的最小包圍盒 (Bounding Box)
+ */
+export function computeEntitiesBoundingBox(entities: CADEntity2D[]): BoundingBox2D {
+  if (!entities || entities.length === 0) {
+    return { min: { x: -100, y: -100 }, max: { x: 100, y: 100 } };
+  }
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  const updateMinMax = (x: number, y: number) => {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  };
+
+  for (const entity of entities) {
+    if (entity.type === 'line') {
+      updateMinMax(entity.start.x, entity.start.y);
+      updateMinMax(entity.end.x, entity.end.y);
+    } else if (entity.type === 'circle') {
+      updateMinMax(entity.center.x - entity.radius, entity.center.y - entity.radius);
+      updateMinMax(entity.center.x + entity.radius, entity.center.y + entity.radius);
+    } else if (entity.type === 'arc') {
+      updateMinMax(entity.center.x - entity.radius, entity.center.y - entity.radius);
+      updateMinMax(entity.center.x + entity.radius, entity.center.y + entity.radius);
+    } else if (entity.type === 'polyline') {
+      for (const pt of entity.points) {
+        updateMinMax(pt.x, pt.y);
+      }
+    } else if (entity.type === 'insert') {
+      updateMinMax(entity.position.x, entity.position.y);
+    }
+  }
+
+  if (minX === Infinity || minY === Infinity || maxX === -Infinity || maxY === -Infinity) {
+    return { min: { x: -100, y: -100 }, max: { x: 100, y: 100 } };
+  }
+
+  // 若尺寸過小或為單點，提供最小邊界確保縮放舒適
+  if (maxX - minX < 10) {
+    const midX = (minX + maxX) / 2;
+    minX = midX - 25;
+    maxX = midX + 25;
+  }
+  if (maxY - minY < 10) {
+    const midY = (minY + maxY) / 2;
+    minY = midY - 25;
+    maxY = midY + 25;
+  }
+
+  return {
+    min: { x: minX, y: minY },
+    max: { x: maxX, y: maxY },
+  };
 }

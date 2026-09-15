@@ -272,7 +272,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
         </div>
 
         {/* 表單內容主體 */}
-        <form onSubmit={handleConfirm} className="p-5 space-y-4 font-sans text-xs overflow-y-auto custom-scrollbar">
+        <form onSubmit={handleConfirm} noValidate className="p-5 space-y-4 font-sans text-xs overflow-y-auto custom-scrollbar">
           {/* 特徵名稱 */}
           <div className="space-y-1.5">
             <label className="block font-semibold text-neutral-300 flex items-center justify-between">

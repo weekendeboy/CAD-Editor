@@ -190,9 +190,14 @@ export const useCADStore = create<CADState>((set, get) => ({
   activeSketchId: 'sketch-1',
   selectedEntityIds: [],
   selectedFeatureId: null,
+  selectedFaceInfo: null,
   osnapEnabled: true,
   orthoEnabled: false,
   showProfiles: true,
+  show3DEdges: true,
+  toggleShow3DEdges: () => set((state) => ({ show3DEdges: !state.show3DEdges })),
+  extrudePreview: null,
+  setExtrudePreview: (preview) => set({ extrudePreview: preview }),
 
   // 鎖點開關與各模式勾選狀態（預設全開啟）
   osnapSettings: {
@@ -686,7 +691,11 @@ export const useCADStore = create<CADState>((set, get) => ({
     return newSketchId;
   },
 
-  createSketchOnFacePlane: (plane) => {
+  setSelectedFaceInfo: (face) => {
+    set({ selectedFaceInfo: face });
+  },
+
+  createSketchOnFacePlane: (plane: CustomPlane) => {
     const state = get();
     
     const newSketchId = crypto.randomUUID();
@@ -720,7 +729,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       ...state.document,
       featureTree: newTree,
       rollbackIndex: rollback + 1,
-      activeSketchId: newSketchId,
+      activeSketchId: newSketch.id,
       planes: {
         ...state.document.planes,
         [plane.id]: plane,
@@ -729,13 +738,31 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     set({
       ...pushUndoState(state),
-      activeSketchId: newSketchId,
-      selectedFeatureId: newSketchId,
+      activeSketchId: newSketch.id,
+      selectedFeatureId: newSketch.id,
       selectedEntityIds: [],
+      selectedFaceInfo: null,
       document: updatedDocument,
       viewMode: '2D',
       currentTool: 'SELECT',
     });
+
+    // 觸發全域視圖自適應事件，聚焦在草圖基準面原點周圍
+    if (typeof window !== 'undefined') {
+      setTimeout(() => {
+        window.dispatchEvent(
+          new CustomEvent('cad-zoom-to-bbox', {
+            detail: {
+              bbox: {
+                min: { x: -60, y: -60 },
+                max: { x: 60, y: 60 },
+              },
+              padding: 80,
+            },
+          })
+        );
+      }, 50);
+    }
 
     return newSketchId;
   },

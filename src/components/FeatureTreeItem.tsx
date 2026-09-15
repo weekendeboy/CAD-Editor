@@ -298,6 +298,23 @@ export const FeatureTreeItem: React.FC<FeatureTreeItemProps> = ({
 
           {/* 選項列表 */}
           <div className="py-1">
+            {feature.type === 'SKETCH' && !isPastRollback && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowContextMenu(false);
+                  import('../store/cadStore').then(({ useCADStore }) => {
+                    useCADStore.getState().setActiveSketch(feature.id);
+                    useCADStore.getState().setViewMode('2D');
+                  });
+                }}
+                className="w-full text-left px-3 py-1.5 flex items-center gap-2 hover:bg-neutral-800 text-amber-400 font-semibold hover:text-amber-300"
+              >
+                <Pencil className="w-3.5 h-3.5" />
+                <span>編輯草圖 (Edit Sketch)</span>
+              </button>
+            )}
+
             <button
               onClick={(e) => {
                 e.stopPropagation();

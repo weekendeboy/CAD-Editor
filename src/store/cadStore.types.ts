@@ -1,4 +1,13 @@
-import { CADDocument, CADEntity2D, CADLayer, Constraint, Point2D, ExtrudeFeature, CADFeature, CustomPlane } from '../types/cad';
+import { CADDocument, CADEntity2D, CADLayer, Constraint, Point2D, Point3D, ExtrudeFeature, CADFeature, CustomPlane } from '../types/cad';
+
+export interface ExtrudePreviewState {
+  isOpen: boolean;
+  mode: 'EXTRUDE' | 'CUT_EXTRUDE';
+  sketchId: string;
+  depth: number;
+  direction: 'normal' | 'reversed' | 'mid-plane';
+  throughAll?: boolean;
+}
 
 export type OsnapMode = 
   | 'endpoint' 
@@ -58,6 +67,7 @@ export interface CADActions {
   toggleFeatureVisibility: (featureId: string) => void;
   createSketchOnPlane: (planeId: string) => string; // 依附於指定基準面建立新草圖，回傳草圖 ID 並設為 activeSketchId
   createSketchOnFacePlane: (plane: CustomPlane) => string; // 依附於實體表面建立新草圖
+  setSelectedFaceInfo: (face: { point: Point3D; normal: Point3D } | null) => void;
 
   // 3D 特徵管理
   addExtrudeFeature: (feature: Omit<ExtrudeFeature, 'id' | 'type'>) => void;
@@ -158,6 +168,10 @@ export interface CADActions {
 
   // 上一次使用半徑 (AutoCAD 風格)
   setLastRadius: (r: number) => void;
+
+  // 3D 邊線顯示與即時拉伸預覽
+  toggleShow3DEdges: () => void;
+  setExtrudePreview: (preview: ExtrudePreviewState | null) => void;
 }
 
 export interface CADState extends CADActions {
@@ -168,9 +182,12 @@ export interface CADState extends CADActions {
   activeSketchId: string | null;
   selectedEntityIds: string[];
   selectedFeatureId: string | null;
+  selectedFaceInfo: { point: Point3D; normal: Point3D } | null;
   osnapEnabled: boolean;
   orthoEnabled: boolean;
   showProfiles: boolean;
+  show3DEdges: boolean;
+  extrudePreview: ExtrudePreviewState | null;
 
   // 鎖點開關與各模式勾選狀態（預設全開啟）
   osnapSettings: OsnapSettings;
