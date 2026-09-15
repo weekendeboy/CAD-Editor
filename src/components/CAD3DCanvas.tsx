@@ -3,6 +3,16 @@ import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Environment, Grid, Text, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { Pencil, X } from 'lucide-react';
+
+// 攔截 console.warn 來隱藏 THREE.Clock 的棄用警告，避免修改唯讀的 ES 模組導致 Crash
+const originalWarn = console.warn;
+console.warn = (...args) => {
+  if (typeof args[0] === 'string' && args[0].includes('THREE.Clock: This module has been deprecated')) {
+    return;
+  }
+  originalWarn(...args);
+};
+
 import { useCADStore } from '../store/cadStore';
 import {
   CustomPlane,

@@ -6,6 +6,7 @@ import {
   FeatureEvalOp,
 } from './SolidEngine.types';
 import type { SketchProfile } from '../../types/cad';
+import { buildFeatureEvalOps } from './FeaturePipelineAdapter';
 import SolidWorker from './SolidWorker.ts?worker';
 
 export class SolidEngine {
@@ -182,6 +183,25 @@ export class SolidEngine {
   public async exportSTL(): Promise<Uint8Array> {
     await this.init();
     return this.dispatch<Uint8Array>('EXPORT_STL');
+  }
+
+  public async exportModel(
+    format: 'STEP' | 'STL',
+    featureTree?: any[],
+    rollbackIndex?: number,
+    planes?: Record<string, any>,
+    unit: 'mm' | 'inch' = 'mm'
+  ): Promise<Uint8Array | ArrayBuffer | string> {
+    await this.init();
+    let operations: FeatureEvalOp[] | undefined = undefined;
+    if (featureTree && featureTree.length > 0) {
+      operations = buildFeatureEvalOps(featureTree, rollbackIndex ?? featureTree.length, planes ?? {});
+    }
+    return this.dispatch<Uint8Array | ArrayBuffer | string>('EXPORT_MODEL', {
+      format,
+      operations,
+      unit,
+    });
   }
 }
 

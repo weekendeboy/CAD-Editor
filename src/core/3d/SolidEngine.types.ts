@@ -103,6 +103,7 @@ export type SolidTaskType =
   | 'EVALUATE_FEATURE_TREE'
   | 'EXPORT_STEP'
   | 'EXPORT_STL'
+  | 'EXPORT_MODEL'
   | 'EXTRUDE_PROFILE';
 
 export type WorkerTaskType = SolidTaskType;
@@ -130,6 +131,16 @@ export interface ExportStepPayload {
 
 export interface ExportStlPayload {
   taskId: string;
+}
+
+export interface ExportModelPayload {
+  taskId: string;
+  format: 'STEP' | 'STL';
+  featureTree?: any[];
+  operations?: FeatureEvalOp[];
+  rollbackIndex?: number;
+  planes?: Record<string, any>;
+  unit?: 'mm' | 'inch';
 }
 
 export type SolidTaskPayload =

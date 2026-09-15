@@ -21,6 +21,7 @@ import { SweepLoftModal } from './components/SweepLoftModal';
 import { exportSketchToDxf, downloadDxfFile } from './core/dxf/DxfWriter';
 import { parseDxfContent } from './core/dxf/DxfParser';
 import { solidEngine } from './core/3d/SolidEngine';
+import { triggerFileExport, has3DSolidFeatures } from './lib/export3D';
 import { createPlaneFromFaceNormal } from './core/3d/DatumPlaneEngine';
 import { computeEntitiesBoundingBox } from './core/2d/ViewportTransform';
 import {
@@ -63,6 +64,7 @@ import {
   Layers,
   Disc,
   BoxSelect,
+  Loader2,
 } from 'lucide-react';
 
 export default function App() {
@@ -73,6 +75,7 @@ export default function App() {
   const toastTimerRef = useRef<NodeJS.Timeout | null>(null);
   const dragCounterRef = useRef<number>(0);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [exportingFormat, setExportingFormat] = useState<'STEP' | 'STL' | null>(null);
   const [importToast, setImportToast] = useState<{
     entityCount: number;
     units: string;
@@ -357,35 +360,44 @@ export default function App() {
   };
 
   const handleExportSTEP = async () => {
+    if (!has3DSolidFeatures(document.featureTree)) {
+      alert('Failed to export. Make sure to generate a 3D solid first.');
+      return;
+    }
+    setExportingFormat('STEP');
     try {
-      const unit = document.units || 'mm';
-      const stepContent = await solidEngine.exportSTEP(unit as 'mm' | 'inch');
-      const blob = new Blob([stepContent], { type: 'model/step' });
-      const url = URL.createObjectURL(blob);
-      const a = window.document.createElement('a');
-      a.href = url;
-      a.download = `${activeSketch?.name || 'model'}.step`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error(e);
-      alert('Failed to export STEP. Make sure to generate a 3D solid first.');
+      await triggerFileExport(
+        'STEP',
+        document.featureTree,
+        document.rollbackIndex,
+        document.planes,
+        document.title || 'cad_model'
+      );
+    } catch (e: any) {
+      console.error('Export STEP failed:', e);
+    } finally {
+      setExportingFormat(null);
     }
   };
 
   const handleExportSTL = async () => {
+    if (!has3DSolidFeatures(document.featureTree)) {
+      alert('Failed to export. Make sure to generate a 3D solid first.');
+      return;
+    }
+    setExportingFormat('STL');
     try {
-      const stlData = await solidEngine.exportSTL();
-      const blob = new Blob([stlData], { type: 'model/stl' });
-      const url = URL.createObjectURL(blob);
-      const a = window.document.createElement('a');
-      a.href = url;
-      a.download = `${activeSketch?.name || 'model'}.stl`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error(e);
-      alert('Failed to export STL. Make sure to generate a 3D solid first.');
+      await triggerFileExport(
+        'STL',
+        document.featureTree,
+        document.rollbackIndex,
+        document.planes,
+        document.title || 'cad_model'
+      );
+    } catch (e: any) {
+      console.error('Export STL failed:', e);
+    } finally {
+      setExportingFormat(null);
     }
   };
 
@@ -699,6 +711,17 @@ export default function App() {
                 title="Offset (O)"
               >
                 <Copy size={18} />
+              </button>
+              <button
+                onClick={() => setTool('PROJECT')}
+                className={`p-1.5 rounded transition-colors ${
+                  currentTool === 'PROJECT'
+                    ? 'bg-neutral-800 text-blue-400 border border-blue-500/40 shadow-sm'
+                    : 'text-neutral-400 hover:text-white'
+                }`}
+                title="投影幾何圖元 (Project Geometry)"
+              >
+                <BoxSelect size={18} />
               </button>
               <button
                 onClick={() => setTool('MIRROR')}
@@ -1044,20 +1067,45 @@ export default function App() {
             {viewMode === '3D' && (
               <>
                 <button
+                  type="button"
+                  disabled={exportingFormat !== null}
                   onClick={handleExportSTEP}
-                  className="bg-neutral-800 hover:bg-neutral-700 text-neutral-200 hover:text-white px-3 py-1 rounded text-xs font-semibold border border-neutral-700 transition-colors shadow-sm flex items-center gap-1.5"
+                  className="bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-neutral-200 hover:text-white px-3 py-1 rounded text-xs font-semibold border border-neutral-700 transition-colors shadow-sm flex items-center gap-1.5 cursor-pointer"
                   title="Export STEP Model"
+                  id="app-btn-export-step"
                 >
-                  <FileDown size={15} className="text-purple-400" />
-                  <span>Export STEP</span>
+                  {exportingFormat === 'STEP' ? (
+                    <>
+                      <Loader2 size={15} className="animate-spin text-purple-300" />
+                      <span>正在生成 STEP 檔案...</span>
+                    </>
+                  ) : (
+                    <>
+                      <FileDown size={15} className="text-purple-400" />
+                      <span>Export STEP</span>
+                    </>
+                  )}
                 </button>
+
                 <button
+                  type="button"
+                  disabled={exportingFormat !== null}
                   onClick={handleExportSTL}
-                  className="bg-neutral-800 hover:bg-neutral-700 text-neutral-200 hover:text-white px-3 py-1 rounded text-xs font-semibold border border-neutral-700 transition-colors shadow-sm flex items-center gap-1.5"
+                  className="bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-neutral-200 hover:text-white px-3 py-1 rounded text-xs font-semibold border border-neutral-700 transition-colors shadow-sm flex items-center gap-1.5 cursor-pointer"
                   title="Export STL Mesh"
+                  id="app-btn-export-stl"
                 >
-                  <FileDown size={15} className="text-pink-400" />
-                  <span>Export STL</span>
+                  {exportingFormat === 'STL' ? (
+                    <>
+                      <Loader2 size={15} className="animate-spin text-pink-300" />
+                      <span>正在生成 STL 檔案...</span>
+                    </>
+                  ) : (
+                    <>
+                      <FileDown size={15} className="text-pink-400" />
+                      <span>Export STL</span>
+                    </>
+                  )}
                 </button>
               </>
             )}

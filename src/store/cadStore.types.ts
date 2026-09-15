@@ -49,6 +49,7 @@ export type CADTool =
   | 'CHAMFER'
   | 'EXTEND'
   | 'OFFSET'
+  | 'PROJECT'
   | 'MIRROR'
   | 'MOVE'
   | 'COPY'

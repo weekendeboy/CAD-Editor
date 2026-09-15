@@ -1621,7 +1621,13 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         const occ = oc;
 
         const unit = req.payload?.unit || 'mm';
-        occ.Interface_Static.SetCVal('write.step.unit', unit);
+        try {
+          if (occ.Interface_Static && typeof occ.Interface_Static.SetCVal === 'function') {
+            occ.Interface_Static.SetCVal('write.step.unit', unit);
+          }
+        } catch (uErr) {
+          console.warn('Failed to set STEP unit:', uErr);
+        }
 
         const stepWriter = new occ.STEPControl_Writer_1();
         const transferResult = stepWriter.Transfer(
@@ -1629,27 +1635,49 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           occ.STEPControl_StepModelType.STEPControl_AsIs,
           true
         );
-        if (transferResult !== occ.IFSelect_ReturnStatus.IFSelect_RetDone) {
+
+        const nbRoots = typeof stepWriter.NbRootsForTransfer === 'function' ? stepWriter.NbRootsForTransfer() : 1;
+        const isTransferOk = nbRoots > 0 || transferResult === true || transferResult === 1 || (occ.IFSelect_ReturnStatus && transferResult === occ.IFSelect_ReturnStatus.IFSelect_RetDone);
+
+        if (!isTransferOk) {
           stepWriter.delete();
           throw new Error('STEP transfer failed');
         }
 
-        const fileName = `export_${Date.now()}.step`;
-        const writeResult = stepWriter.Write(fileName);
-        if (writeResult !== occ.IFSelect_ReturnStatus.IFSelect_RetDone) {
-          stepWriter.delete();
-          throw new Error('STEP write failed');
+        const fileName = `/export_${Date.now()}.step`;
+        let writeResult: any = false;
+        try {
+          writeResult = stepWriter.Write(fileName);
+        } catch (writeErr) {
+          console.error('STEP write exception:', writeErr);
+          try {
+            writeResult = stepWriter.Write(fileName.replace(/^\//, ''));
+          } catch (writeErr2) {
+            console.error('STEP write fallback exception:', writeErr2);
+          }
         }
 
         let stepContent = '';
         try {
-          stepContent = occ.FS.readFile(fileName, { encoding: 'utf8' });
-          occ.FS.unlink(fileName);
+          try {
+            stepContent = occ.FS.readFile(fileName, { encoding: 'utf8' });
+          } catch {
+            stepContent = occ.FS.readFile(fileName.replace(/^\//, ''), { encoding: 'utf8' });
+          }
+          try {
+            occ.FS.unlink(fileName);
+          } catch {
+            occ.FS.unlink(fileName.replace(/^\//, ''));
+          }
         } catch (fsErr) {
           console.warn('FS error reading STEP:', fsErr);
           throw new Error('STEP file generation failed on FS layer');
         }
         stepWriter.delete();
+
+        if (!stepContent) {
+          throw new Error('STEP file generation failed on FS layer');
+        }
 
         _self.postMessage({
           taskId: req.taskId,
@@ -1673,14 +1701,28 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         }
 
         const stlWriter = new occ.StlAPI_Writer();
-        stlWriter.ASCIIMode = false; // Binary
-        const fileName = `export_${Date.now()}.stl`;
+        try {
+          if (typeof stlWriter.SetASCIIMode === 'function') {
+            stlWriter.SetASCIIMode(false);
+          } else if ('ASCIIMode' in stlWriter) {
+            (stlWriter as any).ASCIIMode = false;
+          }
+        } catch (modeErr) {
+          console.warn('Failed to set STL binary mode:', modeErr);
+        }
+
+        const fileName = `/export_${Date.now()}.stl`;
         
         let result = false;
         try {
           result = stlWriter.Write(currentSolid, fileName);
         } catch (err) {
           console.error('StlAPI_Writer Write exception:', err);
+          try {
+            result = stlWriter.Write(currentSolid, fileName.replace(/^\//, ''));
+          } catch (err2) {
+            console.error('StlAPI_Writer Write fallback exception:', err2);
+          }
         }
 
         if (mesher) {
@@ -1694,15 +1736,23 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
         let stlContent: Uint8Array | null = null;
         try {
-          stlContent = occ.FS.readFile(fileName);
-          occ.FS.unlink(fileName);
+          try {
+            stlContent = occ.FS.readFile(fileName);
+          } catch {
+            stlContent = occ.FS.readFile(fileName.replace(/^\//, ''));
+          }
+          try {
+            occ.FS.unlink(fileName);
+          } catch {
+            occ.FS.unlink(fileName.replace(/^\//, ''));
+          }
         } catch (fsErr) {
           console.warn('FS error reading STL:', fsErr);
           throw new Error('STL file generation failed on FS layer');
         }
         stlWriter.delete();
 
-        if (stlContent) {
+        if (stlContent && stlContent.byteLength > 0) {
           _self.postMessage(
             {
               taskId: req.taskId,
@@ -1713,7 +1763,179 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             [stlContent.buffer]
           );
         } else {
-          throw new Error('STL content is empty');
+          throw new Error('STL write failed');
+        }
+        break;
+      }
+
+      case 'EXPORT_MODEL': {
+        if (!oc) throw new Error('OpenCASCADE engine not initialized');
+        const occ = oc;
+        const format = req.payload?.format || 'STEP';
+        const operations = req.payload?.operations as FeatureEvalOp[] | undefined;
+
+        // 若有傳入 operations 陣列，重新執行 featureTree 生成最新 finalShape/currentSolid
+        if (operations && Array.isArray(operations) && operations.length > 0) {
+          if (currentSolid) {
+            try { currentSolid.delete(); } catch (_) {}
+            currentSolid = null;
+          }
+
+          let accumSolid: any = null;
+          for (const op of operations) {
+            if (op.operation === 'JOIN') {
+              const featSolid = createFeatureSolid(op, occ);
+              if (featSolid && !featSolid.IsNull()) {
+                if (!accumSolid) {
+                  accumSolid = featSolid;
+                } else {
+                  const fuseMaker = new occ.BRepAlgoAPI_Fuse_3(accumSolid, featSolid);
+                  fuseMaker.Build();
+                  if (fuseMaker.IsDone()) {
+                    const fused = fuseMaker.Shape();
+                    accumSolid.delete();
+                    featSolid.delete();
+                    fuseMaker.delete();
+                    accumSolid = fused;
+                  } else {
+                    fuseMaker.delete();
+                    featSolid.delete();
+                  }
+                }
+              }
+            } else if (op.operation === 'CUT' && accumSolid) {
+              const cutSolid = createFeatureSolid(op, occ);
+              if (cutSolid && !cutSolid.IsNull()) {
+                const cutMaker = new occ.BRepAlgoAPI_Cut_3(accumSolid, cutSolid);
+                cutMaker.Build();
+                if (cutMaker.IsDone()) {
+                  const resultShape = cutMaker.Shape();
+                  accumSolid.delete();
+                  cutSolid.delete();
+                  cutMaker.delete();
+                  accumSolid = resultShape;
+                } else {
+                  cutMaker.delete();
+                  cutSolid.delete();
+                }
+              }
+            }
+          }
+          currentSolid = accumSolid;
+        }
+
+        if (!currentSolid) {
+          throw new Error('No solid available to export. Make sure to generate a 3D solid first.');
+        }
+
+        if (format === 'STEP') {
+          const unit = req.payload?.unit || 'mm';
+          try {
+            if (occ.Interface_Static && typeof occ.Interface_Static.SetCVal === 'function') {
+              occ.Interface_Static.SetCVal('write.step.unit', unit);
+            }
+          } catch (uErr) {
+            console.warn('Failed to set STEP unit:', uErr);
+          }
+
+          const stepWriter = new occ.STEPControl_Writer_1();
+          const transferResult = stepWriter.Transfer(
+            currentSolid,
+            occ.STEPControl_StepModelType.STEPControl_AsIs,
+            true
+          );
+
+          const fileName = `/export_${Date.now()}.step`;
+          try {
+            stepWriter.Write(fileName);
+          } catch {
+            stepWriter.Write(fileName.replace(/^\//, ''));
+          }
+
+          let stepContentBuffer: Uint8Array | null = null;
+          try {
+            try {
+              stepContentBuffer = occ.FS.readFile(fileName);
+            } catch {
+              stepContentBuffer = occ.FS.readFile(fileName.replace(/^\//, ''));
+            }
+            try { occ.FS.unlink(fileName); } catch {}
+          } catch (fsErr) {
+            console.warn('FS error reading STEP:', fsErr);
+            throw new Error('STEP file generation failed on FS layer');
+          }
+          stepWriter.delete();
+
+          if (stepContentBuffer && stepContentBuffer.byteLength > 0) {
+            _self.postMessage(
+              {
+                taskId: req.taskId,
+                type: req.type,
+                success: true,
+                data: stepContentBuffer,
+              } as SolidTaskResponse,
+              [stepContentBuffer.buffer]
+            );
+          } else {
+            throw new Error('STEP file generation failed on FS layer');
+          }
+        } else {
+          // STL Export
+          let mesher = null;
+          try {
+            mesher = new occ.BRepMesh_IncrementalMesh_2(currentSolid, 0.1, false, 0.5, false);
+          } catch (err) {
+            console.warn('Meshing failed before STL export:', err);
+          }
+
+          const stlWriter = new occ.StlAPI_Writer();
+          try {
+            if (typeof stlWriter.SetASCIIMode === 'function') {
+              stlWriter.SetASCIIMode(false);
+            }
+          } catch (modeErr) {
+            console.warn('Failed to set STL binary mode:', modeErr);
+          }
+
+          const fileName = `/export_${Date.now()}.stl`;
+          let result = false;
+          try {
+            result = stlWriter.Write(currentSolid, fileName);
+          } catch {
+            result = stlWriter.Write(currentSolid, fileName.replace(/^\//, ''));
+          }
+
+          if (mesher) {
+            try { mesher.delete(); } catch {}
+          }
+
+          let stlContentBuffer: Uint8Array | null = null;
+          try {
+            try {
+              stlContentBuffer = occ.FS.readFile(fileName);
+            } catch {
+              stlContentBuffer = occ.FS.readFile(fileName.replace(/^\//, ''));
+            }
+            try { occ.FS.unlink(fileName); } catch {}
+          } catch (fsErr) {
+            console.warn('FS error reading STL:', fsErr);
+            throw new Error('STL file generation failed on FS layer');
+          }
+          stlWriter.delete();
+
+          if (stlContentBuffer && stlContentBuffer.byteLength > 0) {
+            _self.postMessage(
+              {
+                taskId: req.taskId,
+                type: req.type,
+                success: true,
+                data: stlContentBuffer,
+              } as SolidTaskResponse,
+              [stlContentBuffer.buffer]
+            );
+          } else {
+            throw new Error('STL write failed');
+          }
         }
         break;
       }

@@ -75,6 +75,19 @@ function getDistanceToEntity(p: Point2D, entity: CADEntity2D): number {
   return Infinity;
 }
 
+function hitTest(p: Point2D, entities: CADEntity2D[], threshold: number): string | null {
+  let minDistance = threshold;
+  let hitId: string | null = null;
+  for (const entity of entities) {
+    const dist = getDistanceToEntity(p, entity);
+    if (dist <= minDistance) {
+      minDistance = dist;
+      hitId = entity.id;
+    }
+  }
+  return hitId;
+}
+
 export const CADSketchCanvas: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
@@ -697,6 +710,23 @@ export const CADSketchCanvas: React.FC = () => {
     };
   }, [activeSketchId, document?.featureTree, solidMesh]);
 
+  const virtualEntities = useMemo<CADEntity2D[]>(() => {
+    if (!projectedSolidData) return [];
+    return projectedSolidData.edges.map((edge, idx) => {
+      const line: import('../types/cad').LineEntity = {
+        id: `virtual_edge_${idx}`,
+        type: 'line',
+        layerId: '0',
+        visible: true,
+        locked: true,
+        isConstruction: true,
+        start: { ...edge[0] },
+        end: { ...edge[1] },
+      };
+      return line;
+    });
+  }, [projectedSolidData]);
+
   // 處理夾點熱點按壓事件 (handleGripPointerDown)
   const handleGripPointerDown = useCallback(
     (grip: EntityGrip, e: React.PointerEvent) => {
@@ -892,6 +922,29 @@ export const CADSketchCanvas: React.FC = () => {
               setChamferError('Please select a line segment.');
             }
           }
+        } else if (currentTool === 'PROJECT') {
+          const clickPt = currentSnap ? currentSnap.point : worldPt;
+          const hitThreshold = Math.max(1.5, 8 / scale);
+          const hitId = hitTest(clickPt, virtualEntities, hitThreshold);
+
+          if (hitId) {
+            const hitEntity = virtualEntities.find((e) => e.id === hitId) as import('../types/cad').LineEntity;
+            if (hitEntity && activeSketchId) {
+              const newProjectedLine: import('../types/cad').LineEntity = {
+                id: `ent_line_proj_${Date.now().toString().slice(-6)}`,
+                type: 'line',
+                layerId: useCADStore.getState().activeLayerId || '0',
+                color: '#38bdf8',
+                state: 'FullyDefined',
+                isConstruction: false,
+                visible: true,
+                locked: false,
+                start: { ...hitEntity.start },
+                end: { ...hitEntity.end }
+              };
+              useCADStore.getState().addEntity(newProjectedLine);
+            }
+          }
         } else {
           handleCanvasClick(worldPt, scale);
         }
@@ -905,6 +958,8 @@ export const CADSketchCanvas: React.FC = () => {
       handleCanvasClick,
       scale,
       currentEntities,
+      virtualEntities,
+      activeSketchId,
       currentSnap,
       filletFirstEntityId,
       filletRadius,
@@ -1085,7 +1140,7 @@ export const CADSketchCanvas: React.FC = () => {
   return (
     <div
       ref={containerRef}
-      className="relative w-full h-full overflow-hidden bg-[#1E1E1E]"
+      className={`relative w-full h-full overflow-hidden bg-[#1E1E1E] ${currentTool === 'PROJECT' ? 'cursor-copy' : ''}`}
       onWheel={viewportHandlers.onWheel}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -1109,6 +1164,7 @@ export const CADSketchCanvas: React.FC = () => {
           width={dimensions.width}
           height={dimensions.height}
           style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
+          className={currentTool === 'PROJECT' ? 'cursor-copy' : ''}
         >
           {/* 3D 實體背景投影層 (3D Solid Projection Layer) */}
           {projectedSolidData && (
