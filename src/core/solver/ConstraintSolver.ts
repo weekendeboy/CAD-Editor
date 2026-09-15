@@ -82,6 +82,23 @@ function setEntityPoint(
   return entity;
 }
 
+function resolvePoint(
+  id: string,
+  ptIdx: number,
+  workingEntities: Record<string, CADEntity2D>,
+  fixedPoints: Set<string>
+): { pt: Point2D; isFixed: boolean; isOrigin: boolean } | null {
+  if (id === 'origin') {
+    return { pt: { x: 0, y: 0 }, isFixed: true, isOrigin: true };
+  }
+  const ent = workingEntities[id];
+  if (!ent) return null;
+  const pt = getEntityPoint(ent, ptIdx);
+  if (!pt) return null;
+  const isFixed = fixedPoints.has(`${id}_${ptIdx}`);
+  return { pt, isFixed, isOrigin: false };
+}
+
 export function solveConstraints(
   entities: CADEntity2D[],
   constraints: Constraint[]
@@ -100,10 +117,6 @@ export function solveConstraints(
   for (const ent of entities) {
     workingEntities[ent.id] = JSON.parse(JSON.stringify(ent));
   }
-  workingEntities['origin'] = {
-    id: 'origin',
-    type: 'point',
-  } as any;
 
   const fixedPoints = new Set<string>();
   fixedPoints.add('origin_0');
@@ -129,18 +142,17 @@ export function solveConstraints(
       if (c.type === 'coincident' && c.entityIds.length >= 2) {
         const idA = c.entityIds[0];
         const idB = c.entityIds[1];
-        const entA = workingEntities[idA];
-        const entB = workingEntities[idB];
-        if (!entA || !entB) continue;
-
         const idxA = c.pointIndices?.[0] ?? 0;
         const idxB = c.pointIndices?.[1] ?? 0;
-        const ptA = getEntityPoint(entA, idxA);
-        const ptB = getEntityPoint(entB, idxB);
-        if (!ptA || !ptB) continue;
 
-        const isFixedA = fixedPoints.has(`${idA}_${idxA}`);
-        const isFixedB = fixedPoints.has(`${idB}_${idxB}`);
+        const ptAData = resolvePoint(idA, idxA, workingEntities, fixedPoints);
+        const ptBData = resolvePoint(idB, idxB, workingEntities, fixedPoints);
+        if (!ptAData || !ptBData) continue;
+
+        const ptA = ptAData.pt;
+        const ptB = ptBData.pt;
+        const isFixedA = ptAData.isFixed;
+        const isFixedB = ptBData.isFixed;
 
         const dx = ptB.x - ptA.x;
         const dy = ptB.y - ptA.y;
@@ -149,56 +161,114 @@ export function solveConstraints(
 
         if (dist > SOLVER_TOLERANCE) {
           if (isFixedA && !isFixedB) {
-            workingEntities[idB] = setEntityPoint(entB, idxB, ptA);
+            if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, ptA);
           } else if (!isFixedA && isFixedB) {
-            workingEntities[idA] = setEntityPoint(entA, idxA, ptB);
+            if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, ptB);
           } else if (!isFixedA && !isFixedB) {
             const mid = { x: (ptA.x + ptB.x) / 2, y: (ptA.y + ptB.y) / 2 };
-            workingEntities[idA] = setEntityPoint(entA, idxA, mid);
-            workingEntities[idB] = setEntityPoint(entB, idxB, mid);
+            if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, mid);
+            if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, mid);
           }
         }
-      } else if (c.type === 'horizontal' && c.entityIds.length >= 1) {
-        const ent = workingEntities[c.entityIds[0]];
-        if (ent && ent.type === 'line') {
-          const dy = ent.end.y - ent.start.y;
-          maxDisp = Math.max(maxDisp, Math.abs(dy));
-          if (Math.abs(dy) > SOLVER_TOLERANCE) {
-            const isFixed0 = fixedPoints.has(`${ent.id}_0`);
-            const isFixed1 = fixedPoints.has(`${ent.id}_1`);
-            if (isFixed0 && !isFixed1) {
-              workingEntities[ent.id] = { ...ent, end: { ...ent.end, y: ent.start.y } };
-            } else if (!isFixed0 && isFixed1) {
-              workingEntities[ent.id] = { ...ent, start: { ...ent.start, y: ent.end.y } };
-            } else {
-              const avgY = (ent.start.y + ent.end.y) / 2;
-              workingEntities[ent.id] = {
-                ...ent,
-                start: { ...ent.start, y: avgY },
-                end: { ...ent.end, y: avgY },
-              };
+      } else if (c.type === 'horizontal') {
+        if (c.entityIds.length === 1) {
+          const ent = workingEntities[c.entityIds[0]];
+          if (ent && ent.type === 'line') {
+            const dy = ent.end.y - ent.start.y;
+            maxDisp = Math.max(maxDisp, Math.abs(dy));
+            if (Math.abs(dy) > SOLVER_TOLERANCE) {
+              const isFixed0 = fixedPoints.has(`${ent.id}_0`);
+              const isFixed1 = fixedPoints.has(`${ent.id}_1`);
+              if (isFixed0 && !isFixed1) {
+                workingEntities[ent.id] = { ...ent, end: { ...ent.end, y: ent.start.y } };
+              } else if (!isFixed0 && isFixed1) {
+                workingEntities[ent.id] = { ...ent, start: { ...ent.start, y: ent.end.y } };
+              } else {
+                const avgY = (ent.start.y + ent.end.y) / 2;
+                workingEntities[ent.id] = {
+                  ...ent,
+                  start: { ...ent.start, y: avgY },
+                  end: { ...ent.end, y: avgY },
+                };
+              }
+            }
+          }
+        } else if (c.entityIds.length >= 2) {
+          const idA = c.entityIds[0];
+          const idB = c.entityIds[1];
+          const idxA = c.pointIndices?.[0] ?? 0;
+          const idxB = c.pointIndices?.[1] ?? 0;
+
+          const ptAData = resolvePoint(idA, idxA, workingEntities, fixedPoints);
+          const ptBData = resolvePoint(idB, idxB, workingEntities, fixedPoints);
+          if (ptAData && ptBData) {
+            const ptA = ptAData.pt;
+            const ptB = ptBData.pt;
+            const isFixedA = ptAData.isFixed;
+            const isFixedB = ptBData.isFixed;
+            const dy = ptB.y - ptA.y;
+            maxDisp = Math.max(maxDisp, Math.abs(dy));
+            if (Math.abs(dy) > SOLVER_TOLERANCE) {
+              if (isFixedA && !isFixedB) {
+                if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptB.x, y: ptA.y });
+              } else if (!isFixedA && isFixedB) {
+                if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x, y: ptB.y });
+              } else if (!isFixedA && !isFixedB) {
+                const avgY = (ptA.y + ptB.y) / 2;
+                if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x, y: avgY });
+                if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptB.x, y: avgY });
+              }
             }
           }
         }
-      } else if (c.type === 'vertical' && c.entityIds.length >= 1) {
-        const ent = workingEntities[c.entityIds[0]];
-        if (ent && ent.type === 'line') {
-          const dx = ent.end.x - ent.start.x;
-          maxDisp = Math.max(maxDisp, Math.abs(dx));
-          if (Math.abs(dx) > SOLVER_TOLERANCE) {
-            const isFixed0 = fixedPoints.has(`${ent.id}_0`);
-            const isFixed1 = fixedPoints.has(`${ent.id}_1`);
-            if (isFixed0 && !isFixed1) {
-              workingEntities[ent.id] = { ...ent, end: { ...ent.end, x: ent.start.x } };
-            } else if (!isFixed0 && isFixed1) {
-              workingEntities[ent.id] = { ...ent, start: { ...ent.start, x: ent.end.x } };
-            } else {
-              const avgX = (ent.start.x + ent.end.x) / 2;
-              workingEntities[ent.id] = {
-                ...ent,
-                start: { ...ent.start, x: avgX },
-                end: { ...ent.end, x: avgX },
-              };
+      } else if (c.type === 'vertical') {
+        if (c.entityIds.length === 1) {
+          const ent = workingEntities[c.entityIds[0]];
+          if (ent && ent.type === 'line') {
+            const dx = ent.end.x - ent.start.x;
+            maxDisp = Math.max(maxDisp, Math.abs(dx));
+            if (Math.abs(dx) > SOLVER_TOLERANCE) {
+              const isFixed0 = fixedPoints.has(`${ent.id}_0`);
+              const isFixed1 = fixedPoints.has(`${ent.id}_1`);
+              if (isFixed0 && !isFixed1) {
+                workingEntities[ent.id] = { ...ent, end: { ...ent.end, x: ent.start.x } };
+              } else if (!isFixed0 && isFixed1) {
+                workingEntities[ent.id] = { ...ent, start: { ...ent.start, x: ent.end.x } };
+              } else {
+                const avgX = (ent.start.x + ent.end.x) / 2;
+                workingEntities[ent.id] = {
+                  ...ent,
+                  start: { ...ent.start, x: avgX },
+                  end: { ...ent.end, x: avgX },
+                };
+              }
+            }
+          }
+        } else if (c.entityIds.length >= 2) {
+          const idA = c.entityIds[0];
+          const idB = c.entityIds[1];
+          const idxA = c.pointIndices?.[0] ?? 0;
+          const idxB = c.pointIndices?.[1] ?? 0;
+
+          const ptAData = resolvePoint(idA, idxA, workingEntities, fixedPoints);
+          const ptBData = resolvePoint(idB, idxB, workingEntities, fixedPoints);
+          if (ptAData && ptBData) {
+            const ptA = ptAData.pt;
+            const ptB = ptBData.pt;
+            const isFixedA = ptAData.isFixed;
+            const isFixedB = ptBData.isFixed;
+            const dx = ptB.x - ptA.x;
+            maxDisp = Math.max(maxDisp, Math.abs(dx));
+            if (Math.abs(dx) > SOLVER_TOLERANCE) {
+              if (isFixedA && !isFixedB) {
+                if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptA.x, y: ptB.y });
+              } else if (!isFixedA && isFixedB) {
+                if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptB.x, y: ptA.y });
+              } else if (!isFixedA && !isFixedB) {
+                const avgX = (ptA.x + ptB.x) / 2;
+                if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: avgX, y: ptA.y });
+                if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: avgX, y: ptB.y });
+              }
             }
           }
         }
@@ -248,44 +318,41 @@ export function solveConstraints(
               workingEntities[ent.id] = {
                 ...ent,
                 radius: targetLen,
-              };
+              } as any;
             }
           }
         } else if (c.entityIds.length >= 2) {
           const idA = c.entityIds[0];
           const idB = c.entityIds[1];
-          const entA = workingEntities[idA];
-          const entB = workingEntities[idB];
-          if (entA && entB) {
-            const idxA = c.pointIndices?.[0] ?? 0;
-            const idxB = c.pointIndices?.[1] ?? 0;
-            const ptA = getEntityPoint(entA, idxA);
-            const ptB = getEntityPoint(entB, idxB);
-            if (ptA && ptB) {
-              const dx = ptB.x - ptA.x;
-              const dy = ptB.y - ptA.y;
-              const currentLen = Math.hypot(dx, dy);
-              const diff = Math.abs(currentLen - targetLen);
-              maxDisp = Math.max(maxDisp, diff);
-              if (diff > SOLVER_TOLERANCE && currentLen > 1e-9) {
-                const dirX = dx / currentLen;
-                const dirY = dy / currentLen;
-                const delta = targetLen - currentLen;
-                const isFixedA = fixedPoints.has(`${idA}_${idxA}`);
-                const isFixedB = fixedPoints.has(`${idB}_${idxB}`);
-                if (isFixedA && !isFixedB) {
-                  const newPtB = { x: ptB.x + dirX * delta, y: ptB.y + dirY * delta };
-                  workingEntities[idB] = setEntityPoint(entB, idxB, newPtB);
-                } else if (!isFixedA && isFixedB) {
-                  const newPtA = { x: ptA.x - dirX * delta, y: ptA.y - dirY * delta };
-                  workingEntities[idA] = setEntityPoint(entA, idxA, newPtA);
-                } else {
-                  const half = delta / 2;
-                  const newPtA = { x: ptA.x - dirX * half, y: ptA.y - dirY * half };
-                  const newPtB = { x: ptB.x + dirX * half, y: ptB.y + dirY * half };
-                  workingEntities[idA] = setEntityPoint(entA, idxA, newPtA);
-                  workingEntities[idB] = setEntityPoint(entB, idxB, newPtB);
-                }
+          const idxA = c.pointIndices?.[0] ?? 0;
+          const idxB = c.pointIndices?.[1] ?? 0;
+          
+          const ptAData = resolvePoint(idA, idxA, workingEntities, fixedPoints);
+          const ptBData = resolvePoint(idB, idxB, workingEntities, fixedPoints);
+
+          if (ptAData && ptBData) {
+            const ptA = ptAData.pt;
+            const ptB = ptBData.pt;
+            const isFixedA = ptAData.isFixed;
+            const isFixedB = ptBData.isFixed;
+            
+            const dx = ptB.x - ptA.x;
+            const dy = ptB.y - ptA.y;
+            const currentLen = Math.hypot(dx, dy);
+            const diff = Math.abs(currentLen - targetLen);
+            maxDisp = Math.max(maxDisp, diff);
+            if (diff > SOLVER_TOLERANCE && currentLen > 1e-9) {
+              const dirX = dx / currentLen;
+              const dirY = dy / currentLen;
+              const delta = targetLen - currentLen;
+              if (isFixedA && !isFixedB) {
+                if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptB.x + dirX * delta, y: ptB.y + dirY * delta });
+              } else if (!isFixedA && isFixedB) {
+                if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x - dirX * delta, y: ptA.y - dirY * delta });
+              } else if (!isFixedA && !isFixedB) {
+                const half = delta / 2;
+                if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x - dirX * half, y: ptA.y - dirY * half });
+                if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptB.x + dirX * half, y: ptB.y + dirY * half });
               }
             }
           }
@@ -355,8 +422,8 @@ export function solveConstraints(
           maxDisp = Math.max(maxDisp, diff);
           if (diff > SOLVER_TOLERANCE) {
             const avgR = (entA.radius + entB.radius) / 2;
-            workingEntities[entA.id] = { ...entA, radius: avgR };
-            workingEntities[entB.id] = { ...entB, radius: avgR };
+            workingEntities[entA.id] = { ...entA, radius: avgR } as any;
+            workingEntities[entB.id] = { ...entB, radius: avgR } as any;
           }
         }
       } else if (c.type === 'radius' && c.entityIds.length >= 1 && (c.value !== undefined || c.targetVal !== undefined)) {
@@ -366,7 +433,7 @@ export function solveConstraints(
           const diff = Math.abs(ent.radius - targetR);
           maxDisp = Math.max(maxDisp, diff);
           if (diff > SOLVER_TOLERANCE) {
-            workingEntities[ent.id] = { ...ent, radius: targetR };
+            workingEntities[ent.id] = { ...ent, radius: targetR } as any;
           }
         }
       } else if (c.type === 'diameter' && c.entityIds.length >= 1 && (c.value !== undefined || c.targetVal !== undefined)) {
@@ -376,7 +443,7 @@ export function solveConstraints(
           const diff = Math.abs(ent.radius - targetR);
           maxDisp = Math.max(maxDisp, diff);
           if (diff > SOLVER_TOLERANCE) {
-            workingEntities[ent.id] = { ...ent, radius: targetR };
+            workingEntities[ent.id] = { ...ent, radius: targetR } as any;
           }
         }
       } else if (c.type === 'distance_x' && (c.value !== undefined || c.targetVal !== undefined)) {
@@ -409,32 +476,32 @@ export function solveConstraints(
         } else if (c.entityIds.length >= 2) {
           const idA = c.entityIds[0];
           const idB = c.entityIds[1];
-          const entA = workingEntities[idA];
-          const entB = workingEntities[idB];
-          if (entA && entB) {
-            const idxA = c.pointIndices?.[0] ?? 0;
-            const idxB = c.pointIndices?.[1] ?? 0;
-            const ptA = getEntityPoint(entA, idxA);
-            const ptB = getEntityPoint(entB, idxB);
-            if (ptA && ptB) {
-              const curDX = ptB.x - ptA.x;
-              const sign = curDX >= 0 ? 1 : -1;
-              const targetDX = sign * targetValX;
-              const deltaX = targetDX - curDX;
-              const err = Math.abs(deltaX);
-              maxDisp = Math.max(maxDisp, err);
-              if (err > SOLVER_TOLERANCE) {
-                const isFixedA = fixedPoints.has(`${idA}_${idxA}`);
-                const isFixedB = fixedPoints.has(`${idB}_${idxB}`);
-                if (isFixedA && !isFixedB) {
-                  workingEntities[idB] = setEntityPoint(entB, idxB, { x: ptB.x + deltaX, y: ptB.y });
-                } else if (!isFixedA && isFixedB) {
-                  workingEntities[idA] = setEntityPoint(entA, idxA, { x: ptA.x - deltaX, y: ptA.y });
-                } else {
-                  const halfX = deltaX / 2;
-                  workingEntities[idA] = setEntityPoint(entA, idxA, { x: ptA.x - halfX, y: ptA.y });
-                  workingEntities[idB] = setEntityPoint(entB, idxB, { x: ptB.x + halfX, y: ptB.y });
-                }
+          const idxA = c.pointIndices?.[0] ?? 0;
+          const idxB = c.pointIndices?.[1] ?? 0;
+
+          const ptAData = resolvePoint(idA, idxA, workingEntities, fixedPoints);
+          const ptBData = resolvePoint(idB, idxB, workingEntities, fixedPoints);
+          if (ptAData && ptBData) {
+            const ptA = ptAData.pt;
+            const ptB = ptBData.pt;
+            const isFixedA = ptAData.isFixed;
+            const isFixedB = ptBData.isFixed;
+            
+            const curDX = ptB.x - ptA.x;
+            const sign = curDX >= 0 ? 1 : -1;
+            const targetDX = sign * targetValX;
+            const deltaX = targetDX - curDX;
+            const err = Math.abs(deltaX);
+            maxDisp = Math.max(maxDisp, err);
+            if (err > SOLVER_TOLERANCE) {
+              if (isFixedA && !isFixedB) {
+                if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptB.x + deltaX, y: ptB.y });
+              } else if (!isFixedA && isFixedB) {
+                if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x - deltaX, y: ptA.y });
+              } else if (!isFixedA && !isFixedB) {
+                const halfX = deltaX / 2;
+                if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x - halfX, y: ptA.y });
+                if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptB.x + halfX, y: ptB.y });
               }
             }
           }
@@ -469,32 +536,32 @@ export function solveConstraints(
         } else if (c.entityIds.length >= 2) {
           const idA = c.entityIds[0];
           const idB = c.entityIds[1];
-          const entA = workingEntities[idA];
-          const entB = workingEntities[idB];
-          if (entA && entB) {
-            const idxA = c.pointIndices?.[0] ?? 0;
-            const idxB = c.pointIndices?.[1] ?? 0;
-            const ptA = getEntityPoint(entA, idxA);
-            const ptB = getEntityPoint(entB, idxB);
-            if (ptA && ptB) {
-              const curDY = ptB.y - ptA.y;
-              const sign = curDY >= 0 ? 1 : -1;
-              const targetDY = sign * targetValY;
-              const deltaY = targetDY - curDY;
-              const err = Math.abs(deltaY);
-              maxDisp = Math.max(maxDisp, err);
-              if (err > SOLVER_TOLERANCE) {
-                const isFixedA = fixedPoints.has(`${idA}_${idxA}`);
-                const isFixedB = fixedPoints.has(`${idB}_${idxB}`);
-                if (isFixedA && !isFixedB) {
-                  workingEntities[idB] = setEntityPoint(entB, idxB, { x: ptB.x, y: ptB.y + deltaY });
-                } else if (!isFixedA && isFixedB) {
-                  workingEntities[idA] = setEntityPoint(entA, idxA, { x: ptA.x, y: ptA.y - deltaY });
-                } else {
-                  const halfY = deltaY / 2;
-                  workingEntities[idA] = setEntityPoint(entA, idxA, { x: ptA.x, y: ptA.y - halfY });
-                  workingEntities[idB] = setEntityPoint(entB, idxB, { x: ptB.x, y: ptB.y + halfY });
-                }
+          const idxA = c.pointIndices?.[0] ?? 0;
+          const idxB = c.pointIndices?.[1] ?? 0;
+          
+          const ptAData = resolvePoint(idA, idxA, workingEntities, fixedPoints);
+          const ptBData = resolvePoint(idB, idxB, workingEntities, fixedPoints);
+          if (ptAData && ptBData) {
+            const ptA = ptAData.pt;
+            const ptB = ptBData.pt;
+            const isFixedA = ptAData.isFixed;
+            const isFixedB = ptBData.isFixed;
+            
+            const curDY = ptB.y - ptA.y;
+            const sign = curDY >= 0 ? 1 : -1;
+            const targetDY = sign * targetValY;
+            const deltaY = targetDY - curDY;
+            const err = Math.abs(deltaY);
+            maxDisp = Math.max(maxDisp, err);
+            if (err > SOLVER_TOLERANCE) {
+              if (isFixedA && !isFixedB) {
+                if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptB.x, y: ptB.y + deltaY });
+              } else if (!isFixedA && isFixedB) {
+                if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x, y: ptA.y - deltaY });
+              } else if (!isFixedA && !isFixedB) {
+                const halfY = deltaY / 2;
+                if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x, y: ptA.y - halfY });
+                if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptB.x, y: ptB.y + halfY });
               }
             }
           }
@@ -536,9 +603,8 @@ export function solveConstraints(
             const dot = dxA * dxB + dyA * dyB;
             const cross = dxA * dyB - dyA * dxB;
             const cosAngle = dot / (lenA * lenB);
-            const currentAngleRad = Math.acos(Math.max(-1, Math.min(1, cosAngle))); // [0, PI]
+            const currentAngleRad = Math.acos(Math.max(-1, Math.min(1, cosAngle)));
 
-            // 標準化 UI 輸入的角度度數為 0~180 的無方向內角
             let targetDeg = c.value % 360;
             if (targetDeg < 0) targetDeg += 360;
             if (targetDeg > 180) targetDeg = 360 - targetDeg;
@@ -547,7 +613,6 @@ export function solveConstraints(
             let useSupplementary = false;
             let err = currentAngleRad - targetAngleRad;
 
-            // 判斷原拓撲與哪一側角度比較近，避免翻轉破壞原本圖形
             if (Math.abs((Math.PI - currentAngleRad) - targetAngleRad) < Math.abs(err)) {
               err = (Math.PI - currentAngleRad) - targetAngleRad;
               useSupplementary = true;
@@ -620,8 +685,6 @@ export function solveConstraints(
       break;
     }
   }
-
-  delete workingEntities['origin'];
 
   return {
     entities: Object.values(workingEntities),

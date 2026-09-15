@@ -1,7 +1,8 @@
 import React, { useMemo, useState, useEffect, useRef, Suspense, Component, ErrorInfo, ReactNode } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { OrbitControls, Environment, Grid, Text } from '@react-three/drei';
+import { OrbitControls, Environment, Grid, Text, Html } from '@react-three/drei';
 import * as THREE from 'three';
+import { Pencil, X } from 'lucide-react';
 import { useCADStore } from '../store/cadStore';
 import {
   CustomPlane,
@@ -12,6 +13,7 @@ import {
 } from '../types/cad';
 import { solidEngine } from '../core/3d/SolidEngine';
 import { buildFeatureEvalOps } from '../core/3d/FeaturePipelineAdapter';
+import { createPlaneFromFaceNormal } from '../core/3d/DatumPlaneEngine';
 
 // Error Boundary 元件，防止 3D Canvas 渲染或 WebGL 錯誤導致整個 React 畫面白屏消失
 interface ErrorBoundaryProps {
@@ -240,12 +242,21 @@ const DatumPlaneMesh: React.FC<DatumPlaneMeshProps> = ({
   );
 };
 
+interface FaceSelection {
+  point: { x: number; y: number; z: number };
+  normal: { x: number; y: number; z: number };
+}
+
+interface CumulativePartMeshProps {
+  onFaceSelect: (selection: FaceSelection) => void;
+}
+
 /**
  * 單一累進實體模型渲染元件 CumulativePartMesh
  * 訂閱 document.featureTree 與 document.rollbackIndex
  * 當特徵樹或回退棒變更時，透過 OpenCASCADE 執行完整 CSG 布林運算（含 Boolean Cut 除料）
  */
-const CumulativePartMesh: React.FC = () => {
+const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect }) => {
   const document = useCADStore((state) => state.document);
   const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
@@ -358,7 +369,21 @@ const CumulativePartMesh: React.FC = () => {
         </mesh>
       )}
       {geometry && (
-        <mesh geometry={geometry} material={material} castShadow receiveShadow />
+        <mesh 
+          geometry={geometry} 
+          material={material} 
+          castShadow 
+          receiveShadow 
+          onClick={(e) => {
+            e.stopPropagation();
+            if (e.face && e.object) {
+              const hitPoint = e.point;
+              const faceNormal = e.face.normal.clone();
+              faceNormal.transformDirection(e.object.matrixWorld).normalize();
+              onFaceSelect({ point: hitPoint, normal: faceNormal });
+            }
+          }}
+        />
       )}
     </group>
   );
@@ -368,10 +393,13 @@ const CanvasContent: React.FC = () => {
   const document = useCADStore((state) => state.document);
   const selectedFeatureId = useCADStore((state) => state.selectedFeatureId);
   const setSelectedFeatureId = useCADStore((state) => state.setSelectedFeatureId);
+  const createSketchOnFacePlane = useCADStore((state) => state.createSketchOnFacePlane);
 
   const featureTree = document?.featureTree ?? [];
   const rollbackIndex = document?.rollbackIndex ?? 0;
   const planes = document?.planes ?? {};
+
+  const [selectedFace, setSelectedFace] = useState<FaceSelection | null>(null);
 
   useEffect(() => {
     solidEngine.init().catch((err) => {
@@ -442,7 +470,44 @@ const CanvasContent: React.FC = () => {
       <OrbitControls makeDefault minDistance={1} maxDistance={5000} />
       {renderDefaultPlanes}
       {renderDatumPlaneFeatures}
-      <CumulativePartMesh />
+      <CumulativePartMesh onFaceSelect={setSelectedFace} />
+      {selectedFace && (
+        <>
+          <mesh position={[selectedFace.point.x, selectedFace.point.y, selectedFace.point.z]}>
+            <sphereGeometry args={[1, 16, 16]} />
+            <meshBasicMaterial color="#facc15" />
+          </mesh>
+          <Html position={[selectedFace.point.x, selectedFace.point.y, selectedFace.point.z]} center zIndexRange={[100, 0]}>
+            <div className="flex flex-row items-center gap-2 bg-slate-800/90 text-white px-3 py-2 rounded-lg shadow-xl backdrop-blur border border-slate-600 pointer-events-auto select-none mt-10">
+              <button
+                className="flex items-center gap-1.5 hover:bg-slate-700 px-2 py-1 rounded transition-colors text-sm font-medium"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const plane = createPlaneFromFaceNormal(selectedFace.point, selectedFace.normal);
+                  createSketchOnFacePlane(plane);
+                  setSelectedFace(null);
+                }}
+              >
+                <Pencil size={14} />
+                在此面繪製草圖
+              </button>
+              <div className="w-px h-4 bg-slate-600 mx-1"></div>
+              <button
+                className="hover:bg-slate-700 p-1 rounded transition-colors text-slate-300 hover:text-white"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedFace(null);
+                }}
+              >
+                <X size={14} />
+              </button>
+            </div>
+          </Html>
+        </>
+      )}
+      <mesh visible={false} onPointerDown={() => setSelectedFace(null)}>
+         <planeGeometry args={[100000, 100000]} />
+      </mesh>
       <Grid
         position={[0, -0.01, 0]}
         args={[2000, 2000]}
@@ -474,6 +539,9 @@ const CAD3DCanvas: React.FC = () => {
             far: 50000,
           }}
           id="cad-3d-fiber-canvas"
+          onPointerMissed={() => {
+            // Can handle deselecting here via global state if needed, but handled in CanvasContent for local state
+          }}
         >
           <Suspense fallback={null}>
             <CanvasContent />

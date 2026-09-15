@@ -640,7 +640,7 @@ export const useCADStore = create<CADState>((set, get) => ({
     const state = get();
     const targetPlane = findCustomPlane(state.document, planeId) || DatumFrontPlane;
 
-    const newSketchId = `sketch-${Date.now()}`;
+    const newSketchId = crypto.randomUUID();
     const sketchCount = state.document.featureTree.filter((f) => f.type === 'SKETCH').length + 1;
     const sketchName = `Sketch${sketchCount}`;
 
@@ -680,6 +680,56 @@ export const useCADStore = create<CADState>((set, get) => ({
       selectedFeatureId: newSketchId,
       selectedEntityIds: [],
       document: updatedDocument,
+      viewMode: '2D',
+    });
+
+    return newSketchId;
+  },
+
+  createSketchOnFacePlane: (plane) => {
+    const state = get();
+    
+    const newSketchId = crypto.randomUUID();
+    const sketchCount = state.document.featureTree.filter((f) => f.type === 'SKETCH').length;
+    const sketchName = `Sketch${sketchCount + 1}`;
+
+    const newSketch: SketchFeature = {
+      id: newSketchId,
+      name: sketchName,
+      type: 'SKETCH',
+      planeFeatureId: plane.id,
+      plane: plane,
+      dependencies: [],
+      entities: [],
+      constraints: [],
+      dimensions: [],
+      profiles: [],
+      solverState: 'UnderDefined',
+      suppressed: false,
+      visible: true,
+    };
+
+    const rollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
+    const newTree = [
+      ...state.document.featureTree.slice(0, rollback),
+      newSketch,
+      ...state.document.featureTree.slice(rollback),
+    ];
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: newTree,
+      rollbackIndex: rollback + 1,
+      activeSketchId: newSketchId,
+    };
+
+    set({
+      ...pushUndoState(state),
+      activeSketchId: newSketchId,
+      selectedFeatureId: newSketchId,
+      selectedEntityIds: [],
+      document: updatedDocument,
+      viewMode: '2D',
     });
 
     return newSketchId;

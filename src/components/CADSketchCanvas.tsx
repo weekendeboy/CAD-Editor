@@ -596,7 +596,25 @@ export const CADSketchCanvas: React.FC = () => {
         const worldPt = screenToWorld(screenPt);
 
         if (currentTool === 'SELECT') {
-          if (!(e.target as HTMLElement).closest('.cad-entity')) {
+          const originScreen = worldToScreen({ x: 0, y: 0 });
+          const distToOrigin = Math.hypot(screenPt.x - originScreen.x, screenPt.y - originScreen.y);
+
+          if (distToOrigin <= 12) {
+            e.stopPropagation();
+            const currentSelected = useCADStore.getState().selectedEntityIds;
+            if (e.shiftKey) {
+              if (currentSelected.includes('origin')) {
+                useCADStore.setState({ selectedEntityIds: currentSelected.filter(id => id !== 'origin') });
+              } else {
+                useCADStore.setState({ selectedEntityIds: [...currentSelected, 'origin'] });
+              }
+            } else {
+              useCADStore.setState({ selectedEntityIds: ['origin'] });
+            }
+            return;
+          }
+
+          if (!(e.target as HTMLElement).closest('.cad-entity') && !(e.target as HTMLElement).closest('.cad-origin-node')) {
             setBoxSelectStart(worldPt);
             setBoxSelectCurrent(worldPt);
             if (!e.shiftKey) {
@@ -970,6 +988,44 @@ export const CADSketchCanvas: React.FC = () => {
               currentTool={currentTool}
             />
           </g>
+
+          {/* 原點標記層 */}
+          {(() => {
+            const { x: ox, y: oy } = worldToScreen({ x: 0, y: 0 });
+            const isOriginSelected = selectedEntityIds.includes('origin');
+            return (
+              <g className="cad-origin-node" transform={`translate(${ox}, ${oy})`}>
+                <line x1="-7" y1="0" x2="7" y2="0" stroke="#ef4444" strokeWidth="1.5" />
+                <line x1="0" y1="-7" x2="0" y2="7" stroke="#ef4444" strokeWidth="1.5" />
+                <circle 
+                  cx="0" 
+                  cy="0" 
+                  r="4" 
+                  stroke={isOriginSelected ? "#ffffff" : "#ef4444"} 
+                  fill={isOriginSelected ? "#facc15" : "none"} 
+                  strokeWidth="1.5" 
+                />
+                {isOriginSelected && (
+                  <circle 
+                    cx="0" 
+                    cy="0" 
+                    r="9" 
+                    stroke="#facc15" 
+                    strokeDasharray="3 2" 
+                    strokeWidth="1.5" 
+                    fill="none" 
+                  />
+                )}
+                <circle 
+                  cx="0" 
+                  cy="0" 
+                  r="12" 
+                  fill="transparent" 
+                  style={{ cursor: currentTool === 'SELECT' ? 'pointer' : 'default', pointerEvents: 'all' }}
+                />
+              </g>
+            );
+          })()}
 
           {/* 疊加鎖點標記層 */}
           <SnapMarker

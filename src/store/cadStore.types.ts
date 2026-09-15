@@ -1,4 +1,4 @@
-import { CADDocument, CADEntity2D, CADLayer, Constraint, Point2D, ExtrudeFeature, CADFeature } from '../types/cad';
+import { CADDocument, CADEntity2D, CADLayer, Constraint, Point2D, ExtrudeFeature, CADFeature, CustomPlane } from '../types/cad';
 
 export type OsnapMode = 
   | 'endpoint' 
@@ -57,6 +57,7 @@ export interface CADActions {
   updateDatumPlaneOffset: (planeFeatureId: string, distance: number) => void;
   toggleFeatureVisibility: (featureId: string) => void;
   createSketchOnPlane: (planeId: string) => string; // 依附於指定基準面建立新草圖，回傳草圖 ID 並設為 activeSketchId
+  createSketchOnFacePlane: (plane: CustomPlane) => string; // 依附於實體表面建立新草圖
 
   // 3D 特徵管理
   addExtrudeFeature: (feature: Omit<ExtrudeFeature, 'id' | 'type'>) => void;

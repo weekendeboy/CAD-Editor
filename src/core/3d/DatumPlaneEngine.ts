@@ -347,3 +347,32 @@ export function arePlanesParallel(planeA: CustomPlane, planeB: CustomPlane, tole
   const cross = cross3D(normA, normB);
   return length3D(cross) < tolerance;
 }
+
+/**
+ * 由實體表面法向推導正交基準面
+ */
+export function createPlaneFromFaceNormal(origin: Point3D, normal: Point3D, name?: string): CustomPlane {
+  let N = normalize3D(normal);
+  if (length3D(N) < 1e-12) {
+    N = { x: 0, y: 0, z: 1 };
+  }
+  
+  let up: Point3D;
+  if (Math.abs(N.z) < 0.9) {
+    up = { x: 0, y: 0, z: 1 };
+  } else {
+    up = { x: 0, y: 1, z: 0 };
+  }
+  
+  const X = normalize3D(cross3D(N, up));
+  const Y = cross3D(N, X);
+  
+  return {
+    id: crypto.randomUUID(),
+    name: name || 'Face Plane',
+    origin,
+    normal: N,
+    xAxis: X,
+    yAxis: Y,
+  };
+}

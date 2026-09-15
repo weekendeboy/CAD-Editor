@@ -12,6 +12,7 @@ import {
   Layers,
   RotateCcw,
   Info,
+  Pencil,
 } from 'lucide-react';
 
 export const FeatureTreePanel: React.FC = () => {
@@ -31,6 +32,9 @@ export const FeatureTreePanel: React.FC = () => {
     removeFeature,
     updateFeature,
     setRollbackIndex,
+    createSketchOnPlane,
+    activeSketchId,
+    setActiveSketch,
   } = useCADStore();
 
   const featureTree = document?.featureTree || [];
@@ -177,14 +181,26 @@ export const FeatureTreePanel: React.FC = () => {
               setSelectedPlaneId('datum-front');
               setSelectedFeatureId(null);
             }}
-            className={`flex items-center gap-2 px-2 py-1 rounded cursor-pointer transition-colors ${
+            className={`group flex items-center justify-between px-2 py-1 rounded cursor-pointer transition-colors ${
               selectedPlaneId === 'datum-front'
                 ? 'bg-sky-950/80 text-sky-300 border border-sky-800/60'
                 : 'hover:bg-neutral-900 text-neutral-300'
             }`}
           >
-            <SquareStack className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-            <span className="truncate text-xs">Front Plane (前基準面)</span>
+            <div className="flex items-center gap-2 min-w-0">
+              <SquareStack className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span className="truncate text-xs">Front Plane (前基準面)</span>
+            </div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                createSketchOnPlane('datum-front');
+              }}
+              className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-neutral-700 hover:text-white text-neutral-400 transition-all shrink-0"
+              title="在此平面繪製草圖"
+            >
+              <Pencil className="w-3 h-3" />
+            </button>
           </div>
 
           {/* Top Plane */}
@@ -193,14 +209,26 @@ export const FeatureTreePanel: React.FC = () => {
               setSelectedPlaneId('datum-top');
               setSelectedFeatureId(null);
             }}
-            className={`flex items-center gap-2 px-2 py-1 rounded cursor-pointer transition-colors ${
+            className={`group flex items-center justify-between px-2 py-1 rounded cursor-pointer transition-colors ${
               selectedPlaneId === 'datum-top'
                 ? 'bg-sky-950/80 text-sky-300 border border-sky-800/60'
                 : 'hover:bg-neutral-900 text-neutral-300'
             }`}
           >
-            <SquareStack className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-            <span className="truncate text-xs">Top Plane (上基準面)</span>
+            <div className="flex items-center gap-2 min-w-0">
+              <SquareStack className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span className="truncate text-xs">Top Plane (上基準面)</span>
+            </div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                createSketchOnPlane('datum-top');
+              }}
+              className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-neutral-700 hover:text-white text-neutral-400 transition-all shrink-0"
+              title="在此平面繪製草圖"
+            >
+              <Pencil className="w-3 h-3" />
+            </button>
           </div>
 
           {/* Right Plane */}
@@ -209,14 +237,26 @@ export const FeatureTreePanel: React.FC = () => {
               setSelectedPlaneId('datum-right');
               setSelectedFeatureId(null);
             }}
-            className={`flex items-center gap-2 px-2 py-1 rounded cursor-pointer transition-colors ${
+            className={`group flex items-center justify-between px-2 py-1 rounded cursor-pointer transition-colors ${
               selectedPlaneId === 'datum-right'
                 ? 'bg-sky-950/80 text-sky-300 border border-sky-800/60'
                 : 'hover:bg-neutral-900 text-neutral-300'
             }`}
           >
-            <SquareStack className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-            <span className="truncate text-xs">Right Plane (右基準面)</span>
+            <div className="flex items-center gap-2 min-w-0">
+              <SquareStack className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span className="truncate text-xs">Right Plane (右基準面)</span>
+            </div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                createSketchOnPlane('datum-right');
+              }}
+              className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-neutral-700 hover:text-white text-neutral-400 transition-all shrink-0"
+              title="在此平面繪製草圖"
+            >
+              <Pencil className="w-3 h-3" />
+            </button>
           </div>
 
           {/* Origin */}
@@ -269,7 +309,7 @@ export const FeatureTreePanel: React.FC = () => {
                 </div>
 
                 {/* 渲染 FeatureTreeItem */}
-                <div data-feature-index={idx}>
+                <div data-feature-index={idx} className="relative group/tree-item">
                   <FeatureTreeItem
                     feature={feature}
                     isSelected={selectedFeatureId === feature.id}
@@ -283,6 +323,34 @@ export const FeatureTreePanel: React.FC = () => {
                     onRename={(id, newName) => renameFeature(id, newName)}
                     onDelete={(id) => removeFeature(id)}
                   />
+                  {feature.type === 'DATUM_PLANE' && !isPast && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        createSketchOnPlane(feature.id);
+                      }}
+                      className="absolute right-12 top-2 p-1 rounded opacity-0 group-hover/tree-item:opacity-100 hover:bg-neutral-700 hover:text-white text-neutral-400 transition-all z-10"
+                      title="在此平面繪製草圖"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  {feature.type === 'SKETCH' && !isPast && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveSketch(feature.id);
+                      }}
+                      className={`absolute right-12 top-2 p-1 rounded transition-all z-10 ${
+                        activeSketchId === feature.id
+                          ? 'opacity-100 text-amber-400'
+                          : 'opacity-0 group-hover/tree-item:opacity-100 hover:bg-neutral-700 hover:text-white text-neutral-400'
+                      }`}
+                      title={activeSketchId === feature.id ? '目前活躍草圖' : '設為活躍草圖'}
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
               </React.Fragment>
             );

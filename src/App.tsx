@@ -59,6 +59,7 @@ import {
   Box,
   Route,
   Layers,
+  Disc,
 } from 'lucide-react';
 
 /**
@@ -202,71 +203,126 @@ export default function App() {
   ) as SketchFeature | undefined;
 
   const solverState = activeSketch?.solverState || 'UnderDefined';
-  const hasSelectedEntities = selectedEntityIds.length > 0;
-  const isSingleSelected = selectedEntityIds.length === 1;
-  const isDoubleSelected = selectedEntityIds.length === 2;
-  const selectedId = selectedEntityIds[0];
-  const selectedEntities =
+
+  // 選取實體提取相容虛擬原點 (Virtual Origin Compatible)
+  const hasOrigin = selectedEntityIds.includes('origin');
+  const realSelectedEntities =
     activeSketch?.entities.filter((e) => selectedEntityIds.includes(e.id)) || [];
-  const isAnySelectedConstruction = selectedEntities.some((e) => e.isConstruction);
+  const totalSelectedCount = selectedEntityIds.length;
+  const isAnySelectedConstruction = realSelectedEntities.some((e) => e.isConstruction);
 
+  // 約束適用性布林判定 (Constraint Applicability)
+  // 1. 水平 / 垂直 (Horizontal / Vertical)
+  const canApplyHorizontalVertical =
+    (totalSelectedCount === 1 && realSelectedEntities[0]?.type === 'line') ||
+    (totalSelectedCount === 2 && hasOrigin && realSelectedEntities.length === 1) ||
+    (totalSelectedCount === 2 &&
+      realSelectedEntities.length === 2 &&
+      realSelectedEntities.every((e) => e.type === 'circle' || e.type === 'arc')) ||
+    (totalSelectedCount === 2 &&
+      realSelectedEntities.length === 2 &&
+      realSelectedEntities.some((e) => e.type === 'circle' || e.type === 'arc') &&
+      realSelectedEntities.some((e) => e.type === 'line'));
+
+  // 2. 重合 / 同心 (Coincident / Concentric)
+  const canApplyCoincident =
+    totalSelectedCount === 2 &&
+    (hasOrigin ? realSelectedEntities.length === 1 : realSelectedEntities.length === 2);
+
+  // 3. 相切 (Tangent)
+  const isLineAndCurve =
+    realSelectedEntities.length === 2 &&
+    ((realSelectedEntities[0].type === 'line' &&
+      (realSelectedEntities[1].type === 'circle' || realSelectedEntities[1].type === 'arc')) ||
+      ((realSelectedEntities[0].type === 'circle' || realSelectedEntities[0].type === 'arc') &&
+        realSelectedEntities[1].type === 'line'));
+
+  const isBothCurves =
+    realSelectedEntities.length === 2 &&
+    (realSelectedEntities[0].type === 'circle' || realSelectedEntities[0].type === 'arc') &&
+    (realSelectedEntities[1].type === 'circle' || realSelectedEntities[1].type === 'arc');
+
+  const canApplyTangent =
+    totalSelectedCount === 2 &&
+    !hasOrigin &&
+    realSelectedEntities.length === 2 &&
+    (isLineAndCurve || isBothCurves);
+
+  // 4. 等半徑 (Equal Radius)
+  const canApplyEqualRadius =
+    totalSelectedCount === 2 &&
+    !hasOrigin &&
+    realSelectedEntities.length === 2 &&
+    realSelectedEntities.every((e) => e.type === 'circle' || e.type === 'arc');
+
+  // 5. 平行 / 垂直 / 等長 (Parallel / Perpendicular / Equal Length)
   const isBothLines =
-    isDoubleSelected &&
-    selectedEntities.length === 2 &&
-    selectedEntities.every((e) => e.type === 'line');
+    totalSelectedCount === 2 &&
+    !hasOrigin &&
+    realSelectedEntities.length === 2 &&
+    realSelectedEntities.every((e) => e.type === 'line');
 
-  const isTangentApplicable =
-    isDoubleSelected &&
-    selectedEntities.length === 2 &&
-    (() => {
-      const t1 = selectedEntities[0].type;
-      const t2 = selectedEntities[1].type;
-      const isLine1 = t1 === 'line';
-      const isLine2 = t2 === 'line';
-      const isArcOrCircle1 = t1 === 'arc' || t1 === 'circle';
-      const isArcOrCircle2 = t2 === 'arc' || t2 === 'circle';
-
-      return (
-        (isLine1 && isArcOrCircle2) ||
-        (isArcOrCircle1 && isLine2) ||
-        (isArcOrCircle1 && isArcOrCircle2)
-      );
-    })();
+  // 6. 固定約束 (Fix)
+  const canApplyFix = totalSelectedCount === 1 && !hasOrigin;
 
   const handleToggleConstruction = () => {
-    selectedEntityIds.forEach((id) => toggleConstruction(id));
+    realSelectedEntities.forEach((entity) => toggleConstruction(entity.id));
   };
 
   const handleAddHorizontal = () => {
-    if (!selectedId) return;
-    addConstraint({
-      id: crypto.randomUUID(),
-      type: 'horizontal',
-      entityIds: [selectedId],
-    });
+    if (totalSelectedCount === 1 && selectedEntityIds[0]) {
+      addConstraint({
+        id: crypto.randomUUID(),
+        type: 'horizontal',
+        entityIds: [selectedEntityIds[0]],
+      });
+    } else if (totalSelectedCount === 2) {
+      addConstraint({
+        id: crypto.randomUUID(),
+        type: 'horizontal',
+        entityIds: [...selectedEntityIds],
+      });
+    }
   };
 
   const handleAddVertical = () => {
-    if (!selectedId) return;
-    addConstraint({
-      id: crypto.randomUUID(),
-      type: 'vertical',
-      entityIds: [selectedId],
-    });
+    if (totalSelectedCount === 1 && selectedEntityIds[0]) {
+      addConstraint({
+        id: crypto.randomUUID(),
+        type: 'vertical',
+        entityIds: [selectedEntityIds[0]],
+      });
+    } else if (totalSelectedCount === 2) {
+      addConstraint({
+        id: crypto.randomUUID(),
+        type: 'vertical',
+        entityIds: [...selectedEntityIds],
+      });
+    }
   };
 
   const handleAddFix = () => {
-    if (!selectedId) return;
+    if (totalSelectedCount === 1 && selectedEntityIds[0] && !hasOrigin) {
+      addConstraint({
+        id: crypto.randomUUID(),
+        type: 'fix',
+        entityIds: [selectedEntityIds[0]],
+        pointIndices: [0], // 鎖定起點或中心點
+      });
+    }
+  };
+
+  const handleAddCoincident = () => {
+    if (totalSelectedCount !== 2) return;
     addConstraint({
       id: crypto.randomUUID(),
-      type: 'fix',
-      entityIds: [selectedId],
-      pointIndices: [0], // 鎖定起點或中心點
+      type: 'coincident',
+      entityIds: [...selectedEntityIds],
     });
   };
 
   const handleAddParallel = () => {
-    if (selectedEntityIds.length !== 2) return;
+    if (totalSelectedCount !== 2) return;
     addConstraint({
       id: crypto.randomUUID(),
       type: 'parallel',
@@ -275,7 +331,7 @@ export default function App() {
   };
 
   const handleAddPerpendicular = () => {
-    if (selectedEntityIds.length !== 2) return;
+    if (totalSelectedCount !== 2) return;
     addConstraint({
       id: crypto.randomUUID(),
       type: 'perpendicular',
@@ -284,7 +340,7 @@ export default function App() {
   };
 
   const handleAddEqualLength = () => {
-    if (selectedEntityIds.length !== 2) return;
+    if (totalSelectedCount !== 2) return;
     addConstraint({
       id: crypto.randomUUID(),
       type: 'equal_length',
@@ -292,8 +348,17 @@ export default function App() {
     });
   };
 
+  const handleAddEqualRadius = () => {
+    if (totalSelectedCount !== 2) return;
+    addConstraint({
+      id: crypto.randomUUID(),
+      type: 'equal_radius',
+      entityIds: [...selectedEntityIds],
+    });
+  };
+
   const handleAddTangent = () => {
-    if (selectedEntityIds.length !== 2) return;
+    if (totalSelectedCount !== 2) return;
     addConstraint({
       id: crypto.randomUUID(),
       type: 'tangent',
@@ -827,96 +892,128 @@ export default function App() {
               </button>
 
               {/* Constraints toolbar & Entity operations (appears when entity is selected) */}
-              {hasSelectedEntities && (
+              {totalSelectedCount > 0 && (
                 <>
                   <div className="w-px h-5 bg-neutral-800 mx-1" />
-                  {isSingleSelected && (
+
+                  {/* 水平 / 垂直 (Horizontal / Vertical) */}
+                  {canApplyHorizontalVertical && (
                     <>
                       <button
                         onClick={handleAddHorizontal}
                         className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
-                        title="Add Horizontal Constraint"
+                        title="水平 (Horizontal)"
                       >
                         <MoveHorizontal size={18} />
                       </button>
                       <button
                         onClick={handleAddVertical}
                         className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
-                        title="Add Vertical Constraint"
+                        title="垂直 (Vertical)"
                       >
                         <MoveVertical size={18} />
                       </button>
+                    </>
+                  )}
+
+                  {/* 重合 / 同心 (Coincident / Concentric) */}
+                  {canApplyCoincident && (
+                    <button
+                      onClick={handleAddCoincident}
+                      className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
+                      title="重合/同心 (Coincident)"
+                    >
+                      <CircleDot size={18} />
+                    </button>
+                  )}
+
+                  {/* 固定約束 (Fix) */}
+                  {canApplyFix && (
+                    <button
+                      onClick={handleAddFix}
+                      className="p-1.5 rounded text-neutral-400 hover:text-yellow-400 hover:bg-neutral-800 transition-colors"
+                      title="固定 (Fix) 錨定點"
+                    >
+                      <Lock size={18} />
+                    </button>
+                  )}
+
+                  {/* 平行 / 垂直 / 等長 (Parallel / Perpendicular / Equal Length) */}
+                  {isBothLines && (
+                    <>
                       <button
-                        onClick={handleAddFix}
-                        className="p-1.5 rounded text-neutral-400 hover:text-yellow-400 hover:bg-neutral-800 transition-colors"
-                        title="Add Fix Point Constraint (Lock Anchor)"
+                        onClick={handleAddParallel}
+                        className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
+                        title="平行 (Parallel)"
                       >
-                        <Lock size={18} />
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                          <line x1="6" y1="20" x2="14" y2="4" />
+                          <line x1="10" y1="20" x2="18" y2="4" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={handleAddPerpendicular}
+                        className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
+                        title="垂直 (Perpendicular)"
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <line x1="12" y1="4" x2="12" y2="20" />
+                          <line x1="4" y1="20" x2="20" y2="20" />
+                          <path d="M 12 16 L 16 16 L 16 20" strokeWidth="1.5" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={handleAddEqualLength}
+                        className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
+                        title="等長 (Equal Length)"
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                          <line x1="6" y1="10" x2="18" y2="10" />
+                          <line x1="6" y1="14" x2="18" y2="14" />
+                        </svg>
                       </button>
                     </>
                   )}
-                  {isDoubleSelected && (
-                    <>
-                      {isBothLines && (
-                        <>
-                          <button
-                            onClick={handleAddParallel}
-                            className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
-                            title="平行 (Parallel)"
-                          >
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                              <line x1="6" y1="20" x2="14" y2="4" />
-                              <line x1="10" y1="20" x2="18" y2="4" />
-                            </svg>
-                          </button>
-                          <button
-                            onClick={handleAddPerpendicular}
-                            className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
-                            title="垂直 (Perpendicular)"
-                          >
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <line x1="12" y1="4" x2="12" y2="20" />
-                              <line x1="4" y1="20" x2="20" y2="20" />
-                              <path d="M 12 16 L 16 16 L 16 20" strokeWidth="1.5" />
-                            </svg>
-                          </button>
-                          <button
-                            onClick={handleAddEqualLength}
-                            className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
-                            title="等長 (Equal Length)"
-                          >
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                              <line x1="6" y1="10" x2="18" y2="10" />
-                              <line x1="6" y1="14" x2="18" y2="14" />
-                            </svg>
-                          </button>
-                        </>
-                      )}
-                      {isTangentApplicable && (
-                        <button
-                          onClick={handleAddTangent}
-                          className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
-                          title="相切 (Tangent)"
-                        >
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <circle cx="10" cy="14" r="6" />
-                            <line x1="2" y1="8" x2="18" y2="8" />
-                          </svg>
-                        </button>
-                      )}
-                    </>
+
+                  {/* 相切 (Tangent) */}
+                  {canApplyTangent && (
+                    <button
+                      onClick={handleAddTangent}
+                      className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
+                      title="相切 (Tangent)"
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="10" cy="14" r="6" />
+                        <line x1="2" y1="8" x2="18" y2="8" />
+                      </svg>
+                    </button>
                   )}
-                  <button
-                    onClick={handleToggleConstruction}
-                    className={`p-1.5 rounded transition-colors ${
-                      isAnySelectedConstruction
-                        ? 'bg-purple-950/80 text-purple-400 border border-purple-800/50'
-                        : 'text-neutral-400 hover:text-purple-400 hover:bg-neutral-800'
-                    }`}
-                    title="切換建構線 (Toggle Construction) [X]"
-                  >
-                    <Spline size={18} />
-                  </button>
+
+                  {/* 等半徑 (Equal Radius) */}
+                  {canApplyEqualRadius && (
+                    <button
+                      onClick={handleAddEqualRadius}
+                      className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
+                      title="等半徑 (Equal Radius)"
+                    >
+                      <Disc size={18} />
+                    </button>
+                  )}
+
+                  {/* 切換建構線 (Toggle Construction) */}
+                  {realSelectedEntities.length > 0 && (
+                    <button
+                      onClick={handleToggleConstruction}
+                      className={`p-1.5 rounded transition-colors ${
+                        isAnySelectedConstruction
+                          ? 'bg-purple-950/80 text-purple-400 border border-purple-800/50'
+                          : 'text-neutral-400 hover:text-purple-400 hover:bg-neutral-800'
+                      }`}
+                      title="切換建構線 (Toggle Construction) [X]"
+                    >
+                      <Spline size={18} />
+                    </button>
+                  )}
                 </>
               )}
             </div>
