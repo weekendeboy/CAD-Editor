@@ -15,7 +15,7 @@ import { solidEngine } from '../core/3d/SolidEngine';
 import { buildFeatureEvalOps } from '../core/3d/FeaturePipelineAdapter';
 import { createPlaneFromFaceNormal } from '../core/3d/DatumPlaneEngine';
 
-// Error Boundary 元件，防止 3D Canvas 渲染或 WebGL 錯誤導致整個 React 畫面白屏消失
+// Error Boundary 元件，防止 3D Canvas 渲染或 WebGL 錯誤導致整個 React 畫面白屏
 interface ErrorBoundaryProps {
   children: ReactNode;
 }
@@ -42,7 +42,10 @@ class ThreeErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryStat
   public render() {
     if (this.state.hasError) {
       return (
-        <div className="w-full h-full flex flex-col items-center justify-center bg-slate-900 text-slate-300 p-6" id="three-error-boundary-fallback">
+        <div
+          className="w-full h-full flex flex-col items-center justify-center bg-slate-900 text-slate-300 p-6"
+          id="three-error-boundary-fallback"
+        >
           <div className="bg-slate-800 border border-red-500/50 rounded-lg p-6 max-w-md text-center shadow-xl">
             <h3 className="text-lg font-bold text-red-400 mb-2">3D 視圖載入異常</h3>
             <p className="text-sm text-slate-400 mb-4">
@@ -242,13 +245,13 @@ const DatumPlaneMesh: React.FC<DatumPlaneMeshProps> = ({
   );
 };
 
-interface FaceSelection {
-  point: { x: number; y: number; z: number };
-  normal: { x: number; y: number; z: number };
+export interface SelectedFaceState {
+  point: THREE.Vector3;
+  normal: THREE.Vector3;
 }
 
 interface CumulativePartMeshProps {
-  onFaceSelect: (selection: FaceSelection) => void;
+  onFaceSelect: (selection: SelectedFaceState) => void;
 }
 
 /**
@@ -369,22 +372,126 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect })
         </mesh>
       )}
       {geometry && (
-        <mesh 
-          geometry={geometry} 
-          material={material} 
-          castShadow 
-          receiveShadow 
-          onClick={(e) => {
+        <mesh
+          geometry={geometry}
+          material={material}
+          castShadow
+          receiveShadow
+          onPointerDown={(e) => {
             e.stopPropagation();
             if (e.face && e.object) {
-              const hitPoint = e.point;
-              const faceNormal = e.face.normal.clone();
-              faceNormal.transformDirection(e.object.matrixWorld).normalize();
-              onFaceSelect({ point: hitPoint, normal: faceNormal });
+              const hitPoint = e.point.clone();
+              const worldNormal = e.face.normal
+                .clone()
+                .transformDirection(e.object.matrixWorld)
+                .normalize();
+              onFaceSelect({ point: hitPoint, normal: worldNormal });
             }
           }}
         />
       )}
+    </group>
+  );
+};
+
+interface FaceHighlightAndOverlayProps {
+  selectedFace: SelectedFaceState;
+  onClose: () => void;
+  onCreateSketch: () => void;
+}
+
+/**
+ * 表面選取視覺高亮與懸浮卡片按鈕
+ */
+const FaceHighlightAndOverlay: React.FC<FaceHighlightAndOverlayProps> = ({
+  selectedFace,
+  onClose,
+  onCreateSketch,
+}) => {
+  // 使用四元數將 (0,0,1) 對齊法向量 normal
+  const quaternion = useMemo(() => {
+    return new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0, 0, 1),
+      selectedFace.normal
+    );
+  }, [selectedFace.normal]);
+
+  // 沿法向量微幅偏移 0.05mm 避免 Z-Fighting
+  const offsetPosition = useMemo(() => {
+    return selectedFace.point.clone().addScaledVector(selectedFace.normal, 0.05);
+  }, [selectedFace.point, selectedFace.normal]);
+
+  return (
+    <group position={offsetPosition} quaternion={quaternion}>
+      {/* 微型半透明平面/圓盤 (半徑 10，顏色黃色 #facc15，透明度 0.6) 貼齊表面 */}
+      <mesh>
+        <circleGeometry args={[10, 32]} />
+        <meshBasicMaterial
+          color="#facc15"
+          side={THREE.DoubleSide}
+          transparent
+          opacity={0.6}
+          depthWrite={false}
+        />
+      </mesh>
+
+      {/* 外圈高亮邊框 */}
+      <mesh>
+        <ringGeometry args={[9.7, 10.3, 32]} />
+        <meshBasicMaterial
+          color="#eab308"
+          side={THREE.DoubleSide}
+          transparent
+          opacity={0.9}
+          depthWrite={false}
+        />
+      </mesh>
+
+      {/* 微型法向箭頭指示 */}
+      <primitive
+        object={useMemo(() => {
+          return new THREE.ArrowHelper(
+            new THREE.Vector3(0, 0, 1),
+            new THREE.Vector3(0, 0, 0),
+            12,
+            0xfacc15,
+            3,
+            2
+          );
+        }, [])}
+      />
+
+      {/* 懸浮按鈕 (HTML Overlay) */}
+      <Html position={[0, 0, 0]} center zIndexRange={[100, 0]}>
+        <div
+          className="flex flex-row items-center gap-1.5 bg-slate-900/95 text-white px-2.5 py-1.5 rounded-lg shadow-2xl backdrop-blur border border-amber-400/80 pointer-events-auto select-none mt-12 whitespace-nowrap"
+          id="face-sketch-action-overlay"
+        >
+          <button
+            id="btn-create-sketch-on-selected-face"
+            className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold px-2.5 py-1 rounded text-xs transition-colors shadow-sm cursor-pointer active:scale-95"
+            onClick={(e) => {
+              e.stopPropagation();
+              onCreateSketch();
+            }}
+          >
+            <Pencil size={13} className="stroke-[2.5]" />
+            在此面建立草圖
+          </button>
+          <div className="w-px h-4 bg-slate-700 mx-0.5" />
+          <button
+            id="btn-dismiss-selected-face"
+            className="hover:bg-slate-800 p-1 rounded transition-colors text-slate-400 hover:text-white cursor-pointer active:scale-95"
+            onClick={(e) => {
+              e.stopPropagation();
+              onClose();
+            }}
+            title="取消選取"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      </Html>
     </group>
   );
 };
@@ -399,7 +506,11 @@ const CanvasContent: React.FC = () => {
   const rollbackIndex = document?.rollbackIndex ?? 0;
   const planes = document?.planes ?? {};
 
-  const [selectedFace, setSelectedFace] = useState<FaceSelection | null>(null);
+  // 1. 狀態擴充：維護選取的表面狀態
+  const [selectedFace, setSelectedFace] = useState<{
+    point: THREE.Vector3;
+    normal: THREE.Vector3;
+  } | null>(null);
 
   useEffect(() => {
     solidEngine.init().catch((err) => {
@@ -407,7 +518,7 @@ const CanvasContent: React.FC = () => {
     });
   }, []);
 
-  // 1. 常駐三大預設基準面 (Front, Top, Right)
+  // 常駐三大預設基準面 (Front, Top, Right)
   const defaultPlanes = useMemo(() => {
     return [
       planes['datum-front'] || DatumFrontPlane,
@@ -429,7 +540,7 @@ const CanvasContent: React.FC = () => {
     ));
   }, [defaultPlanes, selectedFeatureId, setSelectedFeatureId]);
 
-  // 2. 遍歷 document.featureTree 中所有類型為 'DATUM_PLANE' 且 !f.suppressed && f.visible 的特徵並渲染
+  // 遍歷 document.featureTree 中所有類型為 'DATUM_PLANE' 且 !f.suppressed && f.visible 的特徵並渲染
   const renderDatumPlaneFeatures = useMemo(() => {
     const activeTreeSlice = featureTree.slice(0, Math.max(0, rollbackIndex));
     const defaultPlaneIds = new Set(['datum-front', 'datum-top', 'datum-right']);
@@ -468,46 +579,48 @@ const CanvasContent: React.FC = () => {
         <Environment preset="city" />
       </Suspense>
       <OrbitControls makeDefault minDistance={1} maxDistance={5000} />
+      
+      {/* 基準面渲染 */}
       {renderDefaultPlanes}
       {renderDatumPlaneFeatures}
+
+      {/* 實體網格渲染 */}
       <CumulativePartMesh onFaceSelect={setSelectedFace} />
+
+      {/* 選取表面高亮與懸浮按鈕 */}
       {selectedFace && (
-        <>
-          <mesh position={[selectedFace.point.x, selectedFace.point.y, selectedFace.point.z]}>
-            <sphereGeometry args={[1, 16, 16]} />
-            <meshBasicMaterial color="#facc15" />
-          </mesh>
-          <Html position={[selectedFace.point.x, selectedFace.point.y, selectedFace.point.z]} center zIndexRange={[100, 0]}>
-            <div className="flex flex-row items-center gap-2 bg-slate-800/90 text-white px-3 py-2 rounded-lg shadow-xl backdrop-blur border border-slate-600 pointer-events-auto select-none mt-10">
-              <button
-                className="flex items-center gap-1.5 hover:bg-slate-700 px-2 py-1 rounded transition-colors text-sm font-medium"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  const plane = createPlaneFromFaceNormal(selectedFace.point, selectedFace.normal);
-                  createSketchOnFacePlane(plane);
-                  setSelectedFace(null);
-                }}
-              >
-                <Pencil size={14} />
-                在此面繪製草圖
-              </button>
-              <div className="w-px h-4 bg-slate-600 mx-1"></div>
-              <button
-                className="hover:bg-slate-700 p-1 rounded transition-colors text-slate-300 hover:text-white"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setSelectedFace(null);
-                }}
-              >
-                <X size={14} />
-              </button>
-            </div>
-          </Html>
-        </>
+        <FaceHighlightAndOverlay
+          selectedFace={selectedFace}
+          onClose={() => setSelectedFace(null)}
+          onCreateSketch={() => {
+            const plane = createPlaneFromFaceNormal(
+              {
+                x: selectedFace.point.x,
+                y: selectedFace.point.y,
+                z: selectedFace.point.z,
+              },
+              {
+                x: selectedFace.normal.x,
+                y: selectedFace.normal.y,
+                z: selectedFace.normal.z,
+              }
+            );
+            createSketchOnFacePlane(plane);
+            setSelectedFace(null);
+          }}
+        />
       )}
-      <mesh visible={false} onPointerDown={() => setSelectedFace(null)}>
-         <planeGeometry args={[100000, 100000]} />
+
+      {/* 點擊空白處時取消選取表面 */}
+      <mesh
+        visible={false}
+        onPointerDown={() => {
+          if (selectedFace) setSelectedFace(null);
+        }}
+      >
+        <planeGeometry args={[100000, 100000]} />
       </mesh>
+
       <Grid
         position={[0, -0.01, 0]}
         args={[2000, 2000]}
@@ -529,7 +642,10 @@ const CanvasContent: React.FC = () => {
 const CAD3DCanvas: React.FC = () => {
   return (
     <ThreeErrorBoundary>
-      <div className="w-full h-full absolute inset-0 z-0 bg-slate-900" id="cad-3d-canvas-container">
+      <div
+        className="w-full h-full absolute inset-0 z-0 bg-slate-900"
+        id="cad-3d-canvas-container"
+      >
         <Canvas
           gl={{ logarithmicDepthBuffer: true, antialias: true }}
           camera={{
@@ -539,9 +655,6 @@ const CAD3DCanvas: React.FC = () => {
             far: 50000,
           }}
           id="cad-3d-fiber-canvas"
-          onPointerMissed={() => {
-            // Can handle deselecting here via global state if needed, but handled in CanvasContent for local state
-          }}
         >
           <Suspense fallback={null}>
             <CanvasContent />

@@ -350,27 +350,34 @@ export function arePlanesParallel(planeA: CustomPlane, planeB: CustomPlane, tole
 
 /**
  * 由實體表面法向推導正交基準面
+ * 1. 確保法向量 normal 正規化
+ * 2. 利用外積 (Cross Product) 與右手定則，推導出嚴格垂直的 xAxis 與 yAxis
+ *    (若 normal 平行 Z 軸則參考 Y 軸，否則參考 Z 軸)
  */
 export function createPlaneFromFaceNormal(origin: Point3D, normal: Point3D, name?: string): CustomPlane {
   let N = normalize3D(normal);
   if (length3D(N) < 1e-12) {
     N = { x: 0, y: 0, z: 1 };
   }
-  
-  let up: Point3D;
-  if (Math.abs(N.z) < 0.9) {
-    up = { x: 0, y: 0, z: 1 };
-  } else {
-    up = { x: 0, y: 1, z: 0 };
+
+  // 若 normal 平行 Z 軸 (|N.z| > 0.9) 則參考 Y 軸，否則參考 Z 軸
+  const refAxis: Point3D = Math.abs(N.z) > 0.9 ? { x: 0, y: 1, z: 0 } : { x: 0, y: 0, z: 1 };
+
+  // 外積推導 X 軸與 Y 軸 (遵循右手定則 X × Y = N)
+  let X = cross3D(refAxis, N);
+  if (length3D(X) < 1e-6) {
+    X = cross3D({ x: 1, y: 0, z: 0 }, N);
   }
-  
-  const X = normalize3D(cross3D(N, up));
-  const Y = cross3D(N, X);
-  
+  X = normalize3D(X);
+
+  const Y = normalize3D(cross3D(N, X));
+
+  const planeId = `plane-face-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
   return {
-    id: crypto.randomUUID(),
+    id: planeId,
     name: name || 'Face Plane',
-    origin,
+    origin: { ...origin },
     normal: N,
     xAxis: X,
     yAxis: Y,

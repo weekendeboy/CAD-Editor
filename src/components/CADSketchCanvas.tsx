@@ -18,6 +18,10 @@ import { CircularArrayPanel } from './CircularArrayPanel';
 import { RectangularArrayPanel } from './RectangularArrayPanel';
 import { GripRenderer } from './GripRenderer';
 import { EntityGrip, applyGripDrag, applyGripDragWithConstraints } from '../core/2d/GripManager';
+import { project3DTo2DPlane } from '../core/3d/DatumPlaneEngine';
+import { solidEngine } from '../core/3d/SolidEngine';
+import { buildFeatureEvalOps } from '../core/3d/FeaturePipelineAdapter';
+import type { MeshResult } from '../core/3d/SolidEngine.types';
 
 // 輔助函式：計算點到線段的最短距離
 function getDistanceToLineSegment(p: Point2D, sStart: Point2D, sEnd: Point2D): number {
@@ -489,6 +493,55 @@ export const CADSketchCanvas: React.FC = () => {
     cancelDrawing();
   }, [rectArraySourceIds, cancelDrawing]);
 
+  // 3D 實體模型幾何快取
+  const [solidMesh, setSolidMesh] = useState<MeshResult | null>(null);
+
+  // 訂閱特徵樹、回退棒與基準面，計算已生成的 3D 實體幾何資料
+  useEffect(() => {
+    let active = true;
+
+    const evaluate3DSolids = async () => {
+      if (!document?.featureTree || document.featureTree.length === 0) {
+        if (active) setSolidMesh(null);
+        return;
+      }
+
+      try {
+        await solidEngine.init();
+
+        const ops = buildFeatureEvalOps(
+          document.featureTree,
+          document.rollbackIndex,
+          document.planes
+        );
+
+        if (!ops || ops.length === 0) {
+          if (active) setSolidMesh(null);
+          return;
+        }
+
+        const meshData = await solidEngine.evaluateFeatureTree(ops);
+
+        if (active) {
+          if (meshData && meshData.vertices && meshData.vertices.length > 0) {
+            setSolidMesh(meshData);
+          } else {
+            setSolidMesh(null);
+          }
+        }
+      } catch (err) {
+        console.warn('CADSketchCanvas: Failed to evaluate 3D solid for projection background:', err);
+        if (active) setSolidMesh(null);
+      }
+    };
+
+    evaluate3DSolids();
+
+    return () => {
+      active = false;
+    };
+  }, [document?.featureTree, document?.rollbackIndex, document?.planes]);
+
   // 取得目前草圖內的 entities, profiles, constraints, dimensions 與 solverState
   let rawEntities: CADEntity2D[] = [];
   let currentProfiles: any[] = [];
@@ -507,6 +560,73 @@ export const CADSketchCanvas: React.FC = () => {
       currentSolverState = sketch.solverState;
     }
   }
+
+  // 3D 實體投影至當前草圖基準面的 2D 幾何資料
+  const projectedSolidData = useMemo(() => {
+    if (!activeSketchId || !document?.featureTree) return null;
+    const activeSketch = document.featureTree.find(
+      (f) => f.id === activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!activeSketch?.plane || !solidMesh?.vertices || solidMesh.vertices.length === 0) {
+      return null;
+    }
+
+    const plane = activeSketch.plane;
+    const vertices = solidMesh.vertices;
+    const indices = solidMesh.indices;
+    const edgeVertices = solidMesh.edgeVertices;
+
+    const numVertices = Math.floor(vertices.length / 3);
+    const projected2DPoints: Point2D[] = new Array(numVertices);
+
+    for (let i = 0; i < numVertices; i++) {
+      const idx = i * 3;
+      const p3d = {
+        x: vertices[idx],
+        y: vertices[idx + 1],
+        z: vertices[idx + 2],
+      };
+      projected2DPoints[i] = project3DTo2DPlane(p3d, plane);
+    }
+
+    const triangles: [Point2D, Point2D, Point2D][] = [];
+    if (indices && indices.length > 0) {
+      const numTriangles = Math.floor(indices.length / 3);
+      for (let i = 0; i < numTriangles; i++) {
+        const i1 = indices[i * 3];
+        const i2 = indices[i * 3 + 1];
+        const i3 = indices[i * 3 + 2];
+        if (projected2DPoints[i1] && projected2DPoints[i2] && projected2DPoints[i3]) {
+          triangles.push([
+            projected2DPoints[i1],
+            projected2DPoints[i2],
+            projected2DPoints[i3],
+          ]);
+        }
+      }
+    }
+
+    const edges: [Point2D, Point2D][] = [];
+    if (edgeVertices && edgeVertices.length >= 6) {
+      const numEdges = Math.floor(edgeVertices.length / 6);
+      for (let i = 0; i < numEdges; i++) {
+        const idx = i * 6;
+        const p1_3d = { x: edgeVertices[idx], y: edgeVertices[idx + 1], z: edgeVertices[idx + 2] };
+        const p2_3d = { x: edgeVertices[idx + 3], y: edgeVertices[idx + 4], z: edgeVertices[idx + 5] };
+        edges.push([
+          project3DTo2DPlane(p1_3d, plane),
+          project3DTo2DPlane(p2_3d, plane),
+        ]);
+      }
+    }
+
+    return {
+      projected2DPoints,
+      triangles,
+      edges,
+    };
+  }, [activeSketchId, document?.featureTree, solidMesh]);
 
   // 處理夾點熱點按壓事件 (handleGripPointerDown)
   const handleGripPointerDown = useCallback(
@@ -920,6 +1040,49 @@ export const CADSketchCanvas: React.FC = () => {
           height={dimensions.height}
           style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
         >
+          {/* 3D 實體背景投影層 (3D Solid Projection Layer) */}
+          {projectedSolidData && (
+            <g
+              className="cad-3d-projection-layer pointer-events-none select-none"
+              style={{ pointerEvents: 'none' }}
+            >
+              {/* 3D 網格三角形投影輪廓 (淡灰色參考線) */}
+              {projectedSolidData.triangles.map((tri, triIdx) => {
+                const sp1 = worldToScreen(tri[0]);
+                const sp2 = worldToScreen(tri[1]);
+                const sp3 = worldToScreen(tri[2]);
+                return (
+                  <polygon
+                    key={`proj-tri-${triIdx}`}
+                    points={`${sp1.x},${sp1.y} ${sp2.x},${sp2.y} ${sp3.x},${sp3.y}`}
+                    stroke="#cbd5e1"
+                    strokeWidth={1}
+                    fill="none"
+                    opacity={0.35}
+                  />
+                );
+              })}
+
+              {/* 3D 實體特徵邊線投影 (如有 edgeVertices) */}
+              {projectedSolidData.edges.map((edge, edgeIdx) => {
+                const sp1 = worldToScreen(edge[0]);
+                const sp2 = worldToScreen(edge[1]);
+                return (
+                  <line
+                    key={`proj-edge-${edgeIdx}`}
+                    x1={sp1.x}
+                    y1={sp1.y}
+                    x2={sp2.x}
+                    y2={sp2.y}
+                    stroke="#94a3b8"
+                    strokeWidth={1.2}
+                    opacity={0.65}
+                  />
+                );
+              })}
+            </g>
+          )}
+
           {/* 封閉面渲染層 */}
           <ProfileRenderer
             profiles={currentProfiles}

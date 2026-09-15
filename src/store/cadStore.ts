@@ -721,6 +721,10 @@ export const useCADStore = create<CADState>((set, get) => ({
       featureTree: newTree,
       rollbackIndex: rollback + 1,
       activeSketchId: newSketchId,
+      planes: {
+        ...state.document.planes,
+        [plane.id]: plane,
+      },
     };
 
     set({
@@ -730,6 +734,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       selectedEntityIds: [],
       document: updatedDocument,
       viewMode: '2D',
+      currentTool: 'SELECT',
     });
 
     return newSketchId;
