@@ -122,10 +122,30 @@ export const CADSketchCanvas: React.FC = () => {
     arrayFillAngle,
     polygonSides,
     polygonMethod,
+    revolvePreview,
+    isPickingRevolveAxis,
+    setRevolveAxisEntityId,
+    setIsPickingRevolveAxis,
+    setViewMode,
   } = useCADStore();
 
   const handleSelectEntity = useCallback(
     (id: string, e: React.MouseEvent) => {
+      // 若當前正處於旋轉特徵對話框中或點選旋轉軸模式 (Pick Revolve Axis)
+      if (revolvePreview?.isOpen || isPickingRevolveAxis) {
+        const activeSketch = document.featureTree?.find((f) => f.id === activeSketchId);
+        const clickedEntity = (activeSketch as any)?.entities?.find((ent: any) => ent.id === id);
+        if (clickedEntity && clickedEntity.type === 'line') {
+          e.stopPropagation();
+          setRevolveAxisEntityId(id);
+          setIsPickingRevolveAxis(false);
+          clearSelection();
+          selectEntity(id);
+          setViewMode('3D');
+          return;
+        }
+      }
+
       if (currentTool === 'SELECT') {
         if (!e.shiftKey) {
           clearSelection();
@@ -133,7 +153,18 @@ export const CADSketchCanvas: React.FC = () => {
         selectEntity(id);
       }
     },
-    [currentTool, clearSelection, selectEntity]
+    [
+      currentTool,
+      clearSelection,
+      selectEntity,
+      revolvePreview?.isOpen,
+      isPickingRevolveAxis,
+      setRevolveAxisEntityId,
+      setIsPickingRevolveAxis,
+      document.featureTree,
+      activeSketchId,
+      setViewMode,
+    ]
   );
 
   const {

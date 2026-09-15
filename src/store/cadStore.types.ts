@@ -9,6 +9,15 @@ export interface ExtrudePreviewState {
   throughAll?: boolean;
 }
 
+export interface RevolvePreviewState {
+  isOpen: boolean;
+  mode: 'REVOLVE' | 'REVOLVE_CUT';
+  sketchId: string;
+  axisEntityId: string;
+  angle: number; // in radians
+  reversed?: boolean;
+}
+
 export type OsnapMode = 
   | 'endpoint' 
   | 'midpoint' 
@@ -169,9 +178,12 @@ export interface CADActions {
   // 上一次使用半徑 (AutoCAD 風格)
   setLastRadius: (r: number) => void;
 
-  // 3D 邊線顯示與即時拉伸預覽
+  // 3D 邊線顯示與即時拉伸/旋轉預覽
   toggleShow3DEdges: () => void;
   setExtrudePreview: (preview: ExtrudePreviewState | null) => void;
+  setRevolvePreview: (preview: RevolvePreviewState | null) => void;
+  setIsPickingRevolveAxis: (isPicking: boolean) => void;
+  setRevolveAxisEntityId: (axisId: string) => void;
 }
 
 export interface CADState extends CADActions {
@@ -188,6 +200,8 @@ export interface CADState extends CADActions {
   showProfiles: boolean;
   show3DEdges: boolean;
   extrudePreview: ExtrudePreviewState | null;
+  revolvePreview: RevolvePreviewState | null;
+  isPickingRevolveAxis: boolean;
 
   // 鎖點開關與各模式勾選狀態（預設全開啟）
   osnapSettings: OsnapSettings;

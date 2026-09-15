@@ -198,6 +198,13 @@ export const useCADStore = create<CADState>((set, get) => ({
   toggleShow3DEdges: () => set((state) => ({ show3DEdges: !state.show3DEdges })),
   extrudePreview: null,
   setExtrudePreview: (preview) => set({ extrudePreview: preview }),
+  revolvePreview: null,
+  setRevolvePreview: (preview) => set({ revolvePreview: preview }),
+  isPickingRevolveAxis: false,
+  setIsPickingRevolveAxis: (isPicking) => set({ isPickingRevolveAxis: isPicking }),
+  setRevolveAxisEntityId: (axisId) => set((state) => ({
+    revolvePreview: state.revolvePreview ? { ...state.revolvePreview, axisEntityId: axisId } : null,
+  })),
 
   // 鎖點開關與各模式勾選狀態（預設全開啟）
   osnapSettings: {

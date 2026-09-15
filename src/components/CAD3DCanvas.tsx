@@ -15,6 +15,7 @@ import { solidEngine } from '../core/3d/SolidEngine';
 import { buildFeatureEvalOps } from '../core/3d/FeaturePipelineAdapter';
 import { createPlaneFromFaceNormal } from '../core/3d/DatumPlaneEngine';
 import { ExtrudePreviewRenderer } from './ExtrudePreviewRenderer';
+import { RevolvePreviewRenderer } from './RevolvePreviewRenderer';
 import { Sketch3DRenderer } from './Sketch3DRenderer';
 
 // Error Boundary 元件，防止 3D Canvas 渲染或 WebGL 錯誤導致整個 React 畫面白屏
@@ -860,6 +861,9 @@ const CanvasContent: React.FC = () => {
 
       {/* 3D 即時伸長長料 / 除料幾何與方向向量預覽 */}
       <ExtrudePreviewRenderer />
+
+      {/* 3D 即時旋轉長料 / 除料幾何、旋轉軸心與軌跡預覽 */}
+      <RevolvePreviewRenderer />
 
       {/* 實體網格渲染 */}
       <CumulativePartMesh

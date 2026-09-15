@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useCADStore } from '../store/cadStore';
 import {
   SketchFeature,
@@ -28,7 +28,16 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
   mode,
   onClose,
 }) => {
-  const { document, activeSketchId, addFeature, setViewMode } = useCADStore();
+  const { 
+    document, 
+    activeSketchId, 
+    addFeature, 
+    viewMode,
+    setViewMode,
+    setRevolvePreview,
+    revolvePreview,
+    isPickingRevolveAxis
+  } = useCADStore();
 
   // 取得目前特徵樹中的所有草圖特徵
   const sketches = (document?.featureTree || []).filter(
@@ -45,6 +54,10 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
   // 當彈窗開啟或 mode 切換時，初始化預設表單狀態與名稱
   useEffect(() => {
     if (!isOpen) return;
+
+    if (viewMode !== '3D') {
+      setViewMode('3D');
+    }
 
     // 自動產生特徵名稱
     const tree = document?.featureTree || [];
@@ -82,6 +95,12 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
       return;
     }
 
+    // 若 store 中有記錄 2D 點選的軸，優先使用
+    if (revolvePreview?.axisEntityId) {
+      setSelectedAxisId(revolvePreview.axisEntityId);
+      return;
+    }
+
     // 優先選取第一條建構線；若無，預設選取第一條普通直線
     const constructionLine = lineEntities.find((l) => l.isConstruction);
     if (constructionLine) {
@@ -89,7 +108,53 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
     } else {
       setSelectedAxisId(lineEntities[0].id);
     }
-  }, [selectedSketchId, targetSketch?.id, lineEntities.length]);
+  }, [selectedSketchId, targetSketch?.id, lineEntities.length, revolvePreview?.axisEntityId]);
+
+  // 若預覽狀態中發生方向反轉切換，同步至本地狀態
+  useEffect(() => {
+    if (revolvePreview && revolvePreview.reversed !== undefined && revolvePreview.reversed !== reversed) {
+      setReversed(revolvePreview.reversed);
+    }
+  }, [revolvePreview?.reversed]);
+
+  // 即時同步旋轉預覽狀態至 3D 視圖
+  useEffect(() => {
+    if (!isOpen || !selectedSketchId || !selectedAxisId) {
+      // 若非開啟或無有效輸入，清除預覽 (但若為 2D 點選模式，保留草圖 id 以便亮顯)
+      setRevolvePreview(isOpen && selectedSketchId ? {
+        isOpen: true,
+        mode,
+        sketchId: selectedSketchId,
+        axisEntityId: '',
+        angle: 0
+      } : null);
+      return;
+    }
+
+    const validAngleDeg = Math.max(0.1, Math.min(360, Number(angleDeg) || 360));
+    const angleRad = (validAngleDeg * Math.PI) / 180;
+
+    setRevolvePreview({
+      isOpen: true,
+      mode,
+      sketchId: selectedSketchId,
+      axisEntityId: selectedAxisId,
+      angle: angleRad,
+      reversed
+    });
+  }, [isOpen, mode, selectedSketchId, selectedAxisId, angleDeg, reversed, setRevolvePreview]);
+
+  // 元件卸載或關閉時清除預覽
+  useEffect(() => {
+    return () => {
+      setRevolvePreview(null);
+    };
+  }, [setRevolvePreview]);
+
+  const handleClose = useCallback(() => {
+    setRevolvePreview(null);
+    onClose();
+  }, [setRevolvePreview, onClose]);
 
   if (!isOpen) return null;
 
@@ -140,23 +205,22 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
 
     // 自動切換視圖模式至 3D 並關閉彈窗
     setViewMode('3D');
-    onClose();
+    handleClose();
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+    <div
+      className={`fixed top-24 left-4 z-40 w-96 max-h-[calc(100vh-7rem)] overflow-hidden flex flex-col bg-neutral-950/95 backdrop-blur-md border border-neutral-800 rounded-xl shadow-2xl text-neutral-200 select-none animate-in fade-in slide-in-from-left-4 duration-200 ${isPickingRevolveAxis ? 'pointer-events-none opacity-40' : 'pointer-events-auto opacity-100'}`}
+      id="revolve-feature-propertymanager"
+    >
+      {/* SW 經典對話框頂部 Header */}
       <div
-        className="w-full max-w-md bg-neutral-950 border border-neutral-800 rounded-xl shadow-2xl overflow-hidden flex flex-col text-neutral-200 select-none"
-        onClick={(e) => e.stopPropagation()}
+        className={`h-12 px-4 border-b flex items-center justify-between shrink-0 font-sans ${
+          isBoss
+            ? 'bg-purple-950/70 border-purple-800/50'
+            : 'bg-rose-950/70 border-rose-800/50'
+        }`}
       >
-        {/* SW 經典對話框頂部 Header */}
-        <div
-          className={`h-12 px-4 border-b flex items-center justify-between shrink-0 font-sans ${
-            isBoss
-              ? 'bg-purple-950/60 border-purple-800/40'
-              : 'bg-rose-950/60 border-rose-800/40'
-          }`}
-        >
           <div className="flex items-center gap-2.5">
             <div
               className={`p-1.5 rounded-lg border shadow-sm ${
@@ -177,7 +241,7 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
             </div>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="p-1 text-neutral-400 hover:text-white hover:bg-neutral-800/80 rounded-lg transition-colors"
             title="關閉 (Esc)"
           >
@@ -384,7 +448,6 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
             </button>
           </div>
         </form>
-      </div>
     </div>
   );
 };

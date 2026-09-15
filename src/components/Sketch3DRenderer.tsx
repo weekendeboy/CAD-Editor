@@ -21,6 +21,7 @@ export const Sketch3DRenderer: React.FC = () => {
   const featureTree = useCADStore((state) => state.document.featureTree);
   const activeSketchId = useCADStore((state) => state.activeSketchId);
   const extrudePreview = useCADStore((state) => state.extrudePreview);
+  const revolvePreview = useCADStore((state) => state.revolvePreview);
 
   const sketches = useMemo(() => {
     return (featureTree || []).filter(
@@ -34,6 +35,7 @@ export const Sketch3DRenderer: React.FC = () => {
       id: string;
       isActive: boolean;
       isTarget: boolean;
+      isRevolveTarget: boolean;
       geometry: THREE.BufferGeometry;
     }[] = [];
 
@@ -41,6 +43,7 @@ export const Sketch3DRenderer: React.FC = () => {
       const plane: CustomPlane = sketch.plane || DatumFrontPlane;
       const isActive = sketch.id === activeSketchId;
       const isTarget = sketch.id === extrudePreview?.sketchId;
+      const isRevolveTarget = sketch.id === revolvePreview?.sketchId;
       const segmentPoints: THREE.Vector3[] = [];
 
       (sketch.entities || []).forEach((entity) => {
@@ -122,19 +125,22 @@ export const Sketch3DRenderer: React.FC = () => {
           id: sketch.id,
           isActive,
           isTarget,
+          isRevolveTarget,
           geometry: geom,
         });
       }
     });
 
     return results;
-  }, [sketches, activeSketchId, extrudePreview?.sketchId]);
+  }, [sketches, activeSketchId, extrudePreview?.sketchId, revolvePreview?.sketchId]);
 
   return (
     <group name="sketch-3d-renderer">
-      {sketchMeshes.map(({ id, isActive, isTarget, geometry }) => {
+      {sketchMeshes.map(({ id, isActive, isTarget, isRevolveTarget, geometry }) => {
         let color = '#94a3b8'; // 預設草圖灰色
-        if (isTarget) {
+        if (isRevolveTarget) {
+          color = '#c084fc'; // 即將旋轉的目標草圖亮紫色
+        } else if (isTarget) {
           color = '#fbbf24'; // 即將拉伸的目標草圖亮黃色
         } else if (isActive) {
           color = '#38bdf8'; // 當前作用中的草圖亮天藍色
@@ -144,7 +150,7 @@ export const Sketch3DRenderer: React.FC = () => {
           <lineSegments key={id} geometry={geometry}>
             <lineBasicMaterial
               color={color}
-              linewidth={isActive || isTarget ? 2 : 1}
+              linewidth={isActive || isTarget || isRevolveTarget ? 2 : 1}
               depthTest={true}
             />
           </lineSegments>

@@ -574,30 +574,46 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
       const axis = new occ.gp_Ax1_2(axPnt, axDir);
 
       // 3. Revolve around 3D axis
-      const revolMaker = new occ.BRepPrimAPI_MakeRevol_1(transformedFace, axis, angle, false);
-      const revolSolid = revolMaker.Shape();
+      let revolSolid = null;
+      try {
+        const revolMaker = new occ.BRepPrimAPI_MakeRevol_1(transformedFace, axis, angle, false);
+        revolSolid = revolMaker.Shape();
+        revolMaker.delete();
+      } catch (err) {
+        console.error('SolidWorker: Failed to create Revolve feature:', err);
+      }
 
       // Clean up revolve objects
       transformedFace.delete();
       axPnt.delete();
       axDir.delete();
       axis.delete();
-      revolMaker.delete();
 
-      featureSolids.push(revolSolid);
+      if (revolSolid) {
+        featureSolids.push(revolSolid);
+      }
     } else {
       // EXTRUDE / CUT_EXTRUDE
       const depth = typeof op.depth === 'number' && !isNaN(op.depth) ? op.depth : 10;
 
       // 1. Local extrusion along Z-axis (0, 0, depth)
       const vec = new occ.gp_Vec_4(0, 0, depth);
-      const prismMaker = new occ.BRepPrimAPI_MakePrism_1(localFace, vec, false, true);
-      let localSolid = prismMaker.Shape();
+      let localSolid = null;
+      try {
+        const prismMaker = new occ.BRepPrimAPI_MakePrism_1(localFace, vec, false, true);
+        localSolid = prismMaker.Shape();
+        prismMaker.delete();
+      } catch (err) {
+        console.error('SolidWorker: Failed to create Extrude feature:', err);
+      }
 
-      // Clean up face, vector, and prism maker
+      // Clean up face and vector
       localFace.delete();
       vec.delete();
-      prismMaker.delete();
+
+      if (!localSolid) {
+        continue;
+      }
 
       // 2. Local direction offset shift
       if (op.direction === 'mid-plane') {
@@ -1625,8 +1641,14 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           throw new Error('STEP write failed');
         }
 
-        const stepContent = occ.FS.readFile(fileName, { encoding: 'utf8' });
-        occ.FS.unlink(fileName);
+        let stepContent = '';
+        try {
+          stepContent = occ.FS.readFile(fileName, { encoding: 'utf8' });
+          occ.FS.unlink(fileName);
+        } catch (fsErr) {
+          console.warn('FS error reading STEP:', fsErr);
+          throw new Error('STEP file generation failed on FS layer');
+        }
         stepWriter.delete();
 
         _self.postMessage({
@@ -1642,28 +1664,57 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         if (!oc || !currentSolid) throw new Error('No solid available to export');
         const occ = oc;
 
+        // Ensure the solid has a mesh before exporting to STL
+        let mesher = null;
+        try {
+          mesher = new occ.BRepMesh_IncrementalMesh_2(currentSolid, 0.1, false, 0.5, false);
+        } catch (err) {
+          console.warn('Meshing failed before STL export:', err);
+        }
+
         const stlWriter = new occ.StlAPI_Writer();
         stlWriter.ASCIIMode = false; // Binary
         const fileName = `export_${Date.now()}.stl`;
-        const result = stlWriter.Write(currentSolid, fileName);
+        
+        let result = false;
+        try {
+          result = stlWriter.Write(currentSolid, fileName);
+        } catch (err) {
+          console.error('StlAPI_Writer Write exception:', err);
+        }
+
+        if (mesher) {
+          mesher.delete();
+        }
+
         if (!result) {
           stlWriter.delete();
           throw new Error('STL write failed');
         }
 
-        const stlContent = occ.FS.readFile(fileName);
-        occ.FS.unlink(fileName);
+        let stlContent: Uint8Array | null = null;
+        try {
+          stlContent = occ.FS.readFile(fileName);
+          occ.FS.unlink(fileName);
+        } catch (fsErr) {
+          console.warn('FS error reading STL:', fsErr);
+          throw new Error('STL file generation failed on FS layer');
+        }
         stlWriter.delete();
 
-        _self.postMessage(
-          {
-            taskId: req.taskId,
-            type: req.type,
-            success: true,
-            data: stlContent,
-          } as SolidTaskResponse,
-          [stlContent.buffer]
-        );
+        if (stlContent) {
+          _self.postMessage(
+            {
+              taskId: req.taskId,
+              type: req.type,
+              success: true,
+              data: stlContent,
+            } as SolidTaskResponse,
+            [stlContent.buffer]
+          );
+        } else {
+          throw new Error('STL content is empty');
+        }
         break;
       }
 
