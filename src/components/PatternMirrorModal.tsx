@@ -45,7 +45,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
 
   // 過濾特徵樹中的自訂基準面
   const datumPlaneFeatures = (document?.featureTree || []).filter(
-    (f): f is DatumPlaneFeature => f.type === 'DATUM_PLANE'
+    (f): f is DatumPlaneFeature => f.type === 'DATUM_PLANE' && !['datum-front', 'datum-top', 'datum-right'].includes(f.id)
   );
 
   // 共用狀態

@@ -195,7 +195,9 @@ export function buildFeatureEvalOps(
       const sk = sketchMap.get(revFeature.sketchId);
 
       if (sk && sk.profiles && sk.profiles.length > 0) {
-        // 尋找作為旋轉軸的直線圖元
+        const plane = sk.plane;
+
+        // 1. 提取旋轉軸直線圖元 axisLine
         let axisLine: LineEntity | undefined;
 
         if (sk.entities && sk.entities.length > 0) {
@@ -208,7 +210,7 @@ export function buildFeatureEvalOps(
             }
           }
 
-          // 若未指定或找不到指定直線，預設尋找草圖中第一條建構線（isConstruction: true）或第一條直線作為回退備援
+          // 若未找到，以第一條建構線或第一條直線作為 Fallback
           if (!axisLine) {
             const constrLine = sk.entities.find(
               (e) => e.type === 'line' && Boolean(e.isConstruction)
@@ -224,42 +226,58 @@ export function buildFeatureEvalOps(
           }
         }
 
+        // 2. 計算 3D 空間軸向
         let axisOrigin: Point3D;
         let axisDirection: Point3D;
 
         if (axisLine) {
-          // 利用 mapPoint2DTo3D 將 axisLine.start 轉為 3D 原點 axisOrigin
-          const start3D = mapPoint2DTo3D(axisLine.start, sk.plane);
-          const end3D = mapPoint2DTo3D(axisLine.end, sk.plane);
-          const dx = end3D.x - start3D.x;
-          const dy = end3D.y - start3D.y;
-          const dz = end3D.z - start3D.z;
-          const len = Math.hypot(dx, dy, dz);
-
-          axisOrigin = start3D;
-          axisDirection =
-            len > 1e-9
-              ? { x: dx / len, y: dy / len, z: dz / len }
-              : {
-                  x: sk.plane.yAxis.x,
-                  y: sk.plane.yAxis.y,
-                  z: sk.plane.yAxis.z,
-                };
+          // 起點映射
+          axisOrigin = mapPoint2DTo3D(axisLine.start, plane);
+          // 終點映射
+          const pEnd3D = mapPoint2DTo3D(axisLine.end, plane);
+          // 軸向單位向量
+          axisDirection = normalizeVec3({
+            x: pEnd3D.x - axisOrigin.x,
+            y: pEnd3D.y - axisOrigin.y,
+            z: pEnd3D.z - axisOrigin.z,
+          });
         } else {
           // 若無任何直線圖元可作軸線，回退使用基準面原點與 Y 軸向量
           axisOrigin = {
-            x: sk.plane.origin.x,
-            y: sk.plane.origin.y,
-            z: sk.plane.origin.z,
+            x: plane.origin.x,
+            y: plane.origin.y,
+            z: plane.origin.z,
           };
-          axisDirection = {
-            x: sk.plane.yAxis.x,
-            y: sk.plane.yAxis.y,
-            z: sk.plane.yAxis.z,
-          };
+          axisDirection = normalizeVec3({
+            x: plane.yAxis.x,
+            y: plane.yAxis.y,
+            z: plane.yAxis.z,
+          });
         }
 
-        // 篩選指定之 profileIds
+        // 3. 處理旋轉角度與方向
+        let angleRad = revFeature.angle ?? (2 * Math.PI);
+        // 若傳入的是度數（如 360, 180 等大於 2*PI 的數值），轉換為弧度
+        if (Math.abs(angleRad) > 2 * Math.PI + 1e-4) {
+          angleRad = (angleRad * Math.PI) / 180;
+        }
+
+        const isReversed = Boolean(
+          (revFeature as any).isReversed ||
+          (revFeature as any).reversed ||
+          angleRad < 0
+        );
+
+        if (isReversed) {
+          axisDirection = {
+            x: -axisDirection.x,
+            y: -axisDirection.y,
+            z: -axisDirection.z,
+          };
+          angleRad = Math.abs(angleRad);
+        }
+
+        // 4. 篩選指定之 profileIds
         const profileIds = revFeature.profileIds;
         const targetProfiles =
           profileIds && profileIds.length > 0
@@ -277,7 +295,7 @@ export function buildFeatureEvalOps(
               origin: axisOrigin,
               direction: axisDirection,
             },
-            angle: revFeature.angle || 2 * Math.PI,
+            angle: angleRad,
           });
         }
       }
@@ -373,6 +391,7 @@ export function buildFeatureEvalOps(
           type: 'line' | 'arc';
           start: Point3D;
           end: Point3D;
+          mid?: Point3D;
           center?: Point3D;
           radius?: number;
         }[] = [];
@@ -398,10 +417,17 @@ export function buildFeatureEvalOps(
               y: arc.center.y + arc.radius * Math.sin(arc.endAngle),
             };
 
+            const midAngle = arc.startAngle + ((arc.endAngle - arc.startAngle + (arc.endAngle < arc.startAngle ? Math.PI * 2 : 0)) / 2);
+            const mid2D = {
+              x: arc.center.x + arc.radius * Math.cos(midAngle),
+              y: arc.center.y + arc.radius * Math.sin(midAngle),
+            };
+
             pathSegments.push({
               type: 'arc',
               start: mapPoint2DTo3D(start2D, pathSk.plane),
               end: mapPoint2DTo3D(end2D, pathSk.plane),
+              mid: mapPoint2DTo3D(mid2D, pathSk.plane),
               center: mapPoint2DTo3D(arc.center, pathSk.plane),
               radius: arc.radius,
             });

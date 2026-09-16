@@ -15,6 +15,7 @@ export function add3D(v1: Point3D, v2: Point3D): Point3D {
     z: v1.z + v2.z,
   };
 }
+export const addVec3 = add3D;
 
 /**
  * 向量減法: v1 - v2
@@ -26,6 +27,7 @@ export function sub3D(v1: Point3D, v2: Point3D): Point3D {
     z: v1.z - v2.z,
   };
 }
+export const subVec3 = sub3D;
 
 /**
  * 向量數乘: s * v
@@ -37,6 +39,7 @@ export function scale3D(v: Point3D, s: number): Point3D {
     z: v.z * s,
   };
 }
+export const scaleVec3 = scale3D;
 
 /**
  * 向量點積 (Dot Product): v1 · v2
@@ -44,6 +47,7 @@ export function scale3D(v: Point3D, s: number): Point3D {
 export function dot3D(v1: Point3D, v2: Point3D): number {
   return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
 }
+export const dotVec3 = dot3D;
 
 /**
  * 向量外積 (Cross Product): v1 × v2 (遵循右手定則)
@@ -55,6 +59,7 @@ export function cross3D(v1: Point3D, v2: Point3D): Point3D {
     z: v1.x * v2.y - v1.y * v2.x,
   };
 }
+export const crossVec3 = cross3D;
 
 /**
  * 向量模長 (Length / Norm): ||v||
@@ -62,6 +67,7 @@ export function cross3D(v1: Point3D, v2: Point3D): Point3D {
 export function length3D(v: Point3D): number {
   return Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
 }
+export const lengthVec3 = length3D;
 
 /**
  * 單位化向量 (Normalize): v / ||v||
@@ -77,6 +83,7 @@ export function normalize3D(v: Point3D): Point3D {
     z: v.z / len,
   };
 }
+export const normalizeVec3 = normalize3D;
 
 /**
  * 羅德里格旋轉公式 (Rodrigues' Rotation Formula):
@@ -185,23 +192,42 @@ export function orthogonalizePlane(plane: CustomPlane): CustomPlane {
 /**
  * 偏移基準面計算 (Offset Plane)
  * 新原點: O_new = O_ref + offsetDistance * N_ref
- * 姿勢向量 N, X, Y 保持與參照面相同
+ * 姿態向量 N, X, Y 保持與參照面相同，經正交化後回傳
  */
 export function createOffsetPlane(
   refPlane: CustomPlane,
   offsetDistance: number,
-  name?: string,
-  id?: string
+  idOrName?: string,
+  nameOrId?: string
 ): CustomPlane {
+  let planeId = idOrName;
+  let planeName = nameOrId;
+
+  // 自動解析傳入的 id 與 name 順序相容性
+  if (idOrName && !nameOrId) {
+    if (idOrName.startsWith('plane-') || idOrName.startsWith('datum-') || idOrName.includes('-')) {
+      planeId = idOrName;
+      planeName = undefined;
+    } else {
+      planeName = idOrName;
+      planeId = undefined;
+    }
+  } else if (idOrName && nameOrId) {
+    if ((idOrName.includes(' ') || idOrName.includes('(')) && (nameOrId.includes('-') || nameOrId.startsWith('datum') || nameOrId.startsWith('plane'))) {
+      planeName = idOrName;
+      planeId = nameOrId;
+    }
+  }
+
   const normRef = normalize3D(refPlane.normal);
   const newOrigin = add3D(refPlane.origin, scale3D(normRef, offsetDistance));
 
-  const planeId = id || `plane-offset-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-  const planeName = name || `${refPlane.name} Offset (${offsetDistance >= 0 ? '+' : ''}${offsetDistance}mm)`;
+  const finalId = planeId || `plane-offset-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const finalName = planeName || `${refPlane.name || 'Plane'} Offset (${offsetDistance >= 0 ? '+' : ''}${offsetDistance}mm)`;
 
   const rawPlane: CustomPlane = {
-    id: planeId,
-    name: planeName,
+    id: finalId,
+    name: finalName,
     origin: newOrigin,
     normal: { ...refPlane.normal },
     xAxis: { ...refPlane.xAxis },
@@ -213,10 +239,75 @@ export function createOffsetPlane(
 }
 
 /**
- * 角度基準面計算 (Angled Plane / 繞軸旋轉)
- * 使用羅德里格旋轉公式 (Rodrigues' Rotation Formula)，
- * 將參照面的 Normal, xAxis, yAxis 及原點繞指定軸線 (axisOrigin, axisDirection) 旋轉 angleRad。
- * 套用正交化處理後回傳全新 CustomPlane。
+ * 繞任意空間直線/邊界旋轉基準面 (Rotated Plane Around Axis)
+ * 使用羅德里格旋轉公式 (Rodrigues' Rotation Formula):
+ * 將參照面的 Normal, xAxis 繞指定旋轉軸 (axisOrigin, axisDirection) 旋轉 angleRad。
+ * 原點變換:
+ * O_rel = O_ref - P_axis
+ * O_new = P_axis + Rodrigues(O_rel, kUnit, angleRad)
+ * 呼叫 orthogonalizePlane 補正數值誤差並依右手定則重算 yAxis。
+ */
+export function createRotatedPlaneAroundAxis(
+  refPlane: CustomPlane,
+  axisOrigin: Point3D,
+  axisDirection: Point3D,
+  angleRad: number,
+  idOrName?: string,
+  nameOrId?: string
+): CustomPlane {
+  let planeId = idOrName;
+  let planeName = nameOrId;
+
+  if (idOrName && !nameOrId) {
+    if (idOrName.startsWith('plane-') || idOrName.startsWith('datum-') || idOrName.includes('-')) {
+      planeId = idOrName;
+      planeName = undefined;
+    } else {
+      planeName = idOrName;
+      planeId = undefined;
+    }
+  } else if (idOrName && nameOrId) {
+    if ((idOrName.includes(' ') || idOrName.includes('(')) && (nameOrId.includes('-') || nameOrId.startsWith('datum') || nameOrId.startsWith('plane'))) {
+      planeName = idOrName;
+      planeId = nameOrId;
+    }
+  }
+
+  const kUnit = normalize3D(axisDirection);
+
+  // 若旋轉軸退化，回傳正交化副本
+  if (length3D(kUnit) < 1e-12) {
+    return orthogonalizePlane({ ...refPlane });
+  }
+
+  // 羅德里格旋轉處理姿勢向量
+  const newNormal = rodriguesRotate(refPlane.normal, kUnit, angleRad);
+  const newXAxis = rodriguesRotate(refPlane.xAxis, kUnit, angleRad);
+
+  // 原點繞空間軸旋轉變換
+  const vecFromAxis = sub3D(refPlane.origin, axisOrigin);
+  const rotatedVecFromAxis = rodriguesRotate(vecFromAxis, kUnit, angleRad);
+  const newOrigin = add3D(axisOrigin, rotatedVecFromAxis);
+
+  const angleDeg = ((angleRad * 180) / Math.PI).toFixed(1);
+  const finalId = planeId || `plane-rotated-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const finalName = planeName || `${refPlane.name || 'Plane'} Rotated (${angleDeg}°)`;
+
+  const rawPlane: CustomPlane = {
+    id: finalId,
+    name: finalName,
+    origin: newOrigin,
+    normal: newNormal,
+    xAxis: newXAxis,
+    yAxis: { ...refPlane.yAxis },
+    parentFeatureId: refPlane.parentFeatureId,
+  };
+
+  return orthogonalizePlane(rawPlane);
+}
+
+/**
+ * 角度基準面舊相容介面 (Angled Plane)
  */
 export function createAngledPlane(
   refPlane: CustomPlane,
@@ -226,38 +317,7 @@ export function createAngledPlane(
   name?: string,
   id?: string
 ): CustomPlane {
-  const kUnit = normalize3D(axisDirection);
-
-  // 若旋轉軸無效，回傳副本
-  if (length3D(kUnit) < 1e-12) {
-    return orthogonalizePlane({ ...refPlane });
-  }
-
-  // 旋轉方向姿態向量
-  const newNormal = rodriguesRotate(refPlane.normal, kUnit, angleRad);
-  const newXAxis = rodriguesRotate(refPlane.xAxis, kUnit, angleRad);
-  const newYAxis = rodriguesRotate(refPlane.yAxis, kUnit, angleRad);
-
-  // 旋轉原點向量 (繞軸點 axisOrigin 旋轉)
-  const vecFromAxis = sub3D(refPlane.origin, axisOrigin);
-  const rotatedVecFromAxis = rodriguesRotate(vecFromAxis, kUnit, angleRad);
-  const newOrigin = add3D(axisOrigin, rotatedVecFromAxis);
-
-  const angleDeg = ((angleRad * 180) / Math.PI).toFixed(1);
-  const planeId = id || `plane-angled-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-  const planeName = name || `${refPlane.name} Angled (${angleDeg}°)`;
-
-  const rawPlane: CustomPlane = {
-    id: planeId,
-    name: planeName,
-    origin: newOrigin,
-    normal: newNormal,
-    xAxis: newXAxis,
-    yAxis: newYAxis,
-    parentFeatureId: refPlane.parentFeatureId,
-  };
-
-  return orthogonalizePlane(rawPlane);
+  return createRotatedPlaneAroundAxis(refPlane, axisOrigin, axisDirection, angleRad, id, name);
 }
 
 /**

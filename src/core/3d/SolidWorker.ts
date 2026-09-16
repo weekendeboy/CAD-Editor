@@ -32,13 +32,13 @@ async function initWorker(wasmBuffer?: ArrayBuffer, occBaseUrl?: string) {
     try {
       (self as any).importScripts(jsUrl);
     } catch (e) {
-      console.warn("importScripts failed, falling back to fetch+eval.", e);
+      console.warn('importScripts failed, falling back to fetch+eval.', e);
       const scriptRes = await fetch(jsUrl);
       if (!scriptRes.ok) {
         throw new Error(`Failed to fetch OCC JS: ${scriptRes.status}`);
       }
       const scriptText = await scriptRes.text();
-      (new Function(scriptText))();
+      new Function(scriptText)();
     }
 
     let activeWasmBuffer = wasmBuffer;
@@ -165,121 +165,129 @@ function getEdgeDirection(
 }
 
 /**
- * 輔助函式：從圓形、起點、終點與旋向安全構建 TopoDS_Edge 圓弧段
- * 修正 OpenCASCADE.js embind 簽章：
- * 1. 使用 GC_MakeArcOfCircle_3(circ, p1, p2, sense)（4個參數）
- * 2. mkArc.Value() 回傳 Handle_Geom_TrimmedCurve，透過 Handle_Geom_Curve_2 向上轉型為 Handle_Geom_Curve
- * 3. 傳入 BRepBuilderAPI_MakeEdge_24(curveHandle) 構建邊
- * 4. 具備 BRepBuilderAPI_MakeEdge_10 與直線連通的健壯回退機制
+ * 從 2D 輪廓段（ProfileSegment）構建封閉的 TopoDS_Wire
+ * 升級為數學上絕對無歧義的「三點定弧法 (3-Point Arc)」，徹底杜絕反向走訪時產生的互補長弧變形與輪廓自交問題。
  */
-function createArcEdge(
-  occ: any,
-  circle: any,
-  p1: any,
-  p2: any,
-  sense: boolean
-): any {
-  // 方法一：標準 GC_MakeArcOfCircle_3 (gp_Circ, gp_Pnt, gp_Pnt, Standard_Boolean sense)
-  if (typeof occ.GC_MakeArcOfCircle_3 === 'function') {
-    try {
-      const mkArc = new occ.GC_MakeArcOfCircle_3(circle, p1, p2, sense);
-      if (mkArc.IsDone()) {
-        const trimmed = mkArc.Value();
-        let geomCurve: any = null;
-        if (typeof occ.Handle_Geom_Curve_2 === 'function') {
-          geomCurve = new occ.Handle_Geom_Curve_2(trimmed.get());
-        }
-        const curveHandle = geomCurve || trimmed;
-        if (typeof occ.BRepBuilderAPI_MakeEdge_24 === 'function') {
-          const mkEdge = new occ.BRepBuilderAPI_MakeEdge_24(curveHandle);
-          if (mkEdge.IsDone()) {
-            const edge = mkEdge.Edge();
-            mkEdge.delete();
-            if (geomCurve) geomCurve.delete();
-            trimmed.delete();
-            mkArc.delete();
-            return edge;
-          }
-          mkEdge.delete();
-        }
-        if (geomCurve) geomCurve.delete();
-        trimmed.delete();
-      }
-      mkArc.delete();
-    } catch (arcErr) {
-      console.warn('createArcEdge via GC_MakeArcOfCircle_3 failed:', arcErr);
-    }
-  }
-
-  // 方法二：直接以圓形與起迄點構建邊（BRepBuilderAPI_MakeEdge_10）
-  if (typeof occ.BRepBuilderAPI_MakeEdge_10 === 'function') {
-    try {
-      const mkEdge = sense
-        ? new occ.BRepBuilderAPI_MakeEdge_10(circle, p1, p2)
-        : new occ.BRepBuilderAPI_MakeEdge_10(circle, p2, p1);
-      if (mkEdge.IsDone()) {
-        const edge = mkEdge.Edge();
-        mkEdge.delete();
-        return edge;
-      }
-      mkEdge.delete();
-    } catch (edgeErr) {
-      console.warn('createArcEdge via BRepBuilderAPI_MakeEdge_10 failed:', edgeErr);
-    }
-  }
-
-  // 方法三：降級回退為直線段，確保拓撲閉合不崩潰
-  try {
-    const mkEdge = (typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function')
-      ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
-      : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
-    if (mkEdge.IsDone()) {
-      const edge = mkEdge.Edge();
-      mkEdge.delete();
-      return edge;
-    }
-    mkEdge.delete();
-  } catch (lineErr) {
-    console.warn('createArcEdge fallback line failed:', lineErr);
-  }
-
-  return null;
-}
-
 function buildWireFromSegments(segments: ProfileSegment[], occ: any): any {
   const wireMaker = new occ.BRepBuilderAPI_MakeWire_1();
 
   for (const seg of segments) {
-    const p1 = new occ.gp_Pnt_3(seg.start.x, seg.start.y, 0);
-    const p2 = new occ.gp_Pnt_3(seg.end.x, seg.end.y, 0);
-
     if (seg.type === 'line') {
-      const mkEdge = (typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function')
-        ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
-        : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
+      const p1 = new occ.gp_Pnt_3(seg.start.x, seg.start.y, 0);
+      const p2 = new occ.gp_Pnt_3(seg.end.x, seg.end.y, 0);
+
+      const mkEdge =
+        typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function'
+          ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
+          : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
+
       if (mkEdge.IsDone()) {
         wireMaker.Add_1(mkEdge.Edge());
       }
       mkEdge.delete();
-    } else if (seg.type === 'arc' && seg.center && seg.radius) {
-      const center = new occ.gp_Pnt_3(seg.center.x, seg.center.y, 0);
-      const dir = new occ.gp_Dir_4(0, 0, 1);
-      const ax2 = new occ.gp_Ax2_3(center, dir);
-      const circle = new occ.gp_Circ_2(ax2, seg.radius);
+      p1.delete();
+      p2.delete();
+    } else if (seg.type === 'arc' && seg.center && typeof seg.radius === 'number' && seg.radius > 0) {
+      // 1. 計算 DXF 定義的起點與終點角度 (弧度)
+      let sAng = seg.startAngle;
+      let eAng = seg.endAngle;
 
-      const sense = seg.sweepFlag !== undefined ? seg.sweepFlag === 1 : true;
-      const arcEdge = createArcEdge(occ, circle, p1, p2, sense);
-      if (arcEdge) {
-        wireMaker.Add_1(arcEdge);
-        arcEdge.delete();
+      if (sAng === undefined || eAng === undefined) {
+        sAng = Math.atan2(seg.start.y - seg.center.y, seg.start.x - seg.center.x);
+        eAng = Math.atan2(seg.end.y - seg.center.y, seg.end.x - seg.center.x);
       }
-      circle.delete();
-      ax2.delete();
-      dir.delete();
-      center.delete();
+
+      let sweep = eAng - sAng;
+      
+      const isCW = seg.sweepFlag === 1;
+
+      if (isCW) {
+        // 順時針 (CW)：掃掠角應為負值
+        while (sweep >= 0) sweep -= 2 * Math.PI;
+        while (sweep < -2 * Math.PI) sweep += 2 * Math.PI;
+      } else {
+        // 逆時針 (CCW)：掃掠角應為正值
+        while (sweep <= 0) sweep += 2 * Math.PI;
+        while (sweep > 2 * Math.PI) sweep -= 2 * Math.PI;
+      }
+
+      // 依據正確的掃掠方向取幾何中點
+      const midAng = sAng + sweep / 2;
+      const midX = seg.center.x + seg.radius * Math.cos(midAng);
+      const midY = seg.center.y + seg.radius * Math.sin(midAng);
+
+      // 2. 以 3 點建立唯一圓弧（起點、幾何中點、終點）
+      const pStart = new occ.gp_Pnt_3(seg.start.x, seg.start.y, 0);
+      const pMid = new occ.gp_Pnt_3(midX, midY, 0);
+      const pEnd = new occ.gp_Pnt_3(seg.end.x, seg.end.y, 0);
+
+      let edgeAdded = false;
+
+      // 呼叫 OCC 專屬的三點圓弧建構子 GC_MakeArcOfCircle_4(P1, P2, P3)
+      if (typeof occ.GC_MakeArcOfCircle_4 === 'function') {
+        try {
+          const arcMaker = new occ.GC_MakeArcOfCircle_4(pStart, pMid, pEnd);
+          if (arcMaker.IsDone()) {
+            const trimmedCurve = arcMaker.Value();
+            let geomCurve: any = null;
+            if (typeof occ.Handle_Geom_Curve_2 === 'function') {
+              geomCurve = new occ.Handle_Geom_Curve_2(trimmedCurve.get());
+            }
+            const curveHandle = geomCurve || trimmedCurve;
+
+            if (typeof occ.BRepBuilderAPI_MakeEdge_24 === 'function') {
+              const edgeMaker = new occ.BRepBuilderAPI_MakeEdge_24(curveHandle);
+              if (edgeMaker.IsDone()) {
+                wireMaker.Add_1(edgeMaker.Edge());
+                edgeAdded = true;
+              }
+              edgeMaker.delete();
+            }
+
+            if (geomCurve) geomCurve.delete();
+            trimmedCurve.delete();
+          }
+          arcMaker.delete();
+        } catch (arcErr) {
+          console.warn('SolidWorker: 3-point arc construction exception:', arcErr);
+        }
+      }
+
+      // 退化保護：若三點共線或圓弧建立失敗，以直線相連起訖點
+      if (!edgeAdded) {
+        try {
+          const edgeMaker =
+            typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function'
+              ? new occ.BRepBuilderAPI_MakeEdge_3(pStart, pEnd)
+              : new occ.BRepBuilderAPI_MakeEdge_1(pStart, pEnd);
+          if (edgeMaker.IsDone()) {
+            wireMaker.Add_1(edgeMaker.Edge());
+          }
+          edgeMaker.delete();
+        } catch (lineErr) {
+          console.warn('SolidWorker: Fallback edge construction failed:', lineErr);
+        }
+      }
+
+      // 嚴格釋放幾何點記憶體
+      pStart.delete();
+      pMid.delete();
+      pEnd.delete();
+    } else {
+      // 未知或其他類型，以端點直線連通
+      const p1 = new occ.gp_Pnt_3(seg.start.x, seg.start.y, 0);
+      const p2 = new occ.gp_Pnt_3(seg.end.x, seg.end.y, 0);
+      const mkEdge =
+        typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function'
+          ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
+          : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
+      if (mkEdge.IsDone()) {
+        wireMaker.Add_1(mkEdge.Edge());
+      }
+      mkEdge.delete();
+      p1.delete();
+      p2.delete();
     }
-    p1.delete();
-    p2.delete();
   }
 
   const wire = wireMaker.Wire();
@@ -295,9 +303,10 @@ function buildWireFromPoints(points: { x: number; y: number }[], occ: any): any 
     const pt2 = points[(i + 1) % len];
     const p1 = new occ.gp_Pnt_3(pt1.x, pt1.y, 0);
     const p2 = new occ.gp_Pnt_3(pt2.x, pt2.y, 0);
-    const mkEdge = (typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function')
-      ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
-      : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
+    const mkEdge =
+      typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function'
+        ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
+        : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
     if (mkEdge.IsDone()) {
       wireMaker.Add_1(mkEdge.Edge());
     }
@@ -429,11 +438,11 @@ function transformFaceTo3D(
   const toNorm = new occ.gp_Dir_4(normal.x, normal.y, normal.z);
   const toXDir = new occ.gp_Dir_4(xAxis.x, xAxis.y, xAxis.z);
   const toAx = new occ.gp_Ax3_3(toOrig, toNorm, toXDir);
-  
+
   const calcY = {
     x: normal.y * xAxis.z - normal.z * xAxis.y,
     y: normal.z * xAxis.x - normal.x * xAxis.z,
-    z: normal.x * xAxis.y - normal.y * xAxis.x
+    z: normal.x * xAxis.y - normal.y * xAxis.x,
   };
   const dot = calcY.x * yAxis.x + calcY.y * yAxis.y + calcY.z * yAxis.z;
   if (dot < 0) {
@@ -465,6 +474,7 @@ function transformFaceTo3D(
 
 /**
  * 路徑 Wire 構建函式：從 3D 導引路徑段（line/arc）縫合為 TopoDS_Wire
+ * 採用 3 點定弧法確保空間圓弧方向唯一精確
  */
 function buildPathWire(
   segments: {
@@ -484,52 +494,92 @@ function buildPathWire(
     const p2 = new occ.gp_Pnt_3(seg.end.x, seg.end.y, seg.end.z);
 
     if (seg.type === 'line') {
-      const mkEdge = (typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function')
-        ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
-        : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
+      const mkEdge =
+        typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function'
+          ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
+          : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
       if (mkEdge.IsDone()) {
         wireMaker.Add_1(mkEdge.Edge());
       }
       mkEdge.delete();
-    } else if (seg.type === 'arc') {
-      if (seg.center) {
-        const center = new occ.gp_Pnt_3(seg.center.x, seg.center.y, seg.center.z);
-        // Calculate normal vector from center, start, end
+    } else if (seg.type === 'arc' && seg.center) {
+      let midX: number;
+      let midY: number;
+      let midZ: number;
+
+      if ((seg as any).mid) {
+        midX = (seg as any).mid.x;
+        midY = (seg as any).mid.y;
+        midZ = (seg as any).mid.z;
+      } else {
         const v1x = seg.start.x - seg.center.x;
         const v1y = seg.start.y - seg.center.y;
         const v1z = seg.start.z - seg.center.z;
         const v2x = seg.end.x - seg.center.x;
         const v2y = seg.end.y - seg.center.y;
         const v2z = seg.end.z - seg.center.z;
-
-        // Cross product v1 x v2
-        const nx = v1y * v2z - v1z * v2y;
-        const ny = v1z * v2x - v1x * v2z;
-        const nz = v1x * v2y - v1y * v2x;
-        const nLen = Math.hypot(nx, ny, nz);
-
-        let dir: any;
-        if (nLen > 1e-6) {
-          dir = new occ.gp_Dir_4(nx / nLen, ny / nLen, nz / nLen);
+  
+        const r = seg.radius || Math.hypot(v1x, v1y, v1z);
+  
+        // 計算角平分線向量作為 3D 圓弧中點
+        let midVx = v1x + v2x;
+        let midVy = v1y + v2y;
+        let midVz = v1z + v2z;
+        const midVLen = Math.hypot(midVx, midVy, midVz);
+  
+        if (midVLen > 1e-6) {
+          midX = seg.center.x + (midVx / midVLen) * r;
+          midY = seg.center.y + (midVy / midVLen) * r;
+          midZ = seg.center.z + (midVz / midVLen) * r;
         } else {
-          dir = new occ.gp_Dir_4(0, 0, 1);
+          midX = (seg.start.x + seg.end.x) / 2;
+          midY = (seg.start.y + seg.end.y) / 2;
+          midZ = (seg.start.z + seg.end.z) / 2;
         }
-
-        const radius = seg.radius || Math.hypot(v1x, v1y, v1z);
-        const ax2 = new occ.gp_Ax2_3(center, dir);
-        const circle = new occ.gp_Circ_2(ax2, radius);
-
-        const sense = seg.sweepFlag !== undefined ? (seg.sweepFlag === 1 || seg.sweepFlag === true) : true;
-        const arcEdge = createArcEdge(occ, circle, p1, p2, sense);
-        if (arcEdge) {
-          wireMaker.Add_1(arcEdge);
-          arcEdge.delete();
-        }
-        circle.delete();
-        ax2.delete();
-        dir.delete();
-        center.delete();
       }
+
+      const pMid = new occ.gp_Pnt_3(midX, midY, midZ);
+      let arcAdded = false;
+
+      if (typeof occ.GC_MakeArcOfCircle_4 === 'function') {
+        try {
+          const arcMaker = new occ.GC_MakeArcOfCircle_4(p1, pMid, p2);
+          if (arcMaker.IsDone()) {
+            const trimmed = arcMaker.Value();
+            let geomCurve: any = null;
+            if (typeof occ.Handle_Geom_Curve_2 === 'function') {
+              geomCurve = new occ.Handle_Geom_Curve_2(trimmed.get());
+            }
+            const curveHandle = geomCurve || trimmed;
+            if (typeof occ.BRepBuilderAPI_MakeEdge_24 === 'function') {
+              const edgeMaker = new occ.BRepBuilderAPI_MakeEdge_24(curveHandle);
+              if (edgeMaker.IsDone()) {
+                wireMaker.Add_1(edgeMaker.Edge());
+                arcAdded = true;
+              }
+              edgeMaker.delete();
+            }
+            if (geomCurve) geomCurve.delete();
+            trimmed.delete();
+          }
+          arcMaker.delete();
+        } catch (arcErr) {
+          console.warn('SolidWorker: 3D path arc failed:', arcErr);
+        }
+      }
+
+      if (!arcAdded) {
+        const lineMaker =
+          typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function'
+            ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
+            : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
+        if (lineMaker.IsDone()) {
+          wireMaker.Add_1(lineMaker.Edge());
+        }
+        lineMaker.delete();
+      }
+
+      pMid.delete();
     }
     p1.delete();
     p2.delete();
@@ -569,18 +619,34 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
       // 2. Setup 3D Axis of Revolution
       const axisOrigin = op.axis?.origin || { x: 0, y: 0, z: 0 };
       const axisDirVec = op.axis?.direction || { x: 0, y: 1, z: 0 };
-      const angle = typeof op.angle === 'number' && !isNaN(op.angle) ? op.angle : 2 * Math.PI;
+
+      // 角度校正：若傳入數值為角度值（大於 2*PI），自動轉為弧度
+      let angle = typeof op.angle === 'number' && !isNaN(op.angle) ? op.angle : 2 * Math.PI;
+      if (Math.abs(angle) > 2 * Math.PI + 1e-4) {
+        angle = (angle * Math.PI) / 180;
+      }
 
       const axPnt = new occ.gp_Pnt_3(axisOrigin.x, axisOrigin.y, axisOrigin.z);
       const axDir = new occ.gp_Dir_4(axisDirVec.x, axisDirVec.y, axisDirVec.z);
       const axis = new occ.gp_Ax1_2(axPnt, axDir);
 
       // 3. Revolve around 3D axis
+      // 判定是否為 360° (2*PI) 全周旋轉：
+      // 在 OCC 中，全周旋轉若帶角度呼叫 MakeRevol_1 常因浮點數精度導致首尾無法完美縫合
+      // 必須改用專門針對全周旋轉的無角度建構子 BRepPrimAPI_MakeRevol_2(Shape, Axis, Copy)
+      const isFullCircle = Math.abs(Math.abs(angle) - 2 * Math.PI) < 1e-4;
+
       let revolSolid = null;
       try {
-        const revolMaker = new occ.BRepPrimAPI_MakeRevol_1(transformedFace, axis, angle, false);
-        revolSolid = revolMaker.Shape();
-        revolMaker.delete();
+        if (isFullCircle && typeof occ.BRepPrimAPI_MakeRevol_2 === 'function') {
+          const revolMaker = new occ.BRepPrimAPI_MakeRevol_2(transformedFace, axis, false);
+          revolSolid = revolMaker.Shape();
+          revolMaker.delete();
+        } else {
+          const revolMaker = new occ.BRepPrimAPI_MakeRevol_1(transformedFace, axis, angle, false);
+          revolSolid = revolMaker.Shape();
+          revolMaker.delete();
+        }
       } catch (err) {
         console.error('SolidWorker: Failed to create Revolve feature:', err);
       }
@@ -660,7 +726,7 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
       const calcY = {
         x: normal.y * xAxis.z - normal.z * xAxis.y,
         y: normal.z * xAxis.x - normal.x * xAxis.z,
-        z: normal.x * xAxis.y - normal.y * xAxis.x
+        z: normal.x * xAxis.y - normal.y * xAxis.x,
       };
       const dot = calcY.x * yAxis.x + calcY.y * yAxis.y + calcY.z * yAxis.z;
       if (dot < 0) {
@@ -769,7 +835,9 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
       trsf.delete();
 
       const triangleArray = tri.Triangles();
-      const faceOrientation = (face as any).Orientation_1 ? (face as any).Orientation_1() : (face as any).Orientation();
+      const faceOrientation = (face as any).Orientation_1
+        ? (face as any).Orientation_1()
+        : (face as any).Orientation();
       const reverse = faceOrientation === occ.TopAbs_Orientation.TopAbs_REVERSED;
 
       for (let i = 1; i <= numTriangles; i++) {
@@ -815,9 +883,12 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
 
   while (edgeExplorer.More()) {
     const edge = occ.TopoDS.Edge_1(edgeExplorer.Current());
-    const hashCode = typeof edge.HashCode === 'function'
-      ? edge.HashCode(0x7FFFFFFF)
-      : (typeof edge.HashCode_1 === 'function' ? edge.HashCode_1(0x7FFFFFFF) : Math.random());
+    const hashCode =
+      typeof edge.HashCode === 'function'
+        ? edge.HashCode(0x7fffffff)
+        : typeof edge.HashCode_1 === 'function'
+        ? edge.HashCode_1(0x7fffffff)
+        : Math.random();
 
     if (!edgeSet.has(hashCode)) {
       edgeSet.add(hashCode);
@@ -940,120 +1011,31 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               op.type === 'REVOLVE' ||
               op.type === 'REVOLVE_CUT'
             ) {
-            const featureSolid = createFeatureSolid(op, occ);
-            if (!featureSolid || featureSolid.IsNull()) {
-              continue;
-            }
-
-            if (op.featureId) {
-              featureSolids.set(op.featureId, featureSolid);
-            }
-
-            const isCut = op.operation === 'CUT' || op.type === 'CUT_EXTRUDE' || op.type === 'REVOLVE_CUT';
-
-            if (currentSolid === null) {
-              // First feature evaluation
-              if (!isCut && (op.operation === 'JOIN' || op.type === 'EXTRUDE' || op.type === 'REVOLVE')) {
-                currentSolid = featureSolid;
-              } else {
-                // CUT operation requires an existing base body
-              }
-            } else {
-              if (!isCut) {
-                // Boolean Fuse (JOIN)
-                const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, featureSolid);
-                fuse.Build();
-                if (fuse.IsDone()) {
-                  const newSolid = fuse.Shape();
-                  if (currentSolid !== featureSolid) {
-                    currentSolid.delete();
-                  }
-                  currentSolid = newSolid;
-                }
-                fuse.delete();
-              } else {
-                // Boolean Cut (CUT)
-                const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, featureSolid);
-                cut.Build();
-                if (cut.IsDone()) {
-                  const newSolid = cut.Shape();
-                  if (currentSolid !== featureSolid) {
-                    currentSolid.delete();
-                  }
-                  currentSolid = newSolid;
-                }
-                cut.delete();
-              }
-            }
-          } else if (op.type === 'SWEEP') {
-            if (!op.sweepData || !op.sweepData.pathSegments || op.sweepData.pathSegments.length === 0) {
-              continue;
-            }
-            if (!op.profiles || op.profiles.length === 0) {
-              continue;
-            }
-
-            // 1. 構建 3D 導引路徑 pathWire
-            const pathWire = buildPathWire(op.sweepData.pathSegments, occ);
-
-            const sweepSolids: any[] = [];
-
-            for (const profile of op.profiles) {
-              // 2. 建立截面 2D TopoDS_Face
-              const localFace = createFaceFromProfile(profile, occ);
-              // 3. 轉換至 op.plane 的 3D 空間姿態
-              const spatialFace = transformFaceTo3D(localFace, op.plane || {}, occ);
-              localFace.delete();
-
-              // 4. 實例化 BRepOffsetAPI_MakePipe 生成實體
-              const pipeMaker = (typeof occ.BRepOffsetAPI_MakePipe_1 === 'function')
-                ? new occ.BRepOffsetAPI_MakePipe_1(pathWire, spatialFace)
-                : new occ.BRepOffsetAPI_MakePipe(pathWire, spatialFace);
-
-              pipeMaker.Build();
-              if (pipeMaker.IsDone()) {
-                const pipeSolid = pipeMaker.Shape();
-                sweepSolids.push(pipeSolid);
+              const featureSolid = createFeatureSolid(op, occ);
+              if (!featureSolid || featureSolid.IsNull()) {
+                continue;
               }
 
-              spatialFace.delete();
-              pipeMaker.delete();
-            }
-
-            pathWire.delete();
-
-            if (sweepSolids.length === 0) {
-              continue;
-            }
-
-            let featureSolid: any = null;
-            if (sweepSolids.length === 1) {
-              featureSolid = sweepSolids[0];
-            } else {
-              const builder = new occ.BRep_Builder();
-              const compound = new occ.TopoDS_Compound();
-              builder.MakeCompound(compound);
-              for (const s of sweepSolids) {
-                builder.Add(compound, s);
-                s.delete();
-              }
-              builder.delete();
-              featureSolid = compound;
-            }
-
-            if (featureSolid && !featureSolid.IsNull()) {
               if (op.featureId) {
                 featureSolids.set(op.featureId, featureSolid);
               }
 
-              const isCut = op.operation === 'CUT';
+              const isCut =
+                op.operation === 'CUT' || op.type === 'CUT_EXTRUDE' || op.type === 'REVOLVE_CUT';
 
               if (currentSolid === null) {
-                if (!isCut) {
+                // First feature evaluation
+                if (
+                  !isCut &&
+                  (op.operation === 'JOIN' || op.type === 'EXTRUDE' || op.type === 'REVOLVE')
+                ) {
                   currentSolid = featureSolid;
+                } else {
+                  // CUT operation requires an existing base body
                 }
               } else {
                 if (!isCut) {
+                  // Boolean Fuse (JOIN)
                   const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, featureSolid);
                   fuse.Build();
                   if (fuse.IsDone()) {
@@ -1065,6 +1047,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   }
                   fuse.delete();
                 } else {
+                  // Boolean Cut (CUT)
                   const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, featureSolid);
                   cut.Build();
                   if (cut.IsDone()) {
@@ -1077,147 +1060,305 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   cut.delete();
                 }
               }
-            }
-          } else if (op.type === 'LOFT') {
-            if (!op.loftData || !op.loftData.sections || op.loftData.sections.length < 2) {
-              continue;
-            }
-
-            const isSolid = op.loftData.isSolid ?? true;
-            const ruled = op.loftData.ruled ?? false;
-            const thruSections = new occ.BRepOffsetAPI_ThruSections(isSolid, ruled, 1.0e-6);
-
-            const intermediateWires: any[] = [];
-
-            for (const section of op.loftData.sections) {
-              if (!section.profiles || section.profiles.length === 0) continue;
-              for (const profile of section.profiles) {
-                let localWire: any = null;
-                if (profile.segments && profile.segments.length > 0) {
-                  localWire = buildWireFromSegments(profile.segments, occ);
-                } else if (profile.outerLoop && profile.outerLoop.length > 1) {
-                  localWire = buildWireFromPoints(profile.outerLoop, occ);
-                }
-                if (!localWire) continue;
-
-                const spatialWire = transformWireTo3D(localWire, section.plane, occ);
-                localWire.delete();
-
-                thruSections.AddWire(spatialWire);
-                intermediateWires.push(spatialWire);
+            } else if (op.type === 'SWEEP') {
+              if (
+                !op.sweepData ||
+                !op.sweepData.pathSegments ||
+                op.sweepData.pathSegments.length === 0
+              ) {
+                continue;
               }
-            }
-
-            thruSections.Build();
-
-            let featureSolid: any = null;
-            if (thruSections.IsDone()) {
-              featureSolid = thruSections.Shape();
-            }
-
-            // 釋放中繼 Wire 與構建器
-            for (const w of intermediateWires) {
-              w.delete();
-            }
-            thruSections.delete();
-
-            if (featureSolid && !featureSolid.IsNull()) {
-              if (op.featureId) {
-                featureSolids.set(op.featureId, featureSolid);
+              if (!op.profiles || op.profiles.length === 0) {
+                continue;
               }
 
-              const isCut = op.operation === 'CUT';
+              // 1. 構建 3D 導引路徑 pathWire
+              const pathWire = buildPathWire(op.sweepData.pathSegments, occ);
 
-              if (currentSolid === null) {
-                if (!isCut) {
-                  currentSolid = featureSolid;
+              const sweepSolids: any[] = [];
+
+              for (const profile of op.profiles) {
+                // 2. 建立截面 2D TopoDS_Face
+                const localFace = createFaceFromProfile(profile, occ);
+                // 3. 轉換至 op.plane 的 3D 空間姿態
+                const spatialFace = transformFaceTo3D(localFace, op.plane || {}, occ);
+                localFace.delete();
+
+                // 4. 實例化 BRepOffsetAPI_MakePipe 生成實體
+                const pipeMaker =
+                  typeof occ.BRepOffsetAPI_MakePipe_1 === 'function'
+                    ? new occ.BRepOffsetAPI_MakePipe_1(pathWire, spatialFace)
+                    : new occ.BRepOffsetAPI_MakePipe(pathWire, spatialFace);
+
+                pipeMaker.Build();
+                if (pipeMaker.IsDone()) {
+                  const pipeSolid = pipeMaker.Shape();
+                  sweepSolids.push(pipeSolid);
                 }
+
+                spatialFace.delete();
+                pipeMaker.delete();
+              }
+
+              pathWire.delete();
+
+              if (sweepSolids.length === 0) {
+                continue;
+              }
+
+              let featureSolid: any = null;
+              if (sweepSolids.length === 1) {
+                featureSolid = sweepSolids[0];
               } else {
-                if (!isCut) {
-                  const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, featureSolid);
-                  fuse.Build();
-                  if (fuse.IsDone()) {
-                    const newSolid = fuse.Shape();
-                    if (currentSolid !== featureSolid) {
-                      currentSolid.delete();
-                    }
-                    currentSolid = newSolid;
-                  }
-                  fuse.delete();
-                } else {
-                  const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, featureSolid);
-                  cut.Build();
-                  if (cut.IsDone()) {
-                    const newSolid = cut.Shape();
-                    if (currentSolid !== featureSolid) {
-                      currentSolid.delete();
-                    }
-                    currentSolid = newSolid;
-                  }
-                  cut.delete();
-                }
-              }
-            }
-          } else if (
-            op.type === 'LINEAR_PATTERN' ||
-            op.type === 'CIRCULAR_PATTERN' ||
-            op.type === 'MIRROR_3D'
-          ) {
-            // 從 featureSolids 取得目標特徵實體（若未指定或找不到，退化取 currentSolid 作為母體）
-            let sourceSolid: any = null;
-            let shouldDeleteSourceSolid = false;
-            if (op.targetFeatureIds && op.targetFeatureIds.length > 0) {
-              const sources: any[] = [];
-              for (const tid of op.targetFeatureIds) {
-                if (featureSolids.has(tid)) {
-                  sources.push(featureSolids.get(tid));
-                }
-              }
-              if (sources.length === 1) {
-                sourceSolid = sources[0];
-              } else if (sources.length > 1) {
                 const builder = new occ.BRep_Builder();
                 const compound = new occ.TopoDS_Compound();
                 builder.MakeCompound(compound);
-                for (const s of sources) {
+                for (const s of sweepSolids) {
                   builder.Add(compound, s);
+                  s.delete();
                 }
                 builder.delete();
-                sourceSolid = compound;
-                shouldDeleteSourceSolid = true;
+                featureSolid = compound;
               }
-            }
-            if (!sourceSolid || sourceSolid.IsNull()) {
-              sourceSolid = currentSolid;
-              shouldDeleteSourceSolid = false;
-            }
 
-            if (!sourceSolid || sourceSolid.IsNull()) {
-              continue;
-            }
+              if (featureSolid && !featureSolid.IsNull()) {
+                if (op.featureId) {
+                  featureSolids.set(op.featureId, featureSolid);
+                }
 
-            if (op.type === 'LINEAR_PATTERN') {
-              const pat = op.patternLinear;
-              if (pat) {
-                const dir1 = pat.dir1 || { x: 1, y: 0, z: 0 };
-                const count1 = typeof pat.count1 === 'number' && pat.count1 > 0 ? pat.count1 : 1;
-                const spacing1 = typeof pat.spacing1 === 'number' ? pat.spacing1 : 0;
+                const isCut = op.operation === 'CUT';
 
-                const dir2 = pat.dir2 || { x: 0, y: 1, z: 0 };
-                const count2 = typeof pat.count2 === 'number' && pat.count2 > 0 ? pat.count2 : 1;
-                const spacing2 = typeof pat.spacing2 === 'number' ? pat.spacing2 : 0;
+                if (currentSolid === null) {
+                  if (!isCut) {
+                    currentSolid = featureSolid;
+                  }
+                } else {
+                  if (!isCut) {
+                    const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, featureSolid);
+                    fuse.Build();
+                    if (fuse.IsDone()) {
+                      const newSolid = fuse.Shape();
+                      if (currentSolid !== featureSolid) {
+                        currentSolid.delete();
+                      }
+                      currentSolid = newSolid;
+                    }
+                    fuse.delete();
+                  } else {
+                    const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, featureSolid);
+                    cut.Build();
+                    if (cut.IsDone()) {
+                      const newSolid = cut.Shape();
+                      if (currentSolid !== featureSolid) {
+                        currentSolid.delete();
+                      }
+                      currentSolid = newSolid;
+                    }
+                    cut.delete();
+                  }
+                }
+              }
+            } else if (op.type === 'LOFT') {
+              if (!op.loftData || !op.loftData.sections || op.loftData.sections.length < 2) {
+                continue;
+              }
 
-                for (let i = 0; i < count1; i++) {
-                  for (let j = 0; j < count2; j++) {
-                    if (i === 0 && j === 0) continue;
+              const isSolid = op.loftData.isSolid ?? true;
+              const ruled = op.loftData.ruled ?? false;
+              const thruSections = new occ.BRepOffsetAPI_ThruSections(isSolid, ruled, 1.0e-6);
 
-                    const dx = i * spacing1 * dir1.x + j * spacing2 * (dir2?.x || 0);
-                    const dy = i * spacing1 * dir1.y + j * spacing2 * (dir2?.y || 0);
-                    const dz = i * spacing1 * dir1.z + j * spacing2 * (dir2?.z || 0);
+              const intermediateWires: any[] = [];
 
-                    const vec = new occ.gp_Vec_4(dx, dy, dz);
+              for (const section of op.loftData.sections) {
+                if (!section.profiles || section.profiles.length === 0) continue;
+                for (const profile of section.profiles) {
+                  let localWire: any = null;
+                  if (profile.segments && profile.segments.length > 0) {
+                    localWire = buildWireFromSegments(profile.segments, occ);
+                  } else if (profile.outerLoop && profile.outerLoop.length > 1) {
+                    localWire = buildWireFromPoints(profile.outerLoop, occ);
+                  }
+                  if (!localWire) continue;
+
+                  const spatialWire = transformWireTo3D(localWire, section.plane, occ);
+                  localWire.delete();
+
+                  thruSections.AddWire(spatialWire);
+                  intermediateWires.push(spatialWire);
+                }
+              }
+
+              thruSections.Build();
+
+              let featureSolid: any = null;
+              if (thruSections.IsDone()) {
+                featureSolid = thruSections.Shape();
+              }
+
+              // 釋放中繼 Wire 與構建器
+              for (const w of intermediateWires) {
+                w.delete();
+              }
+              thruSections.delete();
+
+              if (featureSolid && !featureSolid.IsNull()) {
+                if (op.featureId) {
+                  featureSolids.set(op.featureId, featureSolid);
+                }
+
+                const isCut = op.operation === 'CUT';
+
+                if (currentSolid === null) {
+                  if (!isCut) {
+                    currentSolid = featureSolid;
+                  }
+                } else {
+                  if (!isCut) {
+                    const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, featureSolid);
+                    fuse.Build();
+                    if (fuse.IsDone()) {
+                      const newSolid = fuse.Shape();
+                      if (currentSolid !== featureSolid) {
+                        currentSolid.delete();
+                      }
+                      currentSolid = newSolid;
+                    }
+                    fuse.delete();
+                  } else {
+                    const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, featureSolid);
+                    cut.Build();
+                    if (cut.IsDone()) {
+                      const newSolid = cut.Shape();
+                      if (currentSolid !== featureSolid) {
+                        currentSolid.delete();
+                      }
+                      currentSolid = newSolid;
+                    }
+                    cut.delete();
+                  }
+                }
+              }
+            } else if (
+              op.type === 'LINEAR_PATTERN' ||
+              op.type === 'CIRCULAR_PATTERN' ||
+              op.type === 'MIRROR_3D'
+            ) {
+              // 從 featureSolids 取得目標特徵實體（若未指定或找不到，退化取 currentSolid 作為母體）
+              let sourceSolid: any = null;
+              let shouldDeleteSourceSolid = false;
+              if (op.targetFeatureIds && op.targetFeatureIds.length > 0) {
+                const sources: any[] = [];
+                for (const tid of op.targetFeatureIds) {
+                  if (featureSolids.has(tid)) {
+                    sources.push(featureSolids.get(tid));
+                  }
+                }
+                if (sources.length === 1) {
+                  sourceSolid = sources[0];
+                } else if (sources.length > 1) {
+                  const builder = new occ.BRep_Builder();
+                  const compound = new occ.TopoDS_Compound();
+                  builder.MakeCompound(compound);
+                  for (const s of sources) {
+                    builder.Add(compound, s);
+                  }
+                  builder.delete();
+                  sourceSolid = compound;
+                  shouldDeleteSourceSolid = true;
+                }
+              }
+              if (!sourceSolid || sourceSolid.IsNull()) {
+                sourceSolid = currentSolid;
+                shouldDeleteSourceSolid = false;
+              }
+
+              if (!sourceSolid || sourceSolid.IsNull()) {
+                continue;
+              }
+
+              if (op.type === 'LINEAR_PATTERN') {
+                const pat = op.patternLinear;
+                if (pat) {
+                  const dir1 = pat.dir1 || { x: 1, y: 0, z: 0 };
+                  const count1 = typeof pat.count1 === 'number' && pat.count1 > 0 ? pat.count1 : 1;
+                  const spacing1 = typeof pat.spacing1 === 'number' ? pat.spacing1 : 0;
+
+                  const dir2 = pat.dir2 || { x: 0, y: 1, z: 0 };
+                  const count2 = typeof pat.count2 === 'number' && pat.count2 > 0 ? pat.count2 : 1;
+                  const spacing2 = typeof pat.spacing2 === 'number' ? pat.spacing2 : 0;
+
+                  for (let i = 0; i < count1; i++) {
+                    for (let j = 0; j < count2; j++) {
+                      if (i === 0 && j === 0) continue;
+
+                      const dx = i * spacing1 * dir1.x + j * spacing2 * (dir2?.x || 0);
+                      const dy = i * spacing1 * dir1.y + j * spacing2 * (dir2?.y || 0);
+                      const dz = i * spacing1 * dir1.z + j * spacing2 * (dir2?.z || 0);
+
+                      const vec = new occ.gp_Vec_4(dx, dy, dz);
+                      const trsf = new occ.gp_Trsf_1();
+                      setTranslationVec(trsf, vec);
+
+                      const xform = new occ.BRepBuilderAPI_Transform_2(sourceSolid, trsf, true);
+                      const transformedCopy = xform.Shape();
+
+                      if (currentSolid === null) {
+                        currentSolid = transformedCopy;
+                      } else {
+                        const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, transformedCopy);
+                        fuse.Build();
+                        if (fuse.IsDone()) {
+                          const newSolid = fuse.Shape();
+                          currentSolid.delete();
+                          currentSolid = newSolid;
+                        }
+                        fuse.delete();
+                        transformedCopy.delete();
+                      }
+
+                      xform.delete();
+                      trsf.delete();
+                      vec.delete();
+                    }
+                  }
+                }
+              } else if (op.type === 'CIRCULAR_PATTERN') {
+                const pat = op.patternCircular;
+                if (pat) {
+                  const axisOrigin = pat.axis?.origin || { x: 0, y: 0, z: 0 };
+                  const axisDirVec = pat.axis?.direction || { x: 0, y: 0, z: 1 };
+                  const count = typeof pat.count === 'number' && pat.count > 0 ? pat.count : 1;
+                  let totalAngle =
+                    typeof pat.totalAngle === 'number' && !isNaN(pat.totalAngle)
+                      ? pat.totalAngle
+                      : 2 * Math.PI;
+
+                  if (totalAngle > 2 * Math.PI + 0.1) {
+                    totalAngle = (totalAngle * Math.PI) / 180;
+                  }
+
+                  const equalSpacing = pat.equalSpacing !== false;
+
+                  let deltaTheta = 0;
+                  if (equalSpacing) {
+                    const isFullCircle = Math.abs(totalAngle - 2 * Math.PI) < 1e-4;
+                    if (isFullCircle) {
+                      deltaTheta = totalAngle / count;
+                    } else {
+                      deltaTheta = count > 1 ? totalAngle / (count - 1) : totalAngle;
+                    }
+                  } else {
+                    deltaTheta = totalAngle;
+                  }
+
+                  const axPnt = new occ.gp_Pnt_3(axisOrigin.x, axisOrigin.y, axisOrigin.z);
+                  const axDir = new occ.gp_Dir_4(axisDirVec.x, axisDirVec.y, axisDirVec.z);
+                  const rotAxis = new occ.gp_Ax1_2(axPnt, axDir);
+
+                  for (let k = 1; k < count; k++) {
+                    const angle = k * deltaTheta;
                     const trsf = new occ.gp_Trsf_1();
-                    setTranslationVec(trsf, vec);
+                    setRotationAx1(trsf, rotAxis, angle);
 
                     const xform = new occ.BRepBuilderAPI_Transform_2(sourceSolid, trsf, true);
                     const transformedCopy = xform.Shape();
@@ -1238,52 +1379,32 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
                     xform.delete();
                     trsf.delete();
-                    vec.delete();
                   }
+
+                  rotAxis.delete();
+                  axDir.delete();
+                  axPnt.delete();
                 }
-              }
-            } else if (op.type === 'CIRCULAR_PATTERN') {
-              const pat = op.patternCircular;
-              if (pat) {
-                const axisOrigin = pat.axis?.origin || { x: 0, y: 0, z: 0 };
-                const axisDirVec = pat.axis?.direction || { x: 0, y: 0, z: 1 };
-                const count = typeof pat.count === 'number' && pat.count > 0 ? pat.count : 1;
-                let totalAngle = typeof pat.totalAngle === 'number' && !isNaN(pat.totalAngle) ? pat.totalAngle : 2 * Math.PI;
+              } else if (op.type === 'MIRROR_3D') {
+                const plane = op.mirrorPlane;
+                if (plane) {
+                  const origin = plane.origin || { x: 0, y: 0, z: 0 };
+                  const normal = plane.normal || { x: 0, y: 0, z: 1 };
 
-                if (totalAngle > 2 * Math.PI + 0.1) {
-                  totalAngle = (totalAngle * Math.PI) / 180;
-                }
+                  const pnt = new occ.gp_Pnt_3(origin.x, origin.y, origin.z);
+                  const dir = new occ.gp_Dir_4(normal.x, normal.y, normal.z);
+                  const ax2 = new occ.gp_Ax2_3(pnt, dir);
 
-                const equalSpacing = pat.equalSpacing !== false;
-
-                let deltaTheta = 0;
-                if (equalSpacing) {
-                  const isFullCircle = Math.abs(totalAngle - 2 * Math.PI) < 1e-4;
-                  if (isFullCircle) {
-                    deltaTheta = totalAngle / count;
-                  } else {
-                    deltaTheta = count > 1 ? totalAngle / (count - 1) : totalAngle;
-                  }
-                } else {
-                  deltaTheta = totalAngle;
-                }
-
-                const axPnt = new occ.gp_Pnt_3(axisOrigin.x, axisOrigin.y, axisOrigin.z);
-                const axDir = new occ.gp_Dir_4(axisDirVec.x, axisDirVec.y, axisDirVec.z);
-                const rotAxis = new occ.gp_Ax1_2(axPnt, axDir);
-
-                for (let k = 1; k < count; k++) {
-                  const angle = k * deltaTheta;
                   const trsf = new occ.gp_Trsf_1();
-                  setRotationAx1(trsf, rotAxis, angle);
+                  setMirrorAx2(trsf, ax2);
 
                   const xform = new occ.BRepBuilderAPI_Transform_2(sourceSolid, trsf, true);
-                  const transformedCopy = xform.Shape();
+                  const mirroredCopy = xform.Shape();
 
                   if (currentSolid === null) {
-                    currentSolid = transformedCopy;
+                    currentSolid = mirroredCopy;
                   } else {
-                    const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, transformedCopy);
+                    const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, mirroredCopy);
                     fuse.Build();
                     if (fuse.IsDone()) {
                       const newSolid = fuse.Shape();
@@ -1291,295 +1412,241 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                       currentSolid = newSolid;
                     }
                     fuse.delete();
-                    transformedCopy.delete();
+                    mirroredCopy.delete();
                   }
 
                   xform.delete();
                   trsf.delete();
-                }
-
-                rotAxis.delete();
-                axDir.delete();
-                axPnt.delete();
-              }
-            } else if (op.type === 'MIRROR_3D') {
-              const plane = op.mirrorPlane;
-              if (plane) {
-                const origin = plane.origin || { x: 0, y: 0, z: 0 };
-                const normal = plane.normal || { x: 0, y: 0, z: 1 };
-
-                const pnt = new occ.gp_Pnt_3(origin.x, origin.y, origin.z);
-                const dir = new occ.gp_Dir_4(normal.x, normal.y, normal.z);
-                const ax2 = new occ.gp_Ax2_3(pnt, dir);
-
-                const trsf = new occ.gp_Trsf_1();
-                setMirrorAx2(trsf, ax2);
-
-                const xform = new occ.BRepBuilderAPI_Transform_2(sourceSolid, trsf, true);
-                const mirroredCopy = xform.Shape();
-
-                if (currentSolid === null) {
-                  currentSolid = mirroredCopy;
-                } else {
-                  const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, mirroredCopy);
-                  fuse.Build();
-                  if (fuse.IsDone()) {
-                    const newSolid = fuse.Shape();
-                    currentSolid.delete();
-                    currentSolid = newSolid;
-                  }
-                  fuse.delete();
-                  mirroredCopy.delete();
-                }
-
-                xform.delete();
-                trsf.delete();
-                ax2.delete();
-                dir.delete();
-                pnt.delete();
-              }
-            }
-
-            if (shouldDeleteSourceSolid && sourceSolid) {
-              sourceSolid.delete();
-            }
-
-            if (op.featureId && currentSolid) {
-              featureSolids.set(op.featureId, currentSolid);
-            }
-          } else if (op.type === 'FILLET_3D') {
-            if (!currentSolid || currentSolid.IsNull()) {
-              continue;
-            }
-
-            const radius = typeof op.fillet3D?.radius === 'number' && !isNaN(op.fillet3D.radius)
-              ? op.fillet3D.radius
-              : 1.0;
-            const mode = op.fillet3D?.edgeSelectionMode || 'all';
-
-            const fillet = (typeof occ.BRepFilletAPI_MakeFillet_1 === 'function')
-              ? new occ.BRepFilletAPI_MakeFillet_1(currentSolid, 0)
-              : new occ.BRepFilletAPI_MakeFillet(currentSolid, 0);
-
-            const exp = new occ.TopExp_Explorer_2(
-              currentSolid,
-              occ.TopAbs_ShapeEnum.TopAbs_EDGE,
-              occ.TopAbs_ShapeEnum.TopAbs_SHAPE
-            );
-
-            let addedCount = 0;
-            while (exp.More()) {
-              const edgeShape = exp.Current();
-              const edge = occ.TopoDS.Edge_1(edgeShape);
-
-              let shouldAdd = false;
-              if (mode === 'all') {
-                shouldAdd = true;
-              } else {
-                const dir = getEdgeDirection(edge, occ);
-                if (mode === 'vertical' && dir === 'vertical') {
-                  shouldAdd = true;
-                } else if (mode === 'horizontal' && dir === 'horizontal') {
-                  shouldAdd = true;
+                  ax2.delete();
+                  dir.delete();
+                  pnt.delete();
                 }
               }
 
-              if (shouldAdd) {
-                if (typeof fillet.Add_2 === 'function') {
-                  fillet.Add_2(radius, edge);
-                } else {
-                  fillet.Add(radius, edge);
-                }
-                addedCount++;
+              if (shouldDeleteSourceSolid && sourceSolid) {
+                sourceSolid.delete();
               }
 
-              edge.delete();
-              exp.Next();
-            }
-            exp.delete();
-
-            if (addedCount > 0) {
-              fillet.Build();
-              if (fillet.IsDone()) {
-                const newSolid = fillet.Shape();
-                currentSolid.delete();
-                currentSolid = newSolid;
+              if (op.featureId && currentSolid) {
+                featureSolids.set(op.featureId, currentSolid);
               }
-            }
-
-            fillet.delete();
-
-            if (op.featureId && currentSolid) {
-              featureSolids.set(op.featureId, currentSolid);
-            }
-          } else if (op.type === 'CHAMFER_3D') {
-            if (!currentSolid || currentSolid.IsNull()) {
-              continue;
-            }
-
-            const distance = typeof op.chamfer3D?.distance === 'number' && !isNaN(op.chamfer3D.distance)
-              ? op.chamfer3D.distance
-              : 1.0;
-            const mode = op.chamfer3D?.edgeSelectionMode || 'all';
-
-            const chamfer = (typeof occ.BRepFilletAPI_MakeChamfer_1 === 'function')
-              ? new occ.BRepFilletAPI_MakeChamfer_1(currentSolid)
-              : new occ.BRepFilletAPI_MakeChamfer(currentSolid);
-
-            const exp = new occ.TopExp_Explorer_2(
-              currentSolid,
-              occ.TopAbs_ShapeEnum.TopAbs_EDGE,
-              occ.TopAbs_ShapeEnum.TopAbs_SHAPE
-            );
-
-            let addedCount = 0;
-            while (exp.More()) {
-              const edgeShape = exp.Current();
-              const edge = occ.TopoDS.Edge_1(edgeShape);
-
-              let shouldAdd = false;
-              if (mode === 'all') {
-                shouldAdd = true;
-              } else {
-                const dir = getEdgeDirection(edge, occ);
-                if (mode === 'vertical' && dir === 'vertical') {
-                  shouldAdd = true;
-                } else if (mode === 'horizontal' && dir === 'horizontal') {
-                  shouldAdd = true;
-                }
+            } else if (op.type === 'FILLET_3D') {
+              if (!currentSolid || currentSolid.IsNull()) {
+                continue;
               }
 
-              if (shouldAdd) {
-                if (typeof chamfer.Add_2 === 'function') {
-                  chamfer.Add_2(distance, edge);
-                } else {
-                  chamfer.Add(distance, edge);
-                }
-                addedCount++;
-              }
+              const radius =
+                typeof op.fillet3D?.radius === 'number' && !isNaN(op.fillet3D.radius)
+                  ? op.fillet3D.radius
+                  : 1.0;
+              const mode = op.fillet3D?.edgeSelectionMode || 'all';
 
-              edge.delete();
-              exp.Next();
-            }
-            exp.delete();
+              const fillet =
+                typeof occ.BRepFilletAPI_MakeFillet_1 === 'function'
+                  ? new occ.BRepFilletAPI_MakeFillet_1(currentSolid, 0)
+                  : new occ.BRepFilletAPI_MakeFillet(currentSolid, 0);
 
-            if (addedCount > 0) {
-              chamfer.Build();
-              if (chamfer.IsDone()) {
-                const newSolid = chamfer.Shape();
-                currentSolid.delete();
-                currentSolid = newSolid;
-              }
-            }
-
-            chamfer.delete();
-
-            if (op.featureId && currentSolid) {
-              featureSolids.set(op.featureId, currentSolid);
-            }
-          } else if (op.type === 'SHELL_3D') {
-            if (!currentSolid || currentSolid.IsNull()) {
-              continue;
-            }
-
-            const rawThickness = typeof op.shell3D?.thickness === 'number' && !isNaN(op.shell3D.thickness)
-              ? op.shell3D.thickness
-              : 1.0;
-            const isInside = op.shell3D?.direction !== 'outside';
-            const offset = isInside ? -Math.abs(rawThickness) : Math.abs(rawThickness);
-
-            const closingFaces = new occ.TopTools_ListOfShape_1();
-
-            // 遍歷母體實體面 TopExp_Explorer(currentSolid, TopAbs_FACE)
-            const expFace = new occ.TopExp_Explorer_2(
-              currentSolid,
-              occ.TopAbs_ShapeEnum.TopAbs_FACE,
-              occ.TopAbs_ShapeEnum.TopAbs_SHAPE
-            );
-
-            let highestFace: any = null;
-            let maxZ = -Infinity;
-
-            while (expFace.More()) {
-              const faceShape = expFace.Current();
-              const face = occ.TopoDS.Face_1(faceShape);
-
-              // 計算該面的平均 Z 座標
-              const vExp = new occ.TopExp_Explorer_2(
-                face,
-                occ.TopAbs_ShapeEnum.TopAbs_VERTEX,
+              const exp = new occ.TopExp_Explorer_2(
+                currentSolid,
+                occ.TopAbs_ShapeEnum.TopAbs_EDGE,
                 occ.TopAbs_ShapeEnum.TopAbs_SHAPE
               );
 
-              let zSum = 0;
-              let vCount = 0;
-              while (vExp.More()) {
-                const v = occ.TopoDS.Vertex_1(vExp.Current());
-                const pnt = occ.BRep_Tool.Pnt(v);
-                zSum += pnt.Z();
-                vCount++;
-                pnt.delete();
-                v.delete();
-                vExp.Next();
-              }
-              vExp.delete();
+              let addedCount = 0;
+              while (exp.More()) {
+                const edgeShape = exp.Current();
+                const edge = occ.TopoDS.Edge_1(edgeShape);
 
-              const avgZ = vCount > 0 ? zSum / vCount : 0;
-              if (avgZ > maxZ) {
-                maxZ = avgZ;
-                if (highestFace) {
-                  highestFace.delete();
+                let shouldAdd = false;
+                if (mode === 'all') {
+                  shouldAdd = true;
+                } else {
+                  const dir = getEdgeDirection(edge, occ);
+                  if (mode === 'vertical' && dir === 'vertical') {
+                    shouldAdd = true;
+                  } else if (mode === 'horizontal' && dir === 'horizontal') {
+                    shouldAdd = true;
+                  }
                 }
-                highestFace = face;
-              } else {
-                face.delete();
+
+                if (shouldAdd) {
+                  if (typeof fillet.Add_2 === 'function') {
+                    fillet.Add_2(radius, edge);
+                  } else {
+                    fillet.Add(radius, edge);
+                  }
+                  addedCount++;
+                }
+
+                edge.delete();
+                exp.Next();
+              }
+              exp.delete();
+
+              if (addedCount > 0) {
+                fillet.Build();
+                if (fillet.IsDone()) {
+                  const newSolid = fillet.Shape();
+                  currentSolid.delete();
+                  currentSolid = newSolid;
+                }
               }
 
-              expFace.Next();
-            }
-            expFace.delete();
+              fillet.delete();
 
-            if (highestFace) {
-              closingFaces.Append_1(highestFace);
-              highestFace.delete();
-            }
+              if (op.featureId && currentSolid) {
+                featureSolids.set(op.featureId, currentSolid);
+              }
+            } else if (op.type === 'CHAMFER_3D') {
+              if (!currentSolid || currentSolid.IsNull()) {
+                continue;
+              }
 
-            let hollow: any = null;
-            if (typeof occ.BRepOffsetAPI_MakeThickSolid_ByJoin === 'function') {
-              hollow = new occ.BRepOffsetAPI_MakeThickSolid_ByJoin(
+              const distance =
+                typeof op.chamfer3D?.distance === 'number' && !isNaN(op.chamfer3D.distance)
+                  ? op.chamfer3D.distance
+                  : 1.0;
+              const mode = op.chamfer3D?.edgeSelectionMode || 'all';
+
+              const chamfer =
+                typeof occ.BRepFilletAPI_MakeChamfer_1 === 'function'
+                  ? new occ.BRepFilletAPI_MakeChamfer_1(currentSolid)
+                  : new occ.BRepFilletAPI_MakeChamfer(currentSolid);
+
+              const exp = new occ.TopExp_Explorer_2(
                 currentSolid,
-                closingFaces,
-                offset,
-                1e-4,
-                0,
-                false,
-                false,
-                0,
-                false
+                occ.TopAbs_ShapeEnum.TopAbs_EDGE,
+                occ.TopAbs_ShapeEnum.TopAbs_SHAPE
               );
-            } else if (typeof occ.BRepOffsetAPI_MakeThickSolid_1 === 'function') {
-              hollow = new occ.BRepOffsetAPI_MakeThickSolid_1();
-              hollow.MakeThickSolidByJoin(
+
+              let addedCount = 0;
+              while (exp.More()) {
+                const edgeShape = exp.Current();
+                const edge = occ.TopoDS.Edge_1(edgeShape);
+
+                let shouldAdd = false;
+                if (mode === 'all') {
+                  shouldAdd = true;
+                } else {
+                  const dir = getEdgeDirection(edge, occ);
+                  if (mode === 'vertical' && dir === 'vertical') {
+                    shouldAdd = true;
+                  } else if (mode === 'horizontal' && dir === 'horizontal') {
+                    shouldAdd = true;
+                  }
+                }
+
+                if (shouldAdd) {
+                  if (typeof chamfer.Add_2 === 'function') {
+                    chamfer.Add_2(distance, edge);
+                  } else {
+                    chamfer.Add(distance, edge);
+                  }
+                  addedCount++;
+                }
+
+                edge.delete();
+                exp.Next();
+              }
+              exp.delete();
+
+              if (addedCount > 0) {
+                chamfer.Build();
+                if (chamfer.IsDone()) {
+                  const newSolid = chamfer.Shape();
+                  currentSolid.delete();
+                  currentSolid = newSolid;
+                }
+              }
+
+              chamfer.delete();
+
+              if (op.featureId && currentSolid) {
+                featureSolids.set(op.featureId, currentSolid);
+              }
+            } else if (op.type === 'SHELL_3D') {
+              if (!currentSolid || currentSolid.IsNull()) {
+                continue;
+              }
+
+              const rawThickness =
+                typeof op.shell3D?.thickness === 'number' && !isNaN(op.shell3D.thickness)
+                  ? op.shell3D.thickness
+                  : 1.0;
+              const isInside = op.shell3D?.direction !== 'outside';
+              const offset = isInside ? -Math.abs(rawThickness) : Math.abs(rawThickness);
+
+              const closingFaces = new occ.TopTools_ListOfShape_1();
+
+              // 遍歷母體實體面 TopExp_Explorer(currentSolid, TopAbs_FACE)
+              const expFace = new occ.TopExp_Explorer_2(
                 currentSolid,
-                closingFaces,
-                offset,
-                1e-4,
-                0,
-                false,
-                false,
-                0,
-                false
+                occ.TopAbs_ShapeEnum.TopAbs_FACE,
+                occ.TopAbs_ShapeEnum.TopAbs_SHAPE
               );
-            } else if (typeof occ.BRepOffsetAPI_MakeThickSolid_2 === 'function') {
-              hollow = new occ.BRepOffsetAPI_MakeThickSolid_2(
-                currentSolid,
-                closingFaces,
-                offset,
-                1e-4
-              );
-            } else {
-              hollow = new occ.BRepOffsetAPI_MakeThickSolid();
-              if (typeof hollow.MakeThickSolidByJoin === 'function') {
+
+              let highestFace: any = null;
+              let maxZ = -Infinity;
+
+              while (expFace.More()) {
+                const faceShape = expFace.Current();
+                const face = occ.TopoDS.Face_1(faceShape);
+
+                // 計算該面的平均 Z 座標
+                const vExp = new occ.TopExp_Explorer_2(
+                  face,
+                  occ.TopAbs_ShapeEnum.TopAbs_VERTEX,
+                  occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+                );
+
+                let zSum = 0;
+                let vCount = 0;
+                while (vExp.More()) {
+                  const v = occ.TopoDS.Vertex_1(vExp.Current());
+                  const pnt = occ.BRep_Tool.Pnt(v);
+                  zSum += pnt.Z();
+                  vCount++;
+                  pnt.delete();
+                  v.delete();
+                  vExp.Next();
+                }
+                vExp.delete();
+
+                const avgZ = vCount > 0 ? zSum / vCount : 0;
+                if (avgZ > maxZ) {
+                  maxZ = avgZ;
+                  if (highestFace) {
+                    highestFace.delete();
+                  }
+                  highestFace = face;
+                } else {
+                  face.delete();
+                }
+
+                expFace.Next();
+              }
+              expFace.delete();
+
+              if (highestFace) {
+                closingFaces.Append_1(highestFace);
+                highestFace.delete();
+              }
+
+              let hollow: any = null;
+              if (typeof occ.BRepOffsetAPI_MakeThickSolid_ByJoin === 'function') {
+                hollow = new occ.BRepOffsetAPI_MakeThickSolid_ByJoin(
+                  currentSolid,
+                  closingFaces,
+                  offset,
+                  1e-4,
+                  0,
+                  false,
+                  false,
+                  0,
+                  false
+                );
+              } else if (typeof occ.BRepOffsetAPI_MakeThickSolid_1 === 'function') {
+                hollow = new occ.BRepOffsetAPI_MakeThickSolid_1();
                 hollow.MakeThickSolidByJoin(
                   currentSolid,
                   closingFaces,
@@ -1591,26 +1658,47 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   0,
                   false
                 );
+              } else if (typeof occ.BRepOffsetAPI_MakeThickSolid_2 === 'function') {
+                hollow = new occ.BRepOffsetAPI_MakeThickSolid_2(
+                  currentSolid,
+                  closingFaces,
+                  offset,
+                  1e-4
+                );
+              } else {
+                hollow = new occ.BRepOffsetAPI_MakeThickSolid();
+                if (typeof hollow.MakeThickSolidByJoin === 'function') {
+                  hollow.MakeThickSolidByJoin(
+                    currentSolid,
+                    closingFaces,
+                    offset,
+                    1e-4,
+                    0,
+                    false,
+                    false,
+                    0,
+                    false
+                  );
+                }
               }
-            }
 
-            if (hollow) {
-              hollow.Build();
-              if (hollow.IsDone()) {
-                const newSolid = hollow.Shape();
-                currentSolid.delete();
-                currentSolid = newSolid;
+              if (hollow) {
+                hollow.Build();
+                if (hollow.IsDone()) {
+                  const newSolid = hollow.Shape();
+                  currentSolid.delete();
+                  currentSolid = newSolid;
+                }
+                hollow.delete();
               }
-              hollow.delete();
-            }
 
-            closingFaces.delete();
+              closingFaces.delete();
 
-            if (op.featureId && currentSolid) {
-              featureSolids.set(op.featureId, currentSolid);
+              if (op.featureId && currentSolid) {
+                featureSolids.set(op.featureId, currentSolid);
+              }
             }
           }
-        }
         } finally {
           // Clean up per-feature solid cache
           for (const [, s] of featureSolids) {
@@ -1747,8 +1835,14 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           true
         );
 
-        const nbRoots = typeof stepWriter.NbRootsForTransfer === 'function' ? stepWriter.NbRootsForTransfer() : 1;
-        const isTransferOk = nbRoots > 0 || transferResult === true || transferResult === 1 || (occ.IFSelect_ReturnStatus && transferResult === occ.IFSelect_ReturnStatus.IFSelect_RetDone);
+        const nbRoots =
+          typeof stepWriter.NbRootsForTransfer === 'function' ? stepWriter.NbRootsForTransfer() : 1;
+        const isTransferOk =
+          nbRoots > 0 ||
+          transferResult === true ||
+          transferResult === 1 ||
+          (occ.IFSelect_ReturnStatus &&
+            transferResult === occ.IFSelect_ReturnStatus.IFSelect_RetDone);
 
         if (!isTransferOk) {
           stepWriter.delete();
@@ -1823,7 +1917,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         }
 
         const fileName = `/export_${Date.now()}.stl`;
-        
+
         let result = false;
         try {
           result = stlWriter.Write(currentSolid, fileName);
@@ -1888,7 +1982,9 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         // 若有傳入 operations 陣列，重新執行 featureTree 生成最新 finalShape/currentSolid
         if (operations && Array.isArray(operations) && operations.length > 0) {
           if (currentSolid) {
-            try { currentSolid.delete(); } catch (_) {}
+            try {
+              currentSolid.delete();
+            } catch (_) {}
             currentSolid = null;
           }
 
@@ -1970,7 +2066,9 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             } catch {
               stepContentBuffer = occ.FS.readFile(fileName.replace(/^\//, ''));
             }
-            try { occ.FS.unlink(fileName); } catch {}
+            try {
+              occ.FS.unlink(fileName);
+            } catch {}
           } catch (fsErr) {
             console.warn('FS error reading STEP:', fsErr);
             throw new Error('STEP file generation failed on FS layer');
@@ -2003,6 +2101,8 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           try {
             if (typeof stlWriter.SetASCIIMode === 'function') {
               stlWriter.SetASCIIMode(false);
+            } else if ('ASCIIMode' in stlWriter) {
+              (stlWriter as any).ASCIIMode = false;
             }
           } catch (modeErr) {
             console.warn('Failed to set STL binary mode:', modeErr);
@@ -2017,7 +2117,9 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           }
 
           if (mesher) {
-            try { mesher.delete(); } catch {}
+            try {
+              mesher.delete();
+            } catch {}
           }
 
           let stlContentBuffer: Uint8Array | null = null;
@@ -2027,7 +2129,9 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             } catch {
               stlContentBuffer = occ.FS.readFile(fileName.replace(/^\//, ''));
             }
-            try { occ.FS.unlink(fileName); } catch {}
+            try {
+              occ.FS.unlink(fileName);
+            } catch {}
           } catch (fsErr) {
             console.warn('FS error reading STL:', fsErr);
             throw new Error('STL file generation failed on FS layer');

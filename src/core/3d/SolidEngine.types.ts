@@ -1,4 +1,4 @@
-import type { SketchProfile } from '../../types/cad';
+import type { CustomPlane, Point3D, SketchProfile } from '../../types/cad';
 
 export interface FeatureEvalOp {
   featureId: string;
@@ -18,11 +18,11 @@ export interface FeatureEvalOp {
   operation: 'JOIN' | 'CUT'; // JOIN: 長料 (Fuse); CUT: 除料 (Cut)
   targetFeatureIds?: string[]; // 要複製或鏡射的目標特徵 ID 清單
   profiles?: SketchProfile[]; // 該特徵引用的 2D 閉環輪廓
-  plane?: {
-    origin: { x: number; y: number; z: number };
-    xAxis: { x: number; y: number; z: number };
-    yAxis: { x: number; y: number; z: number };
-    normal: { x: number; y: number; z: number };
+  plane?: CustomPlane | {
+    origin: Point3D;
+    xAxis: Point3D;
+    yAxis: Point3D;
+    normal: Point3D;
   };
   // 拉伸專用參數 (Extrude / Cut Extrude)
   depth?: number;
@@ -30,41 +30,41 @@ export interface FeatureEvalOp {
   throughAll?: boolean;
   // 旋轉專用參數 (Revolve / Revolve Cut)
   axis?: {
-    origin: { x: number; y: number; z: number };   // 3D 空間軸起點
-    direction: { x: number; y: number; z: number };// 3D 空間軸單位方向向量
+    origin: Point3D;   // 3D 空間軸起點
+    direction: Point3D;// 3D 空間軸單位方向向量
   };
   angle?: number; // 旋轉弧度
   // 線性陣列 (Linear Pattern)
   patternLinear?: {
-    dir1: { x: number; y: number; z: number };
+    dir1: Point3D;
     count1: number;
     spacing1: number;
-    dir2?: { x: number; y: number; z: number };
+    dir2?: Point3D;
     count2?: number;
     spacing2?: number;
   };
   // 環狀陣列 (Circular Pattern)
   patternCircular?: {
     axis: {
-      origin: { x: number; y: number; z: number };
-      direction: { x: number; y: number; z: number };
+      origin: Point3D;
+      direction: Point3D;
     };
     count: number;
     totalAngle: number;
     equalSpacing: boolean;
   };
   // 3D 鏡射 (3D Mirror)
-  mirrorPlane?: {
-    origin: { x: number; y: number; z: number };
-    normal: { x: number; y: number; z: number };
+  mirrorPlane?: CustomPlane | {
+    origin: Point3D;
+    normal: Point3D;
   };
   // 掃出運算規格 (Sweep)
   sweepData?: {
     pathSegments: {
       type: 'line' | 'arc';
-      start: { x: number; y: number; z: number };
-      end: { x: number; y: number; z: number };
-      center?: { x: number; y: number; z: number };
+      start: Point3D;
+      end: Point3D;
+      center?: Point3D;
       radius?: number;
     }[];
   };
@@ -72,11 +72,11 @@ export interface FeatureEvalOp {
   loftData?: {
     sections: {
       profiles: SketchProfile[];
-      plane: {
-        origin: { x: number; y: number; z: number };
-        xAxis: { x: number; y: number; z: number };
-        yAxis: { x: number; y: number; z: number };
-        normal: { x: number; y: number; z: number };
+      plane: CustomPlane | {
+        origin: Point3D;
+        xAxis: Point3D;
+        yAxis: Point3D;
+        normal: Point3D;
       };
     }[];
     isSolid: boolean;

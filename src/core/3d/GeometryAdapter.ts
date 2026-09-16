@@ -8,7 +8,7 @@ function getPointsFromSegments(segments: ProfileSegment[]): THREE.Vector2[] {
       pts.push(new THREE.Vector2(seg.start.x, seg.start.y));
     } else if (seg.type === 'arc' && seg.center && seg.radius !== undefined && seg.startAngle !== undefined && seg.endAngle !== undefined) {
       // Sample arc points to check orientation
-      const clockwise = seg.sweepFlag === 0;
+      const clockwise = seg.sweepFlag === 1;
       const angleDiff = clockwise 
         ? ((seg.startAngle - seg.endAngle + Math.PI * 2) % (Math.PI * 2))
         : ((seg.endAngle - seg.startAngle + Math.PI * 2) % (Math.PI * 2));
@@ -68,7 +68,7 @@ function buildPathFromSegments(segments: ProfileSegment[], isHole: boolean): THR
     if (seg.type === 'line') {
       path.lineTo(seg.end.x, seg.end.y);
     } else if (seg.type === 'arc' && seg.center && seg.radius !== undefined && seg.startAngle !== undefined && seg.endAngle !== undefined) {
-      const clockwise = seg.sweepFlag === 0;
+      const clockwise = seg.sweepFlag === 1;
       path.absarc(seg.center.x, seg.center.y, seg.radius, seg.startAngle, seg.endAngle, clockwise);
     }
   }

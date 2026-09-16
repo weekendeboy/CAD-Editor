@@ -18,6 +18,8 @@ import { ExtrudeFeatureModal } from './components/ExtrudeFeatureModal';
 import { RevolveFeatureModal } from './components/RevolveFeatureModal';
 import { PatternMirrorModal } from './components/PatternMirrorModal';
 import { SweepLoftModal } from './components/SweepLoftModal';
+import { DatumPlaneModal } from './components/DatumPlaneModal';
+import { FilletChamferShellModal } from './components/FilletChamferShellModal';
 import { exportSketchToDxf, downloadDxfFile } from './core/dxf/DxfWriter';
 import { parseDxfContent } from './core/dxf/DxfParser';
 import { solidEngine } from './core/3d/SolidEngine';
@@ -65,6 +67,7 @@ import {
   Disc,
   BoxSelect,
   Loader2,
+  SquareDashed,
 } from 'lucide-react';
 
 export default function App() {
@@ -117,6 +120,18 @@ export default function App() {
   }>({
     isOpen: false,
     mode: 'SWEEP',
+  });
+
+  // 空間基準面 (Datum Plane) 設定彈窗狀態
+  const [datumPlaneModalOpen, setDatumPlaneModalOpen] = useState<boolean>(false);
+
+  // 3D 圓角/倒角/薄殼 (Fillet / Chamfer / Shell 3D) 參數設定彈窗狀態
+  const [filletChamferShellModalConfig, setFilletChamferShellModalConfig] = useState<{
+    isOpen: boolean;
+    mode: 'FILLET_3D' | 'CHAMFER_3D' | 'SHELL_3D';
+  }>({
+    isOpen: false,
+    mode: 'FILLET_3D',
   });
 
   const {
@@ -1186,12 +1201,25 @@ export default function App() {
           </div>
         </div>
 
-        {/* 第二排：3D 實體特徵工具列（全新建立獨立一排，純圖示縮圖） */}
+        {/* 第二排：3D 實體特徵工具列（包含空間基準面操作按鈕） */}
         <div className="flex items-center gap-1 w-full overflow-x-auto">
           <div className="flex items-center gap-1 py-1 px-1 bg-neutral-900/60 rounded border border-neutral-800/80 w-fit shrink-0">
             <span className="text-[11px] font-semibold text-neutral-400 px-2 font-mono select-none">
               3D FEATURES:
             </span>
+
+            {/* 空間基準面 (Datum Plane) 按鈕 */}
+            <button
+              id="btn-toolbar-datum-plane"
+              onClick={() => setDatumPlaneModalOpen(true)}
+              className="p-1.5 rounded transition-colors text-neutral-400 hover:text-cyan-400 hover:bg-neutral-800"
+              title="基準面 (Datum Plane)"
+            >
+              <SquareDashed size={18} />
+            </button>
+
+            {/* 直立細分隔線 */}
+            <div className="w-px h-4 bg-neutral-800 mx-1" />
 
             {/* 長料/除料特徵群組 */}
             <button
@@ -1271,6 +1299,35 @@ export default function App() {
               title="3D 鏡射 (3D Mirror)"
             >
               <FlipHorizontal size={18} />
+            </button>
+
+            {/* 直立細分隔線 */}
+            <div className="w-px h-4 bg-neutral-800 mx-1" />
+
+            {/* 圓角/倒角/薄殼修飾特徵群組 */}
+            <button
+              onClick={() => setFilletChamferShellModalConfig({ isOpen: true, mode: 'FILLET_3D' })}
+              className="p-1.5 rounded transition-colors text-neutral-400 hover:text-emerald-400 hover:bg-neutral-800"
+              title="3D 圓角 (Fillet 3D)"
+              id="btn-toolbar-fillet-3d"
+            >
+              <CornerDownRight size={18} />
+            </button>
+            <button
+              onClick={() => setFilletChamferShellModalConfig({ isOpen: true, mode: 'CHAMFER_3D' })}
+              className="p-1.5 rounded transition-colors text-neutral-400 hover:text-indigo-400 hover:bg-neutral-800"
+              title="3D 倒角 (Chamfer 3D)"
+              id="btn-toolbar-chamfer-3d"
+            >
+              <SquareSlash size={18} />
+            </button>
+            <button
+              onClick={() => setFilletChamferShellModalConfig({ isOpen: true, mode: 'SHELL_3D' })}
+              className="p-1.5 rounded transition-colors text-neutral-400 hover:text-purple-400 hover:bg-neutral-800"
+              title="3D 薄殼 (Shell 3D)"
+              id="btn-toolbar-shell-3d"
+            >
+              <Box size={18} />
             </button>
 
             {/* 若當前在 3D 選取了模型面，在此處顯著顯示「在此面建立草圖」按鈕 */}
@@ -1409,6 +1466,15 @@ export default function App() {
         isOpen={sweepLoftModalConfig.isOpen}
         mode={sweepLoftModalConfig.mode}
         onClose={() => setSweepLoftModalConfig((prev) => ({ ...prev, isOpen: false }))}
+      />
+      <DatumPlaneModal
+        isOpen={datumPlaneModalOpen}
+        onClose={() => setDatumPlaneModalOpen(false)}
+      />
+      <FilletChamferShellModal
+        isOpen={filletChamferShellModalConfig.isOpen}
+        mode={filletChamferShellModalConfig.mode}
+        onClose={() => setFilletChamferShellModalConfig((prev) => ({ ...prev, isOpen: false }))}
       />
     </div>
   );
