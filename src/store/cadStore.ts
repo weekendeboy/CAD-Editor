@@ -1,3 +1,8 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { create } from 'zustand';
 import { CADState } from './cadStore.types';
 import {
@@ -82,6 +87,7 @@ function findCustomPlane(doc: CADDocument, planeId: string): CustomPlane | null 
 
 /**
  * 初始化建立標準 CAD Document，確保特徵樹頂部包含常駐的 3 個標準基準面 (Front, Top, Right) 與預設草圖 Sketch1
+ * [重構 P1] 移除對 doc.activeSketchId 的賦值，確立純淨資料模型。
  */
 function createInitialDocument(): CADDocument {
   const doc = createEmptyCADDocument();
@@ -146,7 +152,7 @@ function createInitialDocument(): CADDocument {
 
   doc.featureTree = [frontPlaneFeature, topPlaneFeature, rightPlaneFeature, initialSketch];
   doc.rollbackIndex = doc.featureTree.length;
-  doc.activeSketchId = 'sketch-1';
+  
   return doc;
 }
 
@@ -201,39 +207,37 @@ function markSketchDirtyInDoc(doc: CADDocument, sketchId: string): CADDocument {
 }
 
 export const useCADStore = create<CADState>((set, get) => ({
+  // ==========================================
+  // 1. DocumentState (持久化文件狀態)
+  // ==========================================
   document: createInitialDocument(),
-  activeLayerId: '0',
+  undoStack: [],
+  redoStack: [],
+
+  // ==========================================
+  // 2. ViewState (視圖與介面顯示狀態)
+  // ==========================================
   viewMode: '2D',
+  showProfiles: true,
+  show3DEdges: true,
+  isLayerModalOpen: false,
+  isOsnapModalOpen: false,
+  isPolarModalOpen: false,
+  extrudePreview: null,
+  revolvePreview: null,
+
+  // ==========================================
+  // 3. InteractionState (互動與編輯器狀態)
+  // ==========================================
   currentTool: 'SELECT',
   activeSketchId: 'sketch-1',
   selectedEntityIds: [],
   selectedFeatureId: null,
   selectedFaceInfo: null,
-  osnapEnabled: true,
-  orthoEnabled: false,
-  showProfiles: true,
-  show3DEdges: true,
-  cumulativePartMesh: null,
-  featureResults: {},
-  bodies: [],
-  kernelDiagnostics: [],
-  getFeatureResult: (featureId: string) => {
-    return get().featureResults[featureId];
-  },
-  toggleShow3DEdges: () => set((state) => ({ show3DEdges: !state.show3DEdges })),
-  projectedEntities: [],
-  setProjectedEntities: (entities) => set({ projectedEntities: entities }),
-  extrudePreview: null,
-  setExtrudePreview: (preview) => set({ extrudePreview: preview }),
-  revolvePreview: null,
-  setRevolvePreview: (preview) => set({ revolvePreview: preview }),
+  activeLayerId: '0',
   isPickingRevolveAxis: false,
-  setIsPickingRevolveAxis: (isPicking) => set({ isPickingRevolveAxis: isPicking }),
-  setRevolveAxisEntityId: (axisId) => set((state) => ({
-    revolvePreview: state.revolvePreview ? { ...state.revolvePreview, axisEntityId: axisId } : null,
-  })),
 
-  // 鎖點開關與各模式勾選狀態（預設全開啟）
+  osnapEnabled: true,
   osnapSettings: {
     endpoint: true,
     midpoint: true,
@@ -245,50 +249,72 @@ export const useCADStore = create<CADState>((set, get) => ({
     tangent: true,
     parallel: true,
   },
-  isOsnapModalOpen: false,
-
-  // 極座標追蹤角度設定（預設 45 度，候選角度包含 15, 30, 45, 90 等）
+  orthoEnabled: false,
   polarTrackingEnabled: true,
   polarAngleStep: 45,
   customPolarAngles: [],
-  isPolarModalOpen: false,
-  isLayerModalOpen: false,
-  setLayerModalOpen: (open) => set({ isLayerModalOpen: open }),
 
-  // 環形陣列 (Circular Array) 參數設定（預設 4 個項目，360 度填滿）
   arrayItems: 4,
   arrayFillAngle: 360,
-  setArrayItems: (items) => set({ arrayItems: Math.max(2, Math.round(items)) }),
-  setArrayFillAngle: (angle) => set({ arrayFillAngle: angle }),
-
-  // 矩形陣列 (Rectangular Array) 參數設定（預設 4 行 3 列，間距各 30）
   rectArrayCols: 4,
   rectArrayRows: 3,
   rectArrayColSpacing: 30,
   rectArrayRowSpacing: 30,
+  chamferDistance: 10,
+  polygonSides: 5,
+  polygonMethod: 'inscribed',
+  lastRadius: 10,
+
+  projectedEntities: [],
+
+  // ==========================================
+  // 4. RuntimeState (運行時狀態)
+  // ==========================================
+  cumulativePartMesh: null,
+  featureResults: {},
+  bodies: [],
+  kernelDiagnostics: [],
+
+  // ==========================================
+  // 5. Actions 實作
+  // ==========================================
+
+  getFeatureResult: (featureId: string) => {
+    return get().featureResults[featureId];
+  },
+
+  toggleShow3DEdges: () => set((state) => ({ show3DEdges: !state.show3DEdges })),
+  setProjectedEntities: (entities) => set({ projectedEntities: entities }),
+  setExtrudePreview: (preview) => set({ extrudePreview: preview }),
+  setRevolvePreview: (preview) => set({ revolvePreview: preview }),
+  setIsPickingRevolveAxis: (isPicking) => set({ isPickingRevolveAxis: isPicking }),
+  
+  setRevolveAxisEntityId: (axisId) => set((state) => ({
+    revolvePreview: state.revolvePreview ? { ...state.revolvePreview, axisEntityId: axisId } : null,
+  })),
+
+  setLayerModalOpen: (open) => set({ isLayerModalOpen: open }),
+  setOsnapModalOpen: (open) => set({ isOsnapModalOpen: open }),
+  
+  setArrayItems: (items) => set({ arrayItems: Math.max(2, Math.round(items)) }),
+  setArrayFillAngle: (angle) => set({ arrayFillAngle: angle }),
+
   setRectArrayCols: (cols) => set({ rectArrayCols: Math.max(1, Math.min(100, Math.round(cols))) }),
   setRectArrayRows: (rows) => set({ rectArrayRows: Math.max(1, Math.min(100, Math.round(rows))) }),
   setRectArrayColSpacing: (spacing) => set({ rectArrayColSpacing: spacing }),
   setRectArrayRowSpacing: (spacing) => set({ rectArrayRowSpacing: spacing }),
 
-  // 倒角 (Chamfer) 距離設定（預設為 10）
-  chamferDistance: 10,
   setChamferDistance: (distance) => set({ chamferDistance: Math.max(0.1, distance) }),
 
-  // 正多邊形 (Polygon) 設定（預設 5 邊，內接於圓）
-  polygonSides: 5,
-  polygonMethod: 'inscribed',
   setPolygonSides: (sides) => set({ polygonSides: Math.max(3, Math.min(1024, Math.round(sides))) }),
   setPolygonMethod: (method) => set({ polygonMethod: method }),
 
-  // 記憶上一次半徑 (AutoCAD 風格，預設 10)
-  lastRadius: 10,
   setLastRadius: (r) => set({ lastRadius: Math.max(0.1, r) }),
 
-  undoStack: [],
-  redoStack: [],
+  // ------------------------------------------
+  // 特徵與歷史邏輯 (Feature & History Actions)
+  // ------------------------------------------
 
-  // 特徵樹 Actions 實作
   setSelectedFeatureId: (id) => set((state) => {
     if (!id) {
       return { selectedFeatureId: null };
@@ -523,19 +549,14 @@ export const useCADStore = create<CADState>((set, get) => ({
     get().regenerateFeatureTree();
   },
 
-  /**
-   * 非同步真實 OCC Worker 重生成管線 (Zero-Fake State Alignment)
-   */
   regenerateFeatureTree: async () => {
     const state = get();
     const { featureTree, rollbackIndex, planes } = state.document;
     const cachedFeatureIds = Object.keys(state.featureResults);
 
-    // 步驟 A（依賴排程與初篩）：
     const regenPlan = getRegenPlan(featureTree, rollbackIndex, cachedFeatureIds);
-    const { evalSequence, dirtyFeatures, brokenDependencies, hasCycle, cycleNodes, dirtyFromIndex, isPureRollback } = regenPlan;
+    const { dirtyFeatures, brokenDependencies, hasCycle, cycleNodes, dirtyFromIndex, isPureRollback } = regenPlan;
 
-    // 1. 循環依賴檢查
     if (hasCycle) {
       const cycleSet = new Set(cycleNodes);
       const updatedTreeWithCycleErr = featureTree.map((f) => {
@@ -558,7 +579,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       return;
     }
 
-    // 2. 孤兒依賴檢查
     const treeWithErrors = featureTree.map((f) => {
       const errs = brokenDependencies.get(f.id);
       if (errs && errs.length > 0) {
@@ -571,10 +591,8 @@ export const useCADStore = create<CADState>((set, get) => ({
       return f;
     });
 
-    // 步驟 B（轉譯運算指令）：
     const ops = buildFeatureEvalOps(treeWithErrors, rollbackIndex, planes || {});
 
-    // 若 ops.length === 0，表示樹中目前沒有任何需要三維拉伸/長料/除料的 3D 特徵
     if (!ops || ops.length === 0) {
       const clearedTree = treeWithErrors.map((f) => {
         if (brokenDependencies.has(f.id)) {
@@ -600,7 +618,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       return;
     }
 
-    // 步驟 C（呼叫 OCC Worker 核心運算）：
     try {
       const result = await solidEngine.evaluateFeatureTree(ops, dirtyFromIndex, isPureRollback);
 
@@ -616,13 +633,11 @@ export const useCADStore = create<CADState>((set, get) => ({
       const isSuccess = result.success !== false && featureErrorMap.size === 0;
 
       if (isSuccess) {
-        // 全域計算成功：收集所有對應特徵的成功狀態
         const opsResults = ops.map((op) => ({
           featureId: op.featureId,
           success: true,
         }));
 
-        // 也包含目前處於 active 範圍內無獨立 3D 運算輸出的草圖/基準面
         const activeDirtyIds = dirtyFeatures.map((f) => f.id);
         for (const dId of activeDirtyIds) {
           if (!opsResults.some((r) => r.featureId === dId) && !brokenDependencies.has(dId)) {
@@ -632,7 +647,6 @@ export const useCADStore = create<CADState>((set, get) => ({
 
         const regeneratedTree = applyRegenResults(treeWithErrors, opsResults);
 
-        // 步驟 D（不可變更新 Store 狀態）：
         set((s) => ({
           document: {
             ...s.document,
@@ -644,7 +658,6 @@ export const useCADStore = create<CADState>((set, get) => ({
           kernelDiagnostics: result.diagnostics || [],
         }));
       } else {
-        // 運算失敗或回傳特徵級診斷錯誤：保留其 isDirty = true，寫入 feature.error
         const opFeatureIds = new Set(ops.map((op) => op.featureId));
         const failedTree = treeWithErrors.map((f) => {
           const diagErr = featureErrorMap.get(f.id);
@@ -677,8 +690,11 @@ export const useCADStore = create<CADState>((set, get) => ({
         }));
       }
     } catch (err: any) {
+      if (err?.message === 'RegenJobCancelled' || err?.name === 'AbortError') {
+        // P3: Ignore aborted job, another one is running
+        return;
+      }
       console.error('regenerateFeatureTree failed:', err);
-      // 例外發生時：保留 isDirty = true，不抹除既有模型
       const opFeatureIds = new Set(ops.map((op) => op.featureId));
       const errorTree = treeWithErrors.map((f) => {
         if (opFeatureIds.has(f.id)) {
@@ -700,9 +716,9 @@ export const useCADStore = create<CADState>((set, get) => ({
     }
   },
 
-  // ============================================================================
-  // 基準面 (Datum Plane) 特徵、參數化連動與草圖建立 Actions 實作
-  // ============================================================================
+  // ------------------------------------------
+  // 基準面與特徵草圖連結 (Datum Plane & Face Sketch)
+  // ------------------------------------------
 
   addOffsetDatumPlane: (refPlaneId, distance, name) => {
     const state = get();
@@ -725,13 +741,12 @@ export const useCADStore = create<CADState>((set, get) => ({
       dependencies: [refPlaneId],
       suppressed: false,
       visible: true,
-      isDirty: true,
     };
 
     const rollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
     const newTree = [
       ...state.document.featureTree.slice(0, rollback),
-      newFeature,
+      { ...newFeature, isDirty: true } as CADFeature,
       ...state.document.featureTree.slice(rollback),
     ];
 
@@ -766,10 +781,8 @@ export const useCADStore = create<CADState>((set, get) => ({
     const refPlaneId = datumFeature.referencePlaneId || datumFeature.referenceFeatureId || 'datum-front';
     const refPlane = findCustomPlane(state.document, refPlaneId) || DatumFrontPlane;
 
-    // 重算偏移姿態
     const recalculatedPlane = createOffsetPlane(refPlane, distance, datumFeature.name, planeFeatureId);
 
-    // 【參數化連動核心】：更新 DatumPlaneFeature 姿態，並連動所有依附該基準面的子草圖 (SketchFeature)
     const updatedTree = tree.map((f) => {
       if (f.id === planeFeatureId && f.type === 'DATUM_PLANE') {
         return {
@@ -867,7 +880,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       solverState: 'UnderDefined',
       suppressed: false,
       visible: true,
-      isDirty: false,
     };
 
     const rollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
@@ -881,7 +893,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       ...state.document,
       featureTree: newTree,
       rollbackIndex: rollback + 1,
-      activeSketchId: newSketchId,
     };
 
     set({
@@ -921,7 +932,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       solverState: 'UnderDefined',
       suppressed: false,
       visible: true,
-      isDirty: false,
     };
 
     const rollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
@@ -935,7 +945,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       ...state.document,
       featureTree: newTree,
       rollbackIndex: rollback + 1,
-      activeSketchId: newSketch.id,
       planes: {
         ...state.document.planes,
         [plane.id]: plane,
@@ -972,7 +981,6 @@ export const useCADStore = create<CADState>((set, get) => ({
     return newSketchId;
   },
 
-  // 3D 特徵管理 Actions 實作
   addExtrudeFeature: (feature) => {
     const state = get();
     const newFeatureId = 'extrude-' + Date.now().toString();
@@ -982,14 +990,13 @@ export const useCADStore = create<CADState>((set, get) => ({
       type: 'EXTRUDE' as const,
       dependencies: feature.sketchId ? [feature.sketchId] : [],
       suppressed: false,
-      isDirty: true,
     };
     
     const currentRollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
     const tree = state.document.featureTree;
     const newFeatureTree = [
       ...tree.slice(0, currentRollback),
-      newFeature,
+      { ...newFeature, isDirty: true } as CADFeature,
       ...tree.slice(currentRollback),
     ];
     const dirtyTree = markDownstreamDirty(newFeatureTree, newFeatureId);
@@ -1009,10 +1016,12 @@ export const useCADStore = create<CADState>((set, get) => ({
 
   updateExtrudeFeature: (id, updates) => get().updateFeature(id, updates),
 
+  // ------------------------------------------
+  // UI 狀態切換與基本工具 (UI & Tools)
+  // ------------------------------------------
+
   setViewMode: (mode) => set({ viewMode: mode }),
-  
   setTool: (tool) => set({ currentTool: tool }),
-  
   setActiveSketch: (sketchId) => set({ activeSketchId: sketchId }),
   
   selectEntity: (id) => set((state) => {
@@ -1021,12 +1030,13 @@ export const useCADStore = create<CADState>((set, get) => ({
     }
     return { selectedEntityIds: [...state.selectedEntityIds, id] };
   }),
-  
   setSelectedEntityIds: (ids) => set({ selectedEntityIds: ids }),
-  
   clearSelection: () => set({ selectedEntityIds: [], selectedFeatureId: null }),
-
   setActiveLayer: (layerId: string) => set({ activeLayerId: layerId }),
+
+  // ------------------------------------------
+  // 圖層操作 (Layers)
+  // ------------------------------------------
 
   addLayer: (layer: CADLayer) => set((state) => {
     if (state.document.layers[layer.id]) {
@@ -1179,6 +1189,10 @@ export const useCADStore = create<CADState>((set, get) => ({
       document: updatedDocument,
     };
   }),
+
+  // ------------------------------------------
+  // 2D 編輯與繪圖邏輯 (2D Operations)
+  // ------------------------------------------
   
   addEntity: (sketchIdOrEntity: any, entity?: any) => {
     const state = get();
@@ -2459,13 +2473,13 @@ export const useCADStore = create<CADState>((set, get) => ({
   toggleOrtho: () => set((state) => ({ orthoEnabled: !state.orthoEnabled })),
   toggleShowProfiles: () => set((state) => ({ showProfiles: !state.showProfiles })),
 
-  setOsnapModalOpen: (open) => set({ isOsnapModalOpen: open }),
   toggleOsnapMode: (mode) => set((state) => ({
     osnapSettings: {
       ...state.osnapSettings,
       [mode]: !state.osnapSettings[mode]
     }
   })),
+
   setAllOsnapModes: (enabled) => set((state) => ({
     osnapSettings: {
       endpoint: enabled,
@@ -2487,25 +2501,38 @@ export const useCADStore = create<CADState>((set, get) => ({
   setPolarModalOpen: (open) => set({ isPolarModalOpen: open }),
   togglePolarTracking: () => set((state) => ({ polarTrackingEnabled: !state.polarTrackingEnabled })),
   setPolarAngleStep: (step) => set({ polarAngleStep: step }),
+  
   addCustomPolarAngle: (angle) => set((state) => {
     if (state.customPolarAngles.includes(angle)) {
       return state;
     }
     return { customPolarAngles: [...state.customPolarAngles, angle].sort((a, b) => a - b) };
   }),
+  
   removeCustomPolarAngle: (angle) => set((state) => ({
     customPolarAngles: state.customPolarAngles.filter((a) => a !== angle)
   })),
   
+  // ------------------------------------------
+  // Undo / Redo (包含防呆機制)
+  // ------------------------------------------
+
   undo: () => set((state) => {
     if (state.undoStack.length === 0) return state;
     const previousDoc = state.undoStack[state.undoStack.length - 1];
     const newUndoStack = state.undoStack.slice(0, -1);
     
+    // 【防呆機制】檢查上一步的 activeSketchId 是否還存在於舊的特徵樹中
+    const sketchExists = previousDoc.featureTree.some(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    );
+    const safeActiveSketchId = sketchExists ? state.activeSketchId : null;
+    
     return {
       undoStack: newUndoStack,
       redoStack: [...state.redoStack, JSON.parse(JSON.stringify(state.document))],
       document: previousDoc,
+      activeSketchId: safeActiveSketchId,
       selectedEntityIds: [],
       selectedFeatureId: null,
     };
@@ -2516,10 +2543,17 @@ export const useCADStore = create<CADState>((set, get) => ({
     const nextDoc = state.redoStack[state.redoStack.length - 1];
     const newRedoStack = state.redoStack.slice(0, -1);
     
+    // 【防呆機制】檢查下一步的 activeSketchId 是否還存在
+    const sketchExists = nextDoc.featureTree.some(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    );
+    const safeActiveSketchId = sketchExists ? state.activeSketchId : null;
+
     return {
       undoStack: [...state.undoStack, JSON.parse(JSON.stringify(state.document))],
       redoStack: newRedoStack,
       document: nextDoc,
+      activeSketchId: safeActiveSketchId,
       selectedEntityIds: [],
       selectedFeatureId: null,
     };
@@ -2545,6 +2579,10 @@ export const useCADStore = create<CADState>((set, get) => ({
       isPickingRevolveAxis: false,
       undoStack: [],
       redoStack: [],
+      cumulativePartMesh: null,
+      featureResults: {},
+      bodies: [],
+      kernelDiagnostics: [],
     });
   },
 }));

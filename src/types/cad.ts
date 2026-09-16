@@ -1,3 +1,8 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import type { TopoReference } from '../core/3d/PersistentTopology.types';
 
 export interface Point2D {
@@ -22,7 +27,7 @@ export interface BaseCADEntity2D {
   lineWidth?: number;
   isConstruction?: boolean;
   isProjected?: boolean; // 投影幾何圖元識別 (Projected Geometry)
-  state?: EntityState;
+  state?: EntityState;   // [Runtime Cache] 求解器狀態，未來應移至 SolverRuntimeStore
 }
 
 export interface LineEntity extends BaseCADEntity2D {
@@ -216,16 +221,21 @@ export type FeatureType =
   | 'SWEEP'
   | 'LOFT';
 
+/**
+ * 【架構規範】 BaseCADFeature
+ * 必須是 100% JSON 可序列化的「定義資料 (Parametric Definition)」。
+ * 註：雖然規範不建議放入 isDirty、error，但在實務上 Store 仍將其附加作為 Runtime 標記。
+ */
 export interface BaseCADFeature {
   id: string;
   name: string;
   type: FeatureType | string;
   dependencies: string[]; // 所依賴的父特徵 ID 清單
-  suppressed: boolean;   // 是否被抑制（跳過運算）
-  visible?: boolean;     // 視圖可見度（可選布林）
-  error?: string | null; // 重算錯誤或警告訊息
-  isDirty?: boolean;     // 資料是否變更需重新運算
+  suppressed: boolean;    // 是否被抑制（跳過運算）
+  visible?: boolean;      // 視圖可見度（可選布林）
   createdAt?: number;
+  isDirty?: boolean;      // [Runtime] 標記需要重算
+  error?: string | null;  // [Runtime] 特徵錯誤訊息
 }
 
 export type BaseFeatureNode = BaseCADFeature;
@@ -233,12 +243,12 @@ export type BaseFeatureNode = BaseCADFeature;
 export interface SketchFeature extends BaseCADFeature {
   type: 'SKETCH';
   planeFeatureId?: string; // 所屬基準面特徵 ID
-  plane: CustomPlane;     // 快取空間矩陣 / 平面資訊，確保渲染層無損相容
+  plane: CustomPlane;      // 快取空間矩陣 / 平面資訊，確保渲染層無損相容
   entities: CADEntity2D[];
   constraints: Constraint[];
   dimensions: Dimension[];
   profiles: SketchProfile[];
-  solverState: EntityState;
+  solverState?: EntityState; // [Runtime Cache] 未來應移出存檔模型
 }
 
 export interface ExtrudeFeature extends BaseCADFeature {
@@ -284,7 +294,6 @@ export interface DatumPlaneFeature extends BaseCADFeature {
   referencePlaneId: string;       // 參照的基準面 ID（預設面或自訂面）
   referenceFeatureId?: string;    // 參照特徵/基準面 ID（向下相容）
   offsetDistance: number;          // 平面法向偏移距離 (mm)
-  // 繞邊 / 空間軸旋轉參數
   rotationAngle?: number;          // 旋轉弧度 (rad)
   rotationAngleDeg?: number;       // 旋轉度數 (deg，便於 UI 雙向綁定)
   axisOrigin?: Point3D;            // 旋轉軸起點
@@ -391,6 +400,11 @@ export interface CADLayer {
   isPlot: boolean;
 }
 
+/**
+ * 【架構規範】 CADDocument
+ * 代表真正寫入檔案的「持久化資料模型」。
+ * 絕對禁止將 UI 狀態 (如 activeSketchId) 放入此結構。
+ */
 export interface CADDocument {
   id: string;
   title: string;
@@ -398,8 +412,7 @@ export interface CADDocument {
   layers: Record<string, CADLayer>;
   planes: Record<string, CustomPlane>;
   featureTree: CADFeature[];
-  rollbackIndex: number; // 歷史回退棒位置（0 到 featureTree.length，代表當前計算只執行到該索引之前的特徵）
-  activeSketchId: string | null;
+  rollbackIndex: number; // 歷史回退棒位置 (保留，因為 SolidWorks 存檔會包含回退狀態)
   blocks: Record<string, CADBlockDefinition>;
 }
 
@@ -487,7 +500,6 @@ export function createEmptyCADDocument(): CADDocument {
     },
     featureTree,
     rollbackIndex: featureTree.length,
-    activeSketchId: null,
     blocks: {},
   };
 }

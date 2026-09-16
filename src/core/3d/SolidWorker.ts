@@ -1,3 +1,8 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import {
   SolidTaskRequest,
   SolidTaskResponse,
@@ -57,12 +62,22 @@ function safeDelete(obj: any): void {
   }
 }
 
+/**
+ * 【P4 架構修復】在寫入快取時，強制建立一份深拷貝的 Shape。
+ * 保證即使上層管線中途刪除了 currentSolid，快取仍擁有自己獨立的 C++ 實體記憶體指標。
+ */
+function cacheShapeClone(featureId: string, sourceShape: any, occ: any, cacheMap: Map<string, any>) {
+  if (!sourceShape || sourceShape.IsNull()) return;
+  const copyMaker = new occ.BRepBuilderAPI_Copy_2(sourceShape, true, false);
+  const copy = copyMaker.Shape();
+  safeDelete(copyMaker);
+  cacheMap.set(featureId, copy);
+}
+
 const getBaseUrl = () => {
-  // 生產環境 (Production)：Vite 會將 Worker 打包進 /assets/ 資料夾
   if (self.location.pathname.includes('/assets/')) {
     return self.location.origin + self.location.pathname.split('/assets/')[0] + '/';
   }
-  // 開發環境 (Development)：直接返回 origin
   return self.location.origin + '/';
 };
 
@@ -72,7 +87,6 @@ async function initWorker(wasmBuffer?: ArrayBuffer, occBaseUrl?: string) {
     const jsUrl = `${baseUrl}opencascade.wasm.js`;
     const wasmUrl = `${baseUrl}opencascade.wasm.wasm`;
 
-    // 由於我們現在使用 classic worker (?worker)，可以直接使用 importScripts
     try {
       (self as any).importScripts(jsUrl);
     } catch (e) {
@@ -153,12 +167,6 @@ function setMirrorAx2(trsf: any, ax2: any) {
   }
 }
 
-/**
- * 拓撲邊界方向判斷輔助函式：
- * 透過取 Edge 頂點座標：
- * 若 Math.abs(p1.z - p2.z) > Math.hypot(p1.x - p2.x, p1.y - p2.y) * 2 判定為垂直邊；
- * 若 Math.abs(p1.z - p2.z) < 1e-3 判定為水平邊。
- */
 function getEdgeDirection(
   edge: any,
   occ: any
@@ -208,10 +216,6 @@ function getEdgeDirection(
   return 'other';
 }
 
-/**
- * 從 2D 輪廓段（ProfileSegment）構建封閉的 TopoDS_Wire
- * 採用三點定弧法，若圓弧構建失敗絕不靜默降級為直線 Edge，而是拋出異常由上層診斷擷取。
- */
 function buildWireFromSegments(segments: ProfileSegment[], occ: any): any {
   const wireMaker = new occ.BRepBuilderAPI_MakeWire_1();
 
@@ -1042,7 +1046,6 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               if (currentSolid && currentSolid !== cachedSnap.shape) {
                 safeDelete(currentSolid);
               }
-              // Clone shape reference for currentSolid
               const copyMaker = new occ.BRepBuilderAPI_Copy_2(cachedSnap.shape, true, false);
               currentSolid = copyMaker.Shape();
               safeDelete(copyMaker);
@@ -1085,24 +1088,32 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 },
               ];
 
+              // 【P4 核心修復】隔離 Mesh Buffer，切斷 Transferable 的 Detached Bug
+              const vClone = cachedSnap.mesh.vertices.slice();
+              const nClone = cachedSnap.mesh.normals.slice();
+              const iClone = cachedSnap.mesh.indices.slice();
+              const eClone = cachedSnap.mesh.edgeVertices ? cachedSnap.mesh.edgeVertices.slice() : undefined;
+
+              const safeMeshResult: MeshResult = {
+                ...cachedSnap.mesh,
+                vertices: vClone,
+                normals: nClone,
+                indices: iClone,
+                edgeVertices: eClone,
+                edges: eClone,
+              };
+
               const kernelResult: KernelResult = {
                 taskId: req.taskId,
                 success: true,
-                finalMesh: cachedSnap.mesh,
+                finalMesh: safeMeshResult,
                 featureResults,
                 bodies,
                 diagnostics: allDiagnostics,
               };
 
-              const transferBuffers: Transferable[] = [];
-              if (cachedSnap.mesh && cachedSnap.mesh.vertices) {
-                transferBuffers.push(cachedSnap.mesh.vertices.buffer);
-                transferBuffers.push(cachedSnap.mesh.normals.buffer);
-                transferBuffers.push(cachedSnap.mesh.indices.buffer);
-                if (cachedSnap.mesh.edgeVertices && cachedSnap.mesh.edgeVertices.buffer) {
-                  transferBuffers.push(cachedSnap.mesh.edgeVertices.buffer);
-                }
-              }
+              const transferBuffers: Transferable[] = [vClone.buffer, nClone.buffer, iClone.buffer];
+              if (eClone) transferBuffers.push(eClone.buffer);
 
               _self.postMessage(
                 {
@@ -1142,21 +1153,23 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             safeDelete(currentSolid);
             currentSolid = null;
           }
+          for (const [id, shape] of featureSolidCache.entries()) {
+            safeDelete(shape);
+          }
           snapshotStore.clear();
           featureSolidCache.clear();
         } else {
-          // 清理從 dirtyFromIndex 開始及其之後的快照
-          const keysToDelete: string[] = [];
           for (let k = evalStartIndex; k < operations.length; k++) {
             const opId = operations[k].featureId;
             if (opId) {
-              keysToDelete.push(opId);
               if (snapshotStore.has(opId)) {
                 const snap = snapshotStore.get(opId)!;
                 safeDelete(snap.shape);
                 snapshotStore.delete(opId);
               }
               if (featureSolidCache.has(opId)) {
+                const shape = featureSolidCache.get(opId)!;
+                safeDelete(shape);
                 featureSolidCache.delete(opId);
               }
             }
@@ -1166,7 +1179,6 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         const allDiagnostics: KernelDiagnostic[] = [];
         const featureResults: Record<string, FeatureResult> = {};
 
-        // 恢復已計算且位於 evalStartIndex 之前的快照與特徵結果
         for (let i = 0; i < evalStartIndex; i++) {
           const op = operations[i];
           if (op.featureId && snapshotStore.has(op.featureId)) {
@@ -1176,7 +1188,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               allDiagnostics.push(...snap.mesh.diagnostics);
             }
             if (snap.shape && !snap.shape.IsNull()) {
-              featureSolidCache.set(op.featureId, snap.shape);
+              cacheShapeClone(op.featureId, snap.shape, occ, featureSolidCache);
             }
           }
         }
@@ -1202,8 +1214,9 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 throw new Error(`Feature ${op.featureId || op.type} returned an empty solid`);
               }
 
+              // 【P4 核心修復】隔離 Cache 記憶體所有權
               if (op.featureId) {
-                featureSolidCache.set(op.featureId, featureSolid);
+                cacheShapeClone(op.featureId, featureSolid, occ, featureSolidCache);
               }
 
               const isCut =
@@ -1211,13 +1224,14 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
               if (currentSolid === null) {
                 if (!isCut && (op.operation === 'JOIN' || op.type === 'EXTRUDE' || op.type === 'REVOLVE')) {
-                  currentSolid = featureSolid;
+                  currentSolid = featureSolid; // 直接接管所有權
                 } else if (isCut) {
                   featureDiag.push({
                     level: 'warning',
                     message: `Cut operation '${op.featureId || op.type}' ignored because no base solid exists.`,
                     featureId: op.featureId,
                   });
+                  safeDelete(featureSolid);
                 }
               } else {
                 if (!isCut) {
@@ -1225,12 +1239,12 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   fuse.Build();
                   if (fuse.IsDone()) {
                     const newSolid = fuse.Shape();
-                    if (currentSolid !== featureSolid) {
-                      safeDelete(currentSolid);
-                    }
+                    safeDelete(currentSolid);
+                    safeDelete(featureSolid); // 【P4 核心修復】工具本體完成任務後強制釋放
                     currentSolid = newSolid;
                   } else {
                     safeDelete(fuse);
+                    safeDelete(featureSolid);
                     throw new Error(`Boolean Fuse failed for feature ${op.featureId || op.type}`);
                   }
                   safeDelete(fuse);
@@ -1239,12 +1253,12 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   cut.Build();
                   if (cut.IsDone()) {
                     const newSolid = cut.Shape();
-                    if (currentSolid !== featureSolid) {
-                      safeDelete(currentSolid);
-                    }
+                    safeDelete(currentSolid);
+                    safeDelete(featureSolid); // 【P4 核心修復】工具本體完成任務後強制釋放
                     currentSolid = newSolid;
                   } else {
                     safeDelete(cut);
+                    safeDelete(featureSolid);
                     throw new Error(`Boolean Cut failed for feature ${op.featureId || op.type}`);
                   }
                   safeDelete(cut);
@@ -1310,7 +1324,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
               if (featureSolid && !featureSolid.IsNull()) {
                 if (op.featureId) {
-                  featureSolidCache.set(op.featureId, featureSolid);
+                  cacheShapeClone(op.featureId, featureSolid, occ, featureSolidCache);
                 }
 
                 const isCut = op.operation === 'CUT';
@@ -1318,6 +1332,8 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 if (currentSolid === null) {
                   if (!isCut) {
                     currentSolid = featureSolid;
+                  } else {
+                    safeDelete(featureSolid);
                   }
                 } else {
                   if (!isCut) {
@@ -1325,23 +1341,21 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                     fuse.Build();
                     if (fuse.IsDone()) {
                       const newSolid = fuse.Shape();
-                      if (currentSolid !== featureSolid) {
-                        safeDelete(currentSolid);
-                      }
+                      safeDelete(currentSolid);
                       currentSolid = newSolid;
                     }
                     safeDelete(fuse);
+                    safeDelete(featureSolid);
                   } else {
                     const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, featureSolid);
                     cut.Build();
                     if (cut.IsDone()) {
                       const newSolid = cut.Shape();
-                      if (currentSolid !== featureSolid) {
-                        safeDelete(currentSolid);
-                      }
+                      safeDelete(currentSolid);
                       currentSolid = newSolid;
                     }
                     safeDelete(cut);
+                    safeDelete(featureSolid);
                   }
                 }
               }
@@ -1394,7 +1408,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
               if (featureSolid && !featureSolid.IsNull()) {
                 if (op.featureId) {
-                  featureSolidCache.set(op.featureId, featureSolid);
+                  cacheShapeClone(op.featureId, featureSolid, occ, featureSolidCache);
                 }
 
                 const isCut = op.operation === 'CUT';
@@ -1402,6 +1416,8 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 if (currentSolid === null) {
                   if (!isCut) {
                     currentSolid = featureSolid;
+                  } else {
+                    safeDelete(featureSolid);
                   }
                 } else {
                   if (!isCut) {
@@ -1409,23 +1425,21 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                     fuse.Build();
                     if (fuse.IsDone()) {
                       const newSolid = fuse.Shape();
-                      if (currentSolid !== featureSolid) {
-                        safeDelete(currentSolid);
-                      }
+                      safeDelete(currentSolid);
                       currentSolid = newSolid;
                     }
                     safeDelete(fuse);
+                    safeDelete(featureSolid);
                   } else {
                     const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, featureSolid);
                     cut.Build();
                     if (cut.IsDone()) {
                       const newSolid = cut.Shape();
-                      if (currentSolid !== featureSolid) {
-                        safeDelete(currentSolid);
-                      }
+                      safeDelete(currentSolid);
                       currentSolid = newSolid;
                     }
                     safeDelete(cut);
+                    safeDelete(featureSolid);
                   }
                 }
               }
@@ -1619,7 +1633,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               }
 
               if (op.featureId && currentSolid) {
-                featureSolidCache.set(op.featureId, currentSolid);
+                cacheShapeClone(op.featureId, currentSolid, occ, featureSolidCache);
               }
               success = true;
             } else if (op.type === 'FILLET_3D') {
@@ -1690,7 +1704,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               safeDelete(fillet);
 
               if (op.featureId && currentSolid) {
-                featureSolidCache.set(op.featureId, currentSolid);
+                cacheShapeClone(op.featureId, currentSolid, occ, featureSolidCache);
               }
               success = true;
             } else if (op.type === 'CHAMFER_3D') {
@@ -1761,7 +1775,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               safeDelete(chamfer);
 
               if (op.featureId && currentSolid) {
-                featureSolidCache.set(op.featureId, currentSolid);
+                cacheShapeClone(op.featureId, currentSolid, occ, featureSolidCache);
               }
               success = true;
             } else if (op.type === 'SHELL_3D') {
@@ -1897,7 +1911,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               safeDelete(closingFaces);
 
               if (op.featureId && currentSolid) {
-                featureSolidCache.set(op.featureId, currentSolid);
+                cacheShapeClone(op.featureId, currentSolid, occ, featureSolidCache);
               }
               success = true;
             }
@@ -1990,24 +2004,32 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           };
         }
 
+        // 【P4 核心修復】隔離 Mesh Buffer，切斷 Transferable 的 Detached Bug
+        const vClone = meshResult.vertices.slice();
+        const nClone = meshResult.normals.slice();
+        const iClone = meshResult.indices.slice();
+        const eClone = meshResult.edgeVertices ? meshResult.edgeVertices.slice() : undefined;
+
+        const safeMeshResult: MeshResult = {
+          ...meshResult,
+          vertices: vClone,
+          normals: nClone,
+          indices: iClone,
+          edgeVertices: eClone,
+          edges: eClone,
+        };
+
         const kernelResult: KernelResult = {
           taskId: req.taskId,
           success: hasAnySuccess,
-          finalMesh: meshResult,
+          finalMesh: safeMeshResult,
           featureResults,
           bodies,
           diagnostics: allDiagnostics,
         };
 
-        const transferBuffers: Transferable[] = [];
-        if (meshResult && meshResult.vertices) {
-          transferBuffers.push(meshResult.vertices.buffer);
-          transferBuffers.push(meshResult.normals.buffer);
-          transferBuffers.push(meshResult.indices.buffer);
-          if (meshResult.edgeVertices && meshResult.edgeVertices.buffer) {
-            transferBuffers.push(meshResult.edgeVertices.buffer);
-          }
-        }
+        const transferBuffers: Transferable[] = [vClone.buffer, nClone.buffer, iClone.buffer];
+        if (eClone) transferBuffers.push(eClone.buffer);
 
         _self.postMessage(
           {
@@ -2062,21 +2084,31 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         currentSolid = compound;
 
         const meshData = tessellateSolid(compound, occ);
-        const transferBuffers: Transferable[] = [
-          meshData.vertices.buffer,
-          meshData.normals.buffer,
-          meshData.indices.buffer,
-        ];
-        if (meshData.edgeVertices && meshData.edgeVertices.buffer) {
-          transferBuffers.push(meshData.edgeVertices.buffer);
-        }
+
+        // 【P4 核心修復】隔離 Mesh Buffer，切斷 Transferable 的 Detached Bug
+        const vClone = meshData.vertices.slice();
+        const nClone = meshData.normals.slice();
+        const iClone = meshData.indices.slice();
+        const eClone = meshData.edgeVertices ? meshData.edgeVertices.slice() : undefined;
+
+        const safeMeshData: MeshResult = {
+          ...meshData,
+          vertices: vClone,
+          normals: nClone,
+          indices: iClone,
+          edgeVertices: eClone,
+          edges: eClone,
+        };
+
+        const transferBuffers: Transferable[] = [vClone.buffer, nClone.buffer, iClone.buffer];
+        if (eClone) transferBuffers.push(eClone.buffer);
 
         _self.postMessage(
           {
             taskId: req.taskId,
             type: req.type,
             success: true,
-            data: meshData,
+            data: safeMeshData,
           } as SolidTaskResponse,
           transferBuffers
         );
@@ -2134,7 +2166,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           try {
             stepContent = occ.FS.readFile(fileName, { encoding: 'utf8' });
           } catch {
-            stepContent = occ.FS.readFile(fileName.replace(/^\//, ''), { encoding: 'utf8' });
+            stepContent = occ.FS.readFile(fileName.replace(/^\//, ''));
           }
           try {
             occ.FS.unlink(fileName);

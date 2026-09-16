@@ -1,3 +1,8 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import {
   SolidTaskRequest,
   SolidTaskResponse,
@@ -14,6 +19,10 @@ export class SolidEngine {
   private worker: Worker | null = null;
   private resolvers: Map<string, { resolve: (val: any) => void; reject: (err: any) => void }> = new Map();
   private initPromise: Promise<void> | null = null;
+  
+  // 【P3 架構修復】重算事務版號 (Regen Transaction Revision)
+  // 用於精準攔截並丟棄過期的 Worker 非同步回傳結果，防止 Race Condition (時間旅行)
+  private currentRegenRevision: number = 0;
 
   constructor() {
     // Lazy worker creation to prevent module evaluation crashes in constrained environments
@@ -170,7 +179,21 @@ export class SolidEngine {
 
   public async evaluateFeatureTree(operations: FeatureEvalOp[], dirtyFromIndex?: number, isPureRollback?: boolean): Promise<KernelResult> {
     await this.init();
-    return this.dispatch<KernelResult>('EVALUATE_FEATURE_TREE', { operations, dirtyFromIndex, isPureRollback });
+
+    // 【P3 核心】發送任務前，遞增事務版本號並綁定到此作用域
+    this.currentRegenRevision++;
+    const myRevision = this.currentRegenRevision;
+
+    const result = await this.dispatch<KernelResult>('EVALUATE_FEATURE_TREE', { operations, dirtyFromIndex, isPureRollback });
+
+    // 【P3 核心】Worker 回傳後，檢查是否在運算期間有新的任務被觸發
+    if (this.currentRegenRevision !== myRevision) {
+      const err = new Error('RegenJobCancelled');
+      err.name = 'AbortError';
+      throw err; // 拋出異常，讓 Store 直接放棄處理這份過期資料
+    }
+
+    return result;
   }
 
   public async extrudeProfile(profile: SketchProfile, depth: number): Promise<ExtrudeProfileResponseData> {

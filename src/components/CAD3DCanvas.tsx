@@ -365,7 +365,10 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect })
         } else {
           geom.dispose();
         }
-      } catch (error) {
+      } catch (error: any) {
+        if (error?.message === 'RegenJobCancelled' || error?.name === 'AbortError') {
+          return;
+        }
         console.error('Failed to evaluate cumulative solid part mesh:', error);
         if (active) {
           setGeometry((prev) => {

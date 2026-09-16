@@ -303,10 +303,8 @@ export const FeatureTreeItem: React.FC<FeatureTreeItemProps> = ({
                 onClick={(e) => {
                   e.stopPropagation();
                   setShowContextMenu(false);
-                  import('../store/cadStore').then(({ useCADStore }) => {
-                    useCADStore.getState().setActiveSketch(feature.id);
-                    useCADStore.getState().setViewMode('2D');
-                  });
+                  useCADStore.getState().setActiveSketch(feature.id);
+                  useCADStore.getState().setViewMode('2D');
                 }}
                 className="w-full text-left px-3 py-1.5 flex items-center gap-2 hover:bg-neutral-800 text-amber-400 font-semibold hover:text-amber-300"
               >
