@@ -1,4 +1,48 @@
 import type { CustomPlane, Point3D, SketchProfile } from '../../types/cad';
+import type { TopoReference } from './PersistentTopology.types';
+
+export interface KernelDiagnostic {
+  level: 'info' | 'warning' | 'error';
+  message: string;
+  featureId?: string; // 發生錯誤的特徵 ID
+  entityId?: string;  // 發生錯誤的具體圖元 ID (如某條 Arc)
+}
+
+export interface KernelShapeHandle {
+  featureId: string;
+  shapePtr: number; // WASM 記憶體指標的唯一識別碼，防範 Double-delete
+  version: number;
+  owner: 'feature-result' | 'temporary' | 'final';
+}
+
+export interface BodyResult {
+  bodyId: string;
+  name: string;
+  isSolid: boolean;
+  boundingBox?: {
+    min: { x: number; y: number; z: number };
+    max: { x: number; y: number; z: number };
+  };
+}
+
+export interface FeatureResult {
+  featureId: string;
+  success: boolean;
+  createdBodyIds: string[];    // 此特徵新產生的實體 ID（例如長料生成新 Body）
+  modifiedBodyIds: string[];   // 此特徵修改或布林運算的實體 ID（例如除料、圓角修飾）
+  diagnostics: KernelDiagnostic[];
+  error: string | null;
+  executionTimeMs: number;
+}
+
+export interface KernelResult {
+  taskId: string;
+  success: boolean;
+  finalMesh: MeshResult | null;
+  featureResults: Record<string, FeatureResult>; // 各特徵執行結果映射 (featureId -> FeatureResult)
+  bodies: BodyResult[];                          // 當前活躍的實體清單
+  diagnostics: KernelDiagnostic[];
+}
 
 export interface FeatureEvalOp {
   featureId: string;
@@ -86,14 +130,20 @@ export interface FeatureEvalOp {
   fillet3D?: {
     radius: number;
     edgeSelectionMode: 'all' | 'vertical' | 'horizontal';
+    edgeRefs?: TopoReference[];
+    edgeIndices?: number[];
   };
   chamfer3D?: {
     distance: number;
     edgeSelectionMode: 'all' | 'vertical' | 'horizontal';
+    edgeRefs?: TopoReference[];
+    edgeIndices?: number[];
   };
   shell3D?: {
     thickness: number;
     direction: 'inside' | 'outside';
+    removedFaceRefs?: TopoReference[];
+    faceIndices?: number[];
   };
 }
 
@@ -122,6 +172,7 @@ export interface ExtrudeProfilesPayload {
 export interface EvaluateFeatureTreePayload {
   taskId: string;
   operations: FeatureEvalOp[];
+  dirtyFromIndex?: number; // 增量重算優化：從哪一個特徵開始重新評估
 }
 
 export interface ExportStepPayload {
@@ -159,11 +210,13 @@ export interface SolidTaskRequest {
 export type WorkerRequest = SolidTaskRequest;
 
 export interface MeshResult {
+  success: boolean;
   vertices: Float32Array;
   normals: Float32Array;
   indices: Uint32Array | Uint16Array;
   edgeVertices?: Float32Array;
-  edges?: Float32Array;
+  edges?: Float32Array; // 保留以維持向下相容
+  diagnostics?: KernelDiagnostic[]; // 接收 Worker 傳回的幾何建立失敗原因
 }
 
 export type ExtrudeProfileResponseData = MeshResult;
@@ -172,7 +225,7 @@ export interface SolidTaskResponse {
   taskId: string;
   type: SolidTaskType;
   success: boolean;
-  data?: any;
+  data?: KernelResult | MeshResult | any;
   error?: string;
 }
 

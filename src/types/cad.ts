@@ -1,3 +1,5 @@
+import type { TopoReference } from '../core/3d/PersistentTopology.types';
+
 export interface Point2D {
   x: number;
   y: number;
@@ -297,6 +299,7 @@ export interface Fillet3DFeature extends BaseCADFeature {
   edgeSelectionMode?: 'all' | 'vertical' | 'horizontal'; // 邊界篩選模式 (預設 'all')
   targetFeatureId?: string;             // 作用目標特徵 ID (選填，若無則作用於全域累進母體)
   edgeIndices?: number[];               // 作用邊緣索引（向下相容）
+  edgeRefs?: TopoReference[];           // 作用邊緣持久化拓撲參照
 }
 
 export interface Chamfer3DFeature extends BaseCADFeature {
@@ -306,6 +309,7 @@ export interface Chamfer3DFeature extends BaseCADFeature {
   targetFeatureId?: string;             // 作用目標特徵 ID (選填)
   angle?: number;                       // 倒角角度（向下相容）
   edgeIndices?: number[];               // 作用邊緣索引（向下相容）
+  edgeRefs?: TopoReference[];           // 作用邊緣持久化拓撲參照
 }
 
 export interface Shell3DFeature extends BaseCADFeature {
@@ -313,6 +317,8 @@ export interface Shell3DFeature extends BaseCADFeature {
   thickness: number;                    // 殼厚度 (mm, 預設 1.5)
   direction: 'inside' | 'outside';      // 向內或向外薄殼
   targetFeatureId?: string;             // 作用目標特徵 ID (選填)
+  removedFaceRefs?: TopoReference[];    // 移除的面拓撲參照
+  faceIndices?: number[];               // 移除的面索引（向下相容）
 }
 
 export interface LinearPatternFeature extends BaseCADFeature {

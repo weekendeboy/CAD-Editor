@@ -1,4 +1,11 @@
 import { CADDocument, CADEntity2D, CADLayer, Constraint, Point2D, Point3D, ExtrudeFeature, CADFeature, CustomPlane } from '../types/cad';
+import {
+  KernelResult,
+  KernelDiagnostic,
+  BodyResult,
+  FeatureResult,
+  MeshResult,
+} from '../core/3d/SolidEngine.types';
 
 export interface ExtrudePreviewState {
   isOpen: boolean;
@@ -69,7 +76,8 @@ export interface CADActions {
   renameFeature: (id: string, newName: string) => void;
   reorderFeature: (sourceIndex: number, targetIndex: number) => void;
   setRollbackIndex: (index: number) => void;
-  regenerateFeatureTree: () => void;
+  regenerateFeatureTree: () => Promise<void>;
+  getFeatureResult: (featureId: string) => FeatureResult | undefined;
 
   // 基準面 (Datum Plane) & 草圖連動 Actions
   addOffsetDatumPlane: (refPlaneId: string, distance: number, name?: string) => string;
@@ -209,6 +217,12 @@ export interface CADState extends CADActions {
   revolvePreview: RevolvePreviewState | null;
   isPickingRevolveAxis: boolean;
 
+  // 3D Kernel Cache & Diagnostics
+  cumulativePartMesh: MeshResult | null;
+  featureResults: Record<string, FeatureResult>;
+  bodies: BodyResult[];
+  kernelDiagnostics: KernelDiagnostic[];
+
   // 鎖點開關與各模式勾選狀態（預設全開啟）
   osnapSettings: OsnapSettings;
   isOsnapModalOpen: boolean;
@@ -248,4 +262,3 @@ export interface CADState extends CADActions {
 }
 
 export type CADStore = CADState;
-

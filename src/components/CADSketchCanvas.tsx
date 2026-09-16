@@ -589,7 +589,8 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
           return;
         }
 
-        const meshData = await solidEngine.evaluateFeatureTree(ops);
+        const kernelResult = await solidEngine.evaluateFeatureTree(ops);
+        const meshData = kernelResult?.finalMesh;
 
         if (active) {
           if (meshData && meshData.vertices && meshData.vertices.length > 0) {

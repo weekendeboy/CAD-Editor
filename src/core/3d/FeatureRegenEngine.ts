@@ -1,394 +1,281 @@
-import type { CADFeature, CADDocument } from '../../types/cad';
+import type { CADFeature } from '../../types/cad';
 
-/**
- * Global standard datum plane IDs that are always valid references.
- */
-const DEFAULT_DATUM_PLANE_IDS = new Set<string>([
-  'datum-front',
-  'datum-top',
-  'datum-right',
-]);
-
-/**
- * Helper: Extracts all parent feature IDs that a feature depends on.
- * Combines explicit `dependencies` array with specific type fields (sketchId, targetFeatureId, etc.)
- */
-export function getDirectDependencies(feature: CADFeature): string[] {
-  const deps = new Set<string>(feature.dependencies || []);
-
-  switch (feature.type) {
-    case 'EXTRUDE':
-    case 'CUT_EXTRUDE':
-    case 'REVOLVE':
-    case 'REVOLVE_CUT':
-      if (feature.sketchId) {
-        deps.add(feature.sketchId);
-      }
-      break;
-    case 'DATUM_PLANE':
-      if (feature.referenceFeatureId) {
-        deps.add(feature.referenceFeatureId);
-      }
-      if (feature.referencePlaneId) {
-        deps.add(feature.referencePlaneId);
-      }
-      break;
-    case 'FILLET_3D':
-    case 'CHAMFER_3D':
-    case 'SHELL_3D':
-      if (feature.targetFeatureId) {
-        deps.add(feature.targetFeatureId);
-      }
-      break;
-    case 'LINEAR_PATTERN':
-    case 'CIRCULAR_PATTERN':
-      if (feature.targetFeatureIds) {
-        for (const id of feature.targetFeatureIds) deps.add(id);
-      }
-      break;
-    case 'MIRROR_3D':
-      if (feature.targetFeatureIds) {
-        for (const id of feature.targetFeatureIds) deps.add(id);
-      }
-      if (feature.mirrorPlaneFeatureId) {
-        deps.add(feature.mirrorPlaneFeatureId);
-      }
-      break;
-    case 'SWEEP':
-      if (feature.profileSketchId) {
-        deps.add(feature.profileSketchId);
-      }
-      if (feature.pathSketchId) {
-        deps.add(feature.pathSketchId);
-      }
-      break;
-    case 'LOFT':
-      if (feature.sketchIds) {
-        for (const id of feature.sketchIds) deps.add(id);
-      }
-      break;
-    case 'SKETCH':
-      if (feature.plane?.parentFeatureId) {
-        deps.add(feature.plane.parentFeatureId);
-      }
-      if (feature.planeFeatureId) {
-        deps.add(feature.planeFeatureId);
-      }
-      break;
-  }
-
-  return Array.from(deps);
+export interface RegenPlan {
+  evalSequence: CADFeature[];               // 依照拓撲順序排列的有效特徵序列
+  dirtyFeatures: CADFeature[];              // 當前標記為髒的特徵清單
+  brokenDependencies: Map<string, string[]>; // 遺失父依賴的特徵映射
+  hasCycle: boolean;                        // 是否存在循環引用
+  cycleNodes: string[];                     // 參與循環引用的特徵 ID 清單
+  dirtyFromIndex: number;                   // 首個需要重新評估的特徵索引（-1 表示無需重算）
+  isPureRollback: boolean;                  // 是否僅為回退棒移動（前序特徵完全乾淨且有效）
+  reusableFeatureIds: string[];             // 可直接複用上一次快取結果的特徵 ID 清單
 }
 
-/**
- * Topological Sort & Cycle Detection for CAD Features.
- * Uses Kahn's algorithm to resolve feature dependency ordering and detect cyclic references.
- *
- * @param features List of CAD features to sort.
- * @returns Object containing sorted features, cycle flag, and cycle node IDs if any.
- */
-export function topologicalSortFeatures(features: CADFeature[]): {
+export interface TopologicalSortResult {
   sorted: CADFeature[];
   hasCycle: boolean;
   cycleNodes: string[];
-} {
-  if (!features || features.length === 0) {
-    return { sorted: [], hasCycle: false, cycleNodes: [] };
-  }
+}
 
+/**
+ * 取得特徵直接相依的父特徵 ID 清單
+ */
+export function getDirectDependencies(feature: CADFeature | { dependencies?: string[] }): string[] {
+  if (!feature || !feature.dependencies) return [];
+  return [...feature.dependencies];
+}
+
+/**
+ * 提取指定回退索引內且未被抑制的有效特徵歷史切片
+ */
+export function getActiveFeatures(features: CADFeature[], rollbackIndex: number): CADFeature[] {
+  const boundedIndex = Math.max(0, Math.min(rollbackIndex, features.length));
+  return features.slice(0, boundedIndex).filter(f => !f.suppressed);
+}
+
+/**
+ * 基於依賴圖進行特徵拓撲排序與循環檢檢（Kahn's 演算法改良版）
+ */
+export function topologicalSortFeatures(features: CADFeature[]): TopologicalSortResult {
   const featureMap = new Map<string, CADFeature>();
-  const featureIds = new Set<string>();
+  const inDegree = new Map<string, number>();
+  const adjList = new Map<string, string[]>(); // parentId -> childIds
 
   for (const f of features) {
     featureMap.set(f.id, f);
-    featureIds.add(f.id);
+    if (!inDegree.has(f.id)) {
+      inDegree.set(f.id, 0);
+    }
+    if (!adjList.has(f.id)) {
+      adjList.set(f.id, []);
+    }
   }
 
-  // Calculate in-degrees and build child adjacency list
-  const inDegree = new Map<string, number>();
-  const childrenMap = new Map<string, string[]>();
-
+  // 建立相鄰表與入度計算
+  // 註：依賴關係表示 f 依賴于 depId (depId 為 parent，f 為 child)
   for (const f of features) {
-    inDegree.set(f.id, 0);
-    childrenMap.set(f.id, []);
-  }
-
-  for (const f of features) {
-    const parentIds = getDirectDependencies(f);
-    let validParentsCount = 0;
-
-    for (const parentId of parentIds) {
-      if (featureIds.has(parentId)) {
-        validParentsCount++;
-        const children = childrenMap.get(parentId);
-        if (children) {
-          children.push(f.id);
+    const deps = getDirectDependencies(f);
+    let validDepCount = 0;
+    for (const depId of deps) {
+      if (featureMap.has(depId)) {
+        validDepCount++;
+        let children = adjList.get(depId);
+        if (!children) {
+          children = [];
+          adjList.set(depId, children);
         }
+        children.push(f.id);
       }
     }
-
-    inDegree.set(f.id, validParentsCount);
+    inDegree.set(f.id, validDepCount);
   }
 
-  // Kahn's Algorithm
+  // 初始入度為 0 的節點佇列
   const queue: string[] = [];
-  for (const f of features) {
-    if ((inDegree.get(f.id) ?? 0) === 0) {
-      queue.push(f.id);
+  for (const [id, deg] of inDegree.entries()) {
+    if (deg === 0) {
+      queue.push(id);
     }
   }
 
-  const sorted: CADFeature[] = [];
-  const processedSet = new Set<string>();
-
+  const sortedIds: string[] = [];
+  
   while (queue.length > 0) {
-    const currId = queue.shift()!;
-    const currFeature = featureMap.get(currId);
-    if (currFeature) {
-      sorted.push(currFeature);
-      processedSet.add(currId);
-    }
+    queue.sort((a, b) => {
+      const idxA = features.findIndex(f => f.id === a);
+      const idxB = features.findIndex(f => f.id === b);
+      return idxA - idxB;
+    });
 
-    const children = childrenMap.get(currId) || [];
+    const currId = queue.shift()!;
+    sortedIds.push(currId);
+
+    const children = adjList.get(currId) || [];
     for (const childId of children) {
-      const currentInDegree = (inDegree.get(childId) ?? 0) - 1;
-      inDegree.set(childId, currentInDegree);
-      if (currentInDegree === 0 && !processedSet.has(childId)) {
+      const currentDeg = inDegree.get(childId) || 1;
+      const newDeg = currentDeg - 1;
+      inDegree.set(childId, newDeg);
+      if (newDeg === 0) {
         queue.push(childId);
       }
     }
   }
 
-  const hasCycle = sorted.length < features.length;
+  const hasCycle = sortedIds.length < features.length;
   const cycleNodes: string[] = [];
 
   if (hasCycle) {
+    const sortedSet = new Set(sortedIds);
     for (const f of features) {
-      if (!processedSet.has(f.id)) {
+      if (!sortedSet.has(f.id)) {
         cycleNodes.push(f.id);
       }
     }
   }
 
-  return { sorted, hasCycle, cycleNodes };
-}
-
-/**
- * Gets active features based on rollback index and suppressed state.
- * Returns features with index < rollbackIndex and suppressed === false.
- *
- * @param features List of CAD features.
- * @param rollbackIndex Index position of the rollback bar (0 to features.length).
- * @returns Filtered array of active features.
- */
-export function getActiveFeatures(
-  features: CADFeature[],
-  rollbackIndex: number
-): CADFeature[] {
-  if (!features || features.length === 0) {
-    return [];
-  }
-
-  const clampedIndex = Math.max(0, Math.min(rollbackIndex, features.length));
-  return features
-    .slice(0, clampedIndex)
-    .filter((feature) => !feature.suppressed);
-}
-
-/**
- * Marks a modified feature and all its direct and indirect downstream dependent features as dirty (isDirty = true).
- *
- * @param features List of CAD features.
- * @param modifiedFeatureId The ID of the modified feature.
- * @returns A new list of features with updated `isDirty` flags.
- */
-export function markDownstreamDirty(
-  features: CADFeature[],
-  modifiedFeatureId: string
-): CADFeature[] {
-  if (!features || features.length === 0) {
-    return [];
-  }
-
-  // Build parent -> children graph
-  const childrenMap = new Map<string, string[]>();
-  for (const f of features) {
-    childrenMap.set(f.id, []);
-  }
-
-  for (const f of features) {
-    const parentIds = getDirectDependencies(f);
-    for (const parentId of parentIds) {
-      if (childrenMap.has(parentId)) {
-        childrenMap.get(parentId)!.push(f.id);
-      }
-    }
-  }
-
-  // BFS to collect modifiedFeatureId and all downstream descendants
-  const dirtySet = new Set<string>();
-  const queue: string[] = [modifiedFeatureId];
-
-  while (queue.length > 0) {
-    const currId = queue.shift()!;
-    if (dirtySet.has(currId)) {
-      continue;
-    }
-    dirtySet.add(currId);
-
-    const children = childrenMap.get(currId) || [];
-    for (const childId of children) {
-      if (!dirtySet.has(childId)) {
-        queue.push(childId);
-      }
-    }
-  }
-
-  return features.map((f) => ({
-    ...f,
-    isDirty: dirtySet.has(f.id) ? true : Boolean(f.isDirty),
-  }));
-}
-
-/**
- * Validates dependencies across all features in the tree to detect orphan or missing references.
- *
- * @param features List of CAD features to validate.
- * @returns Map where key is feature ID and value is array of missing dependency error messages.
- */
-export function validateFeatureDependencies(
-  features: CADFeature[]
-): Map<string, string[]> {
-  const result = new Map<string, string[]>();
-  if (!features || features.length === 0) {
-    return result;
-  }
-
-  const existingIds = new Set<string>(features.map((f) => f.id));
-
-  for (const f of features) {
-    const errors: string[] = [];
-    const directDeps = getDirectDependencies(f);
-
-    for (const parentId of directDeps) {
-      if (!parentId) continue;
-
-      if (parentId === f.id) {
-        errors.push(`Self-referencing dependency detected: "${f.id}"`);
-        continue;
-      }
-
-      if (!existingIds.has(parentId) && !DEFAULT_DATUM_PLANE_IDS.has(parentId)) {
-        errors.push(`Missing reference dependency: "${parentId}"`);
-      }
-    }
-
-    if (errors.length > 0) {
-      result.set(f.id, errors);
-    }
-  }
-
-  return result;
-}
-
-/**
- * Helper: Gets all upstream features (ancestors) that the specified feature depends on.
- */
-export function getUpstreamFeatures(
-  features: CADFeature[],
-  targetFeatureId: string
-): CADFeature[] {
-  const featureMap = new Map<string, CADFeature>(features.map((f) => [f.id, f]));
-  const upstreamSet = new Set<string>();
-  const queue: string[] = [targetFeatureId];
-
-  while (queue.length > 0) {
-    const currId = queue.shift()!;
-    const currFeature = featureMap.get(currId);
-    if (!currFeature) continue;
-
-    const parentIds = getDirectDependencies(currFeature);
-    for (const pId of parentIds) {
-      if (!upstreamSet.has(pId) && featureMap.has(pId)) {
-        upstreamSet.add(pId);
-        queue.push(pId);
-      }
-    }
-  }
-
-  return Array.from(upstreamSet)
-    .map((id) => featureMap.get(id)!)
-    .filter(Boolean);
-}
-
-/**
- * Helper: Gets all downstream features (descendants) that depend on the specified feature.
- */
-export function getDownstreamFeatures(
-  features: CADFeature[],
-  targetFeatureId: string
-): CADFeature[] {
-  const childrenMap = new Map<string, string[]>();
-  const featureMap = new Map<string, CADFeature>(features.map((f) => [f.id, f]));
-
-  for (const f of features) {
-    childrenMap.set(f.id, []);
-  }
-
-  for (const f of features) {
-    const parentIds = getDirectDependencies(f);
-    for (const pId of parentIds) {
-      if (childrenMap.has(pId)) {
-        childrenMap.get(pId)!.push(f.id);
-      }
-    }
-  }
-
-  const downstreamSet = new Set<string>();
-  const queue: string[] = [targetFeatureId];
-
-  while (queue.length > 0) {
-    const currId = queue.shift()!;
-    const children = childrenMap.get(currId) || [];
-    for (const childId of children) {
-      if (!downstreamSet.has(childId)) {
-        downstreamSet.add(childId);
-        queue.push(childId);
-      }
-    }
-  }
-
-  return Array.from(downstreamSet)
-    .map((id) => featureMap.get(id)!)
-    .filter(Boolean);
-}
-
-/**
- * High-level orchestration for feature tree regeneration.
- * Slices active features up to rollback index, validates dependencies, sorts topologically,
- * and identifies features that require recalculation.
- *
- * @param doc CAD Document instance.
- */
-export function getRegenSequence(doc: CADDocument): {
-  activeFeatures: CADFeature[];
-  sortedFeatures: CADFeature[];
-  dirtyFeatures: CADFeature[];
-  hasCycle: boolean;
-  cycleNodes: string[];
-  validationErrors: Map<string, string[]>;
-} {
-  const activeFeatures = getActiveFeatures(doc.featureTree, doc.rollbackIndex);
-  const validationErrors = validateFeatureDependencies(activeFeatures);
-  const { sorted: sortedFeatures, hasCycle, cycleNodes } = topologicalSortFeatures(activeFeatures);
-  const dirtyFeatures = sortedFeatures.filter((f) => f.isDirty);
-
+  const sorted = sortedIds.map(id => featureMap.get(id)!).filter(Boolean);
   return {
-    activeFeatures,
-    sortedFeatures,
-    dirtyFeatures,
+    sorted,
     hasCycle,
     cycleNodes,
-    validationErrors,
   };
+}
+
+/**
+ * 檢查所有特徵的 dependencies 是否存在於特徵清單中，回傳孤兒依賴映射
+ */
+export function validateFeatureDependencies(features: CADFeature[]): Map<string, string[]> {
+  const featureIds = new Set(features.map(f => f.id));
+  const brokenMap = new Map<string, string[]>();
+
+  for (const f of features) {
+    const missing: string[] = [];
+    const deps = getDirectDependencies(f);
+    for (const depId of deps) {
+      if (!featureIds.has(depId)) {
+        missing.push(depId);
+      }
+    }
+    if (missing.length > 0) {
+      brokenMap.set(f.id, missing);
+    }
+  }
+
+  return brokenMap;
+}
+
+/**
+ * 從指定修改特徵開始，遞迴標記所有下游子特徵為髒 (isDirty = true)
+ */
+export function markDownstreamDirty(features: CADFeature[], modifiedFeatureId: string): CADFeature[] {
+  const childrenMap = new Map<string, string[]>();
+  for (const f of features) {
+    const deps = getDirectDependencies(f);
+    for (const depId of deps) {
+      let list = childrenMap.get(depId);
+      if (!list) {
+        list = [];
+        childrenMap.set(depId, list);
+      }
+      list.push(f.id);
+    }
+  }
+
+  const affectedIds = new Set<string>();
+  const queue: string[] = [modifiedFeatureId];
+  affectedIds.add(modifiedFeatureId);
+
+  while (queue.length > 0) {
+    const currId = queue.shift()!;
+    const children = childrenMap.get(currId) || [];
+    for (const childId of children) {
+      if (!affectedIds.has(childId)) {
+        affectedIds.add(childId);
+        queue.push(childId);
+      }
+    }
+  }
+
+  return features.map(f => {
+    if (affectedIds.has(f.id)) {
+      return {
+        ...f,
+        isDirty: true,
+      };
+    }
+    return f;
+  });
+}
+
+/**
+ * 升級重生成計畫器：分析特徵 DAG、回退狀態、髒標記與快取有效性
+ */
+export function getRegenPlan(
+  features: CADFeature[],
+  rollbackIndex: number,
+  cachedFeatureIds: string[] = []
+): RegenPlan {
+  const active = getActiveFeatures(features, rollbackIndex);
+
+  const topoResult = topologicalSortFeatures(active);
+  const brokenDependencies = validateFeatureDependencies(active);
+
+  const evalSequence = topoResult.sorted;
+  const hasCycle = topoResult.hasCycle;
+  const cycleNodes = topoResult.cycleNodes;
+
+  let firstDirtyIdx = -1;
+  for (let i = 0; i < evalSequence.length; i++) {
+    const feat = evalSequence[i];
+    const isCached = cachedFeatureIds.includes(feat.id);
+    const isBroken = brokenDependencies.has(feat.id);
+    if (feat.isDirty || !isCached || isBroken) {
+      firstDirtyIdx = i;
+      break;
+    }
+  }
+
+  let dirtyFromIndex = -1;
+  let isPureRollback = false;
+  let reusableFeatureIds: string[] = [];
+  let dirtyFeatures: CADFeature[] = [];
+
+  if (firstDirtyIdx === -1) {
+    dirtyFromIndex = -1;
+    isPureRollback = true;
+    reusableFeatureIds = evalSequence.map(f => f.id);
+    dirtyFeatures = [];
+  } else {
+    dirtyFromIndex = firstDirtyIdx;
+    isPureRollback = false;
+    reusableFeatureIds = evalSequence.slice(0, firstDirtyIdx).map(f => f.id);
+    dirtyFeatures = evalSequence.slice(firstDirtyIdx).filter(
+      f => f.isDirty || !cachedFeatureIds.includes(f.id) || brokenDependencies.has(f.id)
+    );
+  }
+
+  return {
+    evalSequence,
+    dirtyFeatures,
+    brokenDependencies,
+    hasCycle,
+    cycleNodes,
+    dirtyFromIndex,
+    isPureRollback,
+    reusableFeatureIds,
+  };
+}
+
+/**
+ * 套用重算結果：成功者解除髒標記，失敗者保留髒標記並寫入錯誤訊息
+ */
+export function applyRegenResults(
+  features: CADFeature[],
+  results: { featureId: string; success: boolean; error?: string }[]
+): CADFeature[] {
+  const resultMap = new Map<string, { success: boolean; error?: string }>();
+  for (const r of results) {
+    resultMap.set(r.featureId, r);
+  }
+
+  return features.map(f => {
+    const res = resultMap.get(f.id);
+    if (!res) {
+      return f;
+    }
+
+    if (res.success) {
+      return {
+        ...f,
+        isDirty: false,
+        error: null,
+      };
+    } else {
+      return {
+        ...f,
+        isDirty: true,
+        error: res.error || 'Feature regeneration failed',
+      };
+    }
+  });
 }

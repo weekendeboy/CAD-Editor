@@ -4,6 +4,7 @@ import {
   MeshResult,
   ExtrudeProfileResponseData,
   FeatureEvalOp,
+  KernelResult,
 } from './SolidEngine.types';
 import type { SketchProfile } from '../../types/cad';
 import { buildFeatureEvalOps } from './FeaturePipelineAdapter';
@@ -41,7 +42,8 @@ export class SolidEngine {
     const task = this.resolvers.get(res.taskId);
     if (task) {
       if (res.success) {
-        task.resolve(res.data);
+        const resultVal = res.data?.kernelResult !== undefined ? res.data.kernelResult : res.data;
+        task.resolve(resultVal);
       } else {
         task.reject(new Error(res.error || 'SolidWorker task execution failed'));
       }
@@ -166,9 +168,9 @@ export class SolidEngine {
     return this.dispatch<MeshResult>('EXTRUDE_PROFILES', { profiles, depth });
   }
 
-  public async evaluateFeatureTree(operations: FeatureEvalOp[]): Promise<MeshResult> {
+  public async evaluateFeatureTree(operations: FeatureEvalOp[], dirtyFromIndex?: number, isPureRollback?: boolean): Promise<KernelResult> {
     await this.init();
-    return this.dispatch<MeshResult>('EVALUATE_FEATURE_TREE', { operations });
+    return this.dispatch<KernelResult>('EVALUATE_FEATURE_TREE', { operations, dirtyFromIndex, isPureRollback });
   }
 
   public async extrudeProfile(profile: SketchProfile, depth: number): Promise<ExtrudeProfileResponseData> {

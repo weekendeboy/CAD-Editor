@@ -1,4 +1,3 @@
-// Load opencascade.js dynamically
 import {
   SolidTaskRequest,
   SolidTaskResponse,
@@ -7,11 +6,56 @@ import {
   ExtrudeProfileResponseData,
   FeatureEvalOp,
   MeshResult,
+  KernelDiagnostic,
+  BodyResult,
+  FeatureResult,
+  KernelResult,
 } from './SolidEngine.types';
 import type { SketchProfile, ProfileSegment } from '../../types/cad';
 
 let oc: any = null;
 let currentSolid: any = null; // Store the current solid compound for evaluation and export
+const featureSolidCache = new Map<string, any>(); // Feature-level solid cache for parametric regeneration
+
+interface FeatureSnapshot {
+  featureId: string;
+  shape: any; // TopoDS_Shape 實體快照
+  mesh: MeshResult; // 已離散化的網格快照
+  featureResult: FeatureResult;
+  topologyMap?: any;
+}
+
+const snapshotStore = new Map<string, FeatureSnapshot>();
+
+// Set to track WASM pointers deleted in the current task session to prevent double-delete crashes
+const deletedPointers = new Set<number>();
+
+/**
+ * Safe delete wrapper for OpenCASCADE WASM objects.
+ * Uses pointer tracking to prevent double-deletion memory corruption.
+ */
+function safeDelete(obj: any): void {
+  if (!obj) return;
+  try {
+    let ptr: number | null = null;
+    if (obj.$$ && typeof obj.$$.ptr === 'number') {
+      ptr = obj.$$.ptr;
+    } else if (typeof obj.getPointer === 'function') {
+      ptr = obj.getPointer();
+    }
+    if (ptr !== null && ptr !== undefined && ptr !== 0) {
+      if (deletedPointers.has(ptr)) {
+        return; // Already deleted in this session, skip
+      }
+      deletedPointers.add(ptr);
+    }
+    if (typeof obj.delete === 'function') {
+      obj.delete();
+    }
+  } catch (_) {
+    // Ignore C++ deletion exceptions
+  }
+}
 
 const getBaseUrl = () => {
   // 生產環境 (Production)：Vite 會將 Worker 打包進 /assets/ 資料夾
@@ -132,8 +176,8 @@ function getEdgeDirection(
     const v1 = occ.TopoDS.Vertex_1(vExp.Current());
     const pt1 = occ.BRep_Tool.Pnt(v1);
     p1 = { x: pt1.X(), y: pt1.Y(), z: pt1.Z() };
-    pt1.delete();
-    v1.delete();
+    safeDelete(pt1);
+    safeDelete(v1);
     vExp.Next();
   }
 
@@ -141,12 +185,12 @@ function getEdgeDirection(
     const v2 = occ.TopoDS.Vertex_1(vExp.Current());
     const pt2 = occ.BRep_Tool.Pnt(v2);
     p2 = { x: pt2.X(), y: pt2.Y(), z: pt2.Z() };
-    pt2.delete();
-    v2.delete();
+    safeDelete(pt2);
+    safeDelete(v2);
     vExp.Next();
   }
 
-  vExp.delete();
+  safeDelete(vExp);
 
   if (!p1 || !p2) {
     return 'other';
@@ -166,7 +210,7 @@ function getEdgeDirection(
 
 /**
  * 從 2D 輪廓段（ProfileSegment）構建封閉的 TopoDS_Wire
- * 升級為數學上絕對無歧義的「三點定弧法 (3-Point Arc)」，徹底杜絕反向走訪時產生的互補長弧變形與輪廓自交問題。
+ * 採用三點定弧法，若圓弧構建失敗絕不靜默降級為直線 Edge，而是拋出異常由上層診斷擷取。
  */
 function buildWireFromSegments(segments: ProfileSegment[], occ: any): any {
   const wireMaker = new occ.BRepBuilderAPI_MakeWire_1();
@@ -181,14 +225,19 @@ function buildWireFromSegments(segments: ProfileSegment[], occ: any): any {
           ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
           : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
 
-      if (mkEdge.IsDone()) {
-        wireMaker.Add_1(mkEdge.Edge());
+      if (!mkEdge.IsDone()) {
+        safeDelete(mkEdge);
+        safeDelete(p1);
+        safeDelete(p2);
+        safeDelete(wireMaker);
+        throw new Error(`Line edge construction failed for segment (entity: ${(seg as any).id || 'unknown'})`);
       }
-      mkEdge.delete();
-      p1.delete();
-      p2.delete();
+
+      wireMaker.Add_1(mkEdge.Edge());
+      safeDelete(mkEdge);
+      safeDelete(p1);
+      safeDelete(p2);
     } else if (seg.type === 'arc' && seg.center && typeof seg.radius === 'number' && seg.radius > 0) {
-      // 1. 計算 DXF 定義的起點與終點角度 (弧度)
       let sAng = seg.startAngle;
       let eAng = seg.endAngle;
 
@@ -198,32 +247,26 @@ function buildWireFromSegments(segments: ProfileSegment[], occ: any): any {
       }
 
       let sweep = eAng - sAng;
-      
       const isCW = seg.sweepFlag === 1;
 
       if (isCW) {
-        // 順時針 (CW)：掃掠角應為負值
         while (sweep >= 0) sweep -= 2 * Math.PI;
         while (sweep < -2 * Math.PI) sweep += 2 * Math.PI;
       } else {
-        // 逆時針 (CCW)：掃掠角應為正值
         while (sweep <= 0) sweep += 2 * Math.PI;
         while (sweep > 2 * Math.PI) sweep -= 2 * Math.PI;
       }
 
-      // 依據正確的掃掠方向取幾何中點
       const midAng = sAng + sweep / 2;
       const midX = seg.center.x + seg.radius * Math.cos(midAng);
       const midY = seg.center.y + seg.radius * Math.sin(midAng);
 
-      // 2. 以 3 點建立唯一圓弧（起點、幾何中點、終點）
       const pStart = new occ.gp_Pnt_3(seg.start.x, seg.start.y, 0);
       const pMid = new occ.gp_Pnt_3(midX, midY, 0);
       const pEnd = new occ.gp_Pnt_3(seg.end.x, seg.end.y, 0);
 
       let edgeAdded = false;
 
-      // 呼叫 OCC 專屬的三點圓弧建構子 GC_MakeArcOfCircle_4(P1, P2, P3)
       if (typeof occ.GC_MakeArcOfCircle_4 === 'function') {
         try {
           const arcMaker = new occ.GC_MakeArcOfCircle_4(pStart, pMid, pEnd);
@@ -241,57 +284,54 @@ function buildWireFromSegments(segments: ProfileSegment[], occ: any): any {
                 wireMaker.Add_1(edgeMaker.Edge());
                 edgeAdded = true;
               }
-              edgeMaker.delete();
+              safeDelete(edgeMaker);
             }
 
-            if (geomCurve) geomCurve.delete();
-            trimmedCurve.delete();
+            if (geomCurve) safeDelete(geomCurve);
+            safeDelete(trimmedCurve);
           }
-          arcMaker.delete();
-        } catch (arcErr) {
+          safeDelete(arcMaker);
+        } catch (arcErr: any) {
           console.warn('SolidWorker: 3-point arc construction exception:', arcErr);
         }
       }
 
-      // 退化保護：若三點共線或圓弧建立失敗，以直線相連起訖點
-      if (!edgeAdded) {
-        try {
-          const edgeMaker =
-            typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function'
-              ? new occ.BRepBuilderAPI_MakeEdge_3(pStart, pEnd)
-              : new occ.BRepBuilderAPI_MakeEdge_1(pStart, pEnd);
-          if (edgeMaker.IsDone()) {
-            wireMaker.Add_1(edgeMaker.Edge());
-          }
-          edgeMaker.delete();
-        } catch (lineErr) {
-          console.warn('SolidWorker: Fallback edge construction failed:', lineErr);
-        }
-      }
+      safeDelete(pStart);
+      safeDelete(pMid);
+      safeDelete(pEnd);
 
-      // 嚴格釋放幾何點記憶體
-      pStart.delete();
-      pMid.delete();
-      pEnd.delete();
+      if (!edgeAdded) {
+        safeDelete(wireMaker);
+        throw new Error(`Arc construction failed for segment (entity: ${(seg as any).id || 'unknown'}). Geometric degeneration detected.`);
+      }
     } else {
-      // 未知或其他類型，以端點直線連通
       const p1 = new occ.gp_Pnt_3(seg.start.x, seg.start.y, 0);
       const p2 = new occ.gp_Pnt_3(seg.end.x, seg.end.y, 0);
       const mkEdge =
         typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function'
           ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
           : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
-      if (mkEdge.IsDone()) {
-        wireMaker.Add_1(mkEdge.Edge());
+      if (!mkEdge.IsDone()) {
+        safeDelete(mkEdge);
+        safeDelete(p1);
+        safeDelete(p2);
+        safeDelete(wireMaker);
+        throw new Error(`Edge construction failed for segment (entity: ${(seg as any).id || 'unknown'})`);
       }
-      mkEdge.delete();
-      p1.delete();
-      p2.delete();
+      wireMaker.Add_1(mkEdge.Edge());
+      safeDelete(mkEdge);
+      safeDelete(p1);
+      safeDelete(p2);
     }
   }
 
+  if (!wireMaker.IsDone()) {
+    safeDelete(wireMaker);
+    throw new Error('Invalid Wire: wire construction failed or discontinuous edges.');
+  }
+
   const wire = wireMaker.Wire();
-  wireMaker.delete();
+  safeDelete(wireMaker);
   return wire;
 }
 
@@ -307,20 +347,30 @@ function buildWireFromPoints(points: { x: number; y: number }[], occ: any): any 
       typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function'
         ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
         : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
-    if (mkEdge.IsDone()) {
-      wireMaker.Add_1(mkEdge.Edge());
+    if (!mkEdge.IsDone()) {
+      safeDelete(mkEdge);
+      safeDelete(p1);
+      safeDelete(p2);
+      safeDelete(wireMaker);
+      throw new Error(`Edge construction failed between points ${i} and ${(i + 1) % len}`);
     }
-    mkEdge.delete();
-    p1.delete();
-    p2.delete();
+    wireMaker.Add_1(mkEdge.Edge());
+    safeDelete(mkEdge);
+    safeDelete(p1);
+    safeDelete(p2);
   }
+
+  if (!wireMaker.IsDone()) {
+    safeDelete(wireMaker);
+    throw new Error('Invalid Wire: wire construction from points failed.');
+  }
+
   const wire = wireMaker.Wire();
-  wireMaker.delete();
+  safeDelete(wireMaker);
   return wire;
 }
 
 function createFaceFromProfile(profile: SketchProfile, occ: any): any {
-  // 1. Build Outer Wire
   let outerWire: any;
   if (profile.segments && profile.segments.length > 0) {
     outerWire = buildWireFromSegments(profile.segments, occ);
@@ -330,16 +380,14 @@ function createFaceFromProfile(profile: SketchProfile, occ: any): any {
     throw new Error(`Profile ${profile.id || ''} has no valid segments or outer loop`);
   }
 
-  // 2. Build Face
   const faceMaker = new occ.BRepBuilderAPI_MakeFace_15(outerWire, true);
 
-  // 3. Build Inner Wires (Holes)
   if (profile.innerSegments && profile.innerSegments.length > 0) {
     for (const innerSegs of profile.innerSegments) {
       if (innerSegs.length > 0) {
         const innerWire = buildWireFromSegments(innerSegs, occ);
         faceMaker.Add(innerWire);
-        innerWire.delete();
+        safeDelete(innerWire);
       }
     }
   } else if (profile.innerLoops && profile.innerLoops.length > 0) {
@@ -347,23 +395,23 @@ function createFaceFromProfile(profile: SketchProfile, occ: any): any {
       if (innerLoop.length > 1) {
         const innerWire = buildWireFromPoints(innerLoop, occ);
         faceMaker.Add(innerWire);
-        innerWire.delete();
+        safeDelete(innerWire);
       }
     }
   }
 
+  if (!faceMaker.IsDone()) {
+    safeDelete(outerWire);
+    safeDelete(faceMaker);
+    throw new Error(`Invalid Face: face construction from profile ${profile.id || ''} failed.`);
+  }
+
   const face = faceMaker.Face();
-
-  // Clean up
-  outerWire.delete();
-  faceMaker.delete();
-
+  safeDelete(outerWire);
+  safeDelete(faceMaker);
   return face;
 }
 
-/**
- * 空間 Wire 變換函式：將 2D LCS 的 Wire 變換為 3D WCS 基準面下的空間 Wire
- */
 function transformWireTo3D(
   wire2D: any,
   plane: {
@@ -394,26 +442,22 @@ function transformWireTo3D(
   const alignXform = new occ.BRepBuilderAPI_Transform_2(wire2D, alignTrsf, true);
   const transformedShape = alignXform.Shape();
   const transformedWire = occ.TopoDS.Wire_1(transformedShape);
-  transformedShape.delete();
+  safeDelete(transformedShape);
 
-  // Clean up intermediate transformation objects
-  fromOrig.delete();
-  fromNorm.delete();
-  fromXDir.delete();
-  fromAx.delete();
-  toOrig.delete();
-  toNorm.delete();
-  toXDir.delete();
-  toAx.delete();
-  alignTrsf.delete();
-  alignXform.delete();
+  safeDelete(fromOrig);
+  safeDelete(fromNorm);
+  safeDelete(fromXDir);
+  safeDelete(fromAx);
+  safeDelete(toOrig);
+  safeDelete(toNorm);
+  safeDelete(toXDir);
+  safeDelete(toAx);
+  safeDelete(alignTrsf);
+  safeDelete(alignXform);
 
   return transformedWire;
 }
 
-/**
- * 空間 Face 變換函式：將 2D LCS 的帶孔 Face 轉換至 3D 空間基準面姿態
- */
 function transformFaceTo3D(
   face2D: any,
   plane: {
@@ -455,27 +499,22 @@ function transformFaceTo3D(
   const alignXform = new occ.BRepBuilderAPI_Transform_2(face2D, alignTrsf, true);
   const transformedShape = alignXform.Shape();
   const transformedFace = occ.TopoDS.Face_1(transformedShape);
-  transformedShape.delete();
+  safeDelete(transformedShape);
 
-  // Clean up intermediate transformation objects
-  fromOrig.delete();
-  fromNorm.delete();
-  fromXDir.delete();
-  fromAx.delete();
-  toOrig.delete();
-  toNorm.delete();
-  toXDir.delete();
-  toAx.delete();
-  alignTrsf.delete();
-  alignXform.delete();
+  safeDelete(fromOrig);
+  safeDelete(fromNorm);
+  safeDelete(fromXDir);
+  safeDelete(fromAx);
+  safeDelete(toOrig);
+  safeDelete(toNorm);
+  safeDelete(toXDir);
+  safeDelete(toAx);
+  safeDelete(alignTrsf);
+  safeDelete(alignXform);
 
   return transformedFace;
 }
 
-/**
- * 路徑 Wire 構建函式：從 3D 導引路徑段（line/arc）縫合為 TopoDS_Wire
- * 採用 3 點定弧法確保空間圓弧方向唯一精確
- */
 function buildPathWire(
   segments: {
     type: 'line' | 'arc';
@@ -498,10 +537,15 @@ function buildPathWire(
         typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function'
           ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
           : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
-      if (mkEdge.IsDone()) {
-        wireMaker.Add_1(mkEdge.Edge());
+      if (!mkEdge.IsDone()) {
+        safeDelete(mkEdge);
+        safeDelete(p1);
+        safeDelete(p2);
+        safeDelete(wireMaker);
+        throw new Error('Path line edge construction failed');
       }
-      mkEdge.delete();
+      wireMaker.Add_1(mkEdge.Edge());
+      safeDelete(mkEdge);
     } else if (seg.type === 'arc' && seg.center) {
       let midX: number;
       let midY: number;
@@ -518,15 +562,14 @@ function buildPathWire(
         const v2x = seg.end.x - seg.center.x;
         const v2y = seg.end.y - seg.center.y;
         const v2z = seg.end.z - seg.center.z;
-  
+
         const r = seg.radius || Math.hypot(v1x, v1y, v1z);
-  
-        // 計算角平分線向量作為 3D 圓弧中點
+
         let midVx = v1x + v2x;
         let midVy = v1y + v2y;
         let midVz = v1z + v2z;
         const midVLen = Math.hypot(midVx, midVy, midVz);
-  
+
         if (midVLen > 1e-6) {
           midX = seg.center.x + (midVx / midVLen) * r;
           midY = seg.center.y + (midVy / midVLen) * r;
@@ -557,46 +600,43 @@ function buildPathWire(
                 wireMaker.Add_1(edgeMaker.Edge());
                 arcAdded = true;
               }
-              edgeMaker.delete();
+              safeDelete(edgeMaker);
             }
-            if (geomCurve) geomCurve.delete();
-            trimmed.delete();
+            if (geomCurve) safeDelete(geomCurve);
+            safeDelete(trimmed);
           }
-          arcMaker.delete();
+          safeDelete(arcMaker);
         } catch (arcErr) {
           console.warn('SolidWorker: 3D path arc failed:', arcErr);
         }
       }
 
-      if (!arcAdded) {
-        const lineMaker =
-          typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function'
-            ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
-            : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
-        if (lineMaker.IsDone()) {
-          wireMaker.Add_1(lineMaker.Edge());
-        }
-        lineMaker.delete();
-      }
+      safeDelete(pMid);
 
-      pMid.delete();
+      if (!arcAdded) {
+        safeDelete(p1);
+        safeDelete(p2);
+        safeDelete(wireMaker);
+        throw new Error('Path 3D arc construction failed for sweep path. Geometric degeneration detected.');
+      }
     }
-    p1.delete();
-    p2.delete();
+    safeDelete(p1);
+    safeDelete(p2);
+  }
+
+  if (!wireMaker.IsDone()) {
+    safeDelete(wireMaker);
+    throw new Error('Invalid Path Wire: path construction failed or discontinuous edges.');
   }
 
   const wire = wireMaker.Wire();
-  wireMaker.delete();
+  safeDelete(wireMaker);
   return wire;
 }
 
-/**
- * Creates a 3D feature solid from 2D profiles using either Extrusion or Revolve operations.
- * Performs face creation, 3D spatial alignment (or axis configuration), and feature generation.
- */
 function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
   if (!op.profiles || op.profiles.length === 0) {
-    throw new Error(`Feature ${op.featureId || ''} has no profiles to evaluate`);
+    throw new Error(`Feature ${op.featureId || op.type} has no profiles to evaluate`);
   }
 
   const isRevolve = op.type === 'REVOLVE' || op.type === 'REVOLVE_CUT';
@@ -612,15 +652,12 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
     const localFace = createFaceFromProfile(profile, occ);
 
     if (isRevolve) {
-      // 1. Transform local 2D face to 3D datum plane position
       const transformedFace = transformFaceTo3D(localFace, { origin, normal, xAxis, yAxis }, occ);
-      localFace.delete();
+      safeDelete(localFace);
 
-      // 2. Setup 3D Axis of Revolution
       const axisOrigin = op.axis?.origin || { x: 0, y: 0, z: 0 };
       const axisDirVec = op.axis?.direction || { x: 0, y: 1, z: 0 };
 
-      // 角度校正：若傳入數值為角度值（大於 2*PI），自動轉為弧度
       let angle = typeof op.angle === 'number' && !isNaN(op.angle) ? op.angle : 2 * Math.PI;
       if (Math.abs(angle) > 2 * Math.PI + 1e-4) {
         angle = (angle * Math.PI) / 180;
@@ -630,10 +667,6 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
       const axDir = new occ.gp_Dir_4(axisDirVec.x, axisDirVec.y, axisDirVec.z);
       const axis = new occ.gp_Ax1_2(axPnt, axDir);
 
-      // 3. Revolve around 3D axis
-      // 判定是否為 360° (2*PI) 全周旋轉：
-      // 在 OCC 中，全周旋轉若帶角度呼叫 MakeRevol_1 常因浮點數精度導致首尾無法完美縫合
-      // 必須改用專門針對全周旋轉的無角度建構子 BRepPrimAPI_MakeRevol_2(Shape, Axis, Copy)
       const isFullCircle = Math.abs(Math.abs(angle) - 2 * Math.PI) < 1e-4;
 
       let revolSolid = null;
@@ -641,49 +674,52 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
         if (isFullCircle && typeof occ.BRepPrimAPI_MakeRevol_2 === 'function') {
           const revolMaker = new occ.BRepPrimAPI_MakeRevol_2(transformedFace, axis, false);
           revolSolid = revolMaker.Shape();
-          revolMaker.delete();
+          safeDelete(revolMaker);
         } else {
           const revolMaker = new occ.BRepPrimAPI_MakeRevol_1(transformedFace, axis, angle, false);
           revolSolid = revolMaker.Shape();
-          revolMaker.delete();
+          safeDelete(revolMaker);
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error('SolidWorker: Failed to create Revolve feature:', err);
+        safeDelete(transformedFace);
+        safeDelete(axPnt);
+        safeDelete(axDir);
+        safeDelete(axis);
+        throw new Error(`Revolve creation failed: ${err.message || 'Unknown error'}`);
       }
 
-      // Clean up revolve objects
-      transformedFace.delete();
-      axPnt.delete();
-      axDir.delete();
-      axis.delete();
+      safeDelete(transformedFace);
+      safeDelete(axPnt);
+      safeDelete(axDir);
+      safeDelete(axis);
 
-      if (revolSolid) {
+      if (revolSolid && !revolSolid.IsNull()) {
         featureSolids.push(revolSolid);
       }
     } else {
-      // EXTRUDE / CUT_EXTRUDE
       const depth = typeof op.depth === 'number' && !isNaN(op.depth) ? op.depth : 10;
 
-      // 1. Local extrusion along Z-axis (0, 0, depth)
       const vec = new occ.gp_Vec_4(0, 0, depth);
       let localSolid = null;
       try {
         const prismMaker = new occ.BRepPrimAPI_MakePrism_1(localFace, vec, false, true);
         localSolid = prismMaker.Shape();
-        prismMaker.delete();
-      } catch (err) {
+        safeDelete(prismMaker);
+      } catch (err: any) {
         console.error('SolidWorker: Failed to create Extrude feature:', err);
+        safeDelete(localFace);
+        safeDelete(vec);
+        throw new Error(`Extrude prism creation failed: ${err.message || 'Unknown error'}`);
       }
 
-      // Clean up face and vector
-      localFace.delete();
-      vec.delete();
+      safeDelete(localFace);
+      safeDelete(vec);
 
-      if (!localSolid) {
+      if (!localSolid || localSolid.IsNull()) {
         continue;
       }
 
-      // 2. Local direction offset shift
       if (op.direction === 'mid-plane') {
         const trsfMid = new occ.gp_Trsf_1();
         const vecMid = new occ.gp_Vec_4(0, 0, -depth / 2);
@@ -691,10 +727,10 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
         const xformMid = new occ.BRepBuilderAPI_Transform_2(localSolid, trsfMid, true);
         const shiftedSolid = xformMid.Shape();
 
-        localSolid.delete();
-        trsfMid.delete();
-        vecMid.delete();
-        xformMid.delete();
+        safeDelete(localSolid);
+        safeDelete(trsfMid);
+        safeDelete(vecMid);
+        safeDelete(xformMid);
 
         localSolid = shiftedSolid;
       } else if (op.direction === 'reversed') {
@@ -704,15 +740,14 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
         const xformRev = new occ.BRepBuilderAPI_Transform_2(localSolid, trsfRev, true);
         const shiftedSolid = xformRev.Shape();
 
-        localSolid.delete();
-        trsfRev.delete();
-        vecRev.delete();
-        xformRev.delete();
+        safeDelete(localSolid);
+        safeDelete(trsfRev);
+        safeDelete(vecRev);
+        safeDelete(xformRev);
 
         localSolid = shiftedSolid;
       }
 
-      // 3. Spatial posture alignment (affine transform to 3D sketch plane coordinate system)
       const fromOrig = new occ.gp_Pnt_3(0, 0, 0);
       const fromNorm = new occ.gp_Dir_4(0, 0, 1);
       const fromXDir = new occ.gp_Dir_4(1, 0, 0);
@@ -739,51 +774,53 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
       const alignXform = new occ.BRepBuilderAPI_Transform_2(localSolid, alignTrsf, true);
       const transformedSolid = alignXform.Shape();
 
-      // Clean up temporary alignment objects and local solid
-      localSolid.delete();
-      fromOrig.delete();
-      fromNorm.delete();
-      fromXDir.delete();
-      fromAx.delete();
-      toOrig.delete();
-      toNorm.delete();
-      toXDir.delete();
-      toAx.delete();
-      alignTrsf.delete();
-      alignXform.delete();
+      safeDelete(localSolid);
+      safeDelete(fromOrig);
+      safeDelete(fromNorm);
+      safeDelete(fromXDir);
+      safeDelete(fromAx);
+      safeDelete(toOrig);
+      safeDelete(toNorm);
+      safeDelete(toXDir);
+      safeDelete(toAx);
+      safeDelete(alignTrsf);
+      safeDelete(alignXform);
 
       featureSolids.push(transformedSolid);
     }
+  }
+
+  if (featureSolids.length === 0) {
+    throw new Error(`Feature ${op.featureId || op.type} produced no valid 3D geometry`);
   }
 
   if (featureSolids.length === 1) {
     return featureSolids[0];
   }
 
-  // Bundle multiple profiles into a TopoDS_Compound
   const builder = new occ.BRep_Builder();
   const compound = new occ.TopoDS_Compound();
   builder.MakeCompound(compound);
 
   for (const fs of featureSolids) {
     builder.Add(compound, fs);
-    fs.delete();
+    safeDelete(fs);
   }
 
-  builder.delete();
+  safeDelete(builder);
   return compound;
 }
 
 function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
   if (!solid || solid.IsNull()) {
     return {
+      success: false,
       vertices: new Float32Array(0),
       normals: new Float32Array(0),
       indices: new Uint32Array(0),
     };
   }
 
-  // Incremental mesh
   const mesher = new occ.BRepMesh_IncrementalMesh_2(solid, 0.1, false, 0.5, false);
 
   const vertices: number[] = [];
@@ -820,19 +857,19 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
         const origPnt = nodeArray.Value(i);
         const pnt = origPnt.Transformed(trsf);
         vertices.push(pnt.X(), pnt.Y(), pnt.Z());
-        pnt.delete();
-        origPnt.delete();
+        safeDelete(pnt);
+        safeDelete(origPnt);
 
         if (normalArray) {
           const n = normalArray.Value(i);
           normals.push(n.X(), n.Y(), n.Z());
-          n.delete();
+          safeDelete(n);
         } else {
-          normals.push(0, 0, 1); // fallback normal
+          normals.push(0, 0, 1);
         }
       }
 
-      trsf.delete();
+      safeDelete(trsf);
 
       const triangleArray = tri.Triangles();
       const faceOrientation = (face as any).Orientation_1
@@ -851,27 +888,26 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
         } else {
           indices.push(indexOffset + n1 - 1, indexOffset + n2 - 1, indexOffset + n3 - 1);
         }
-        triangle.delete();
+        safeDelete(triangle);
       }
 
       indexOffset += numNodes;
 
-      nodeArray.delete();
-      triangleArray.delete();
-      if (normalArray) normalArray.delete();
-      triangulation.delete();
+      safeDelete(nodeArray);
+      safeDelete(triangleArray);
+      if (normalArray) safeDelete(normalArray);
+      safeDelete(triangulation);
     } else {
-      triangulation.delete();
+      safeDelete(triangulation);
     }
 
-    face.delete();
-    loc.delete();
+    safeDelete(face);
+    safeDelete(loc);
     explorer.Next();
   }
 
-  explorer.delete();
+  safeDelete(explorer);
 
-  // Extract true topological B-Rep edges using TopExp_Explorer over TopAbs_EDGE
   const edges: number[] = [];
   const edgeExplorer = new occ.TopExp_Explorer_2(
     solid,
@@ -907,20 +943,19 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
             const p1 = nodes.Value(i).Transformed(trsf);
             const p2 = nodes.Value(i + 1).Transformed(trsf);
             edges.push(p1.X(), p1.Y(), p1.Z(), p2.X(), p2.Y(), p2.Z());
-            p1.delete();
-            p2.delete();
+            safeDelete(p1);
+            safeDelete(p2);
           }
-          trsf.delete();
-          if (typeof nodes.delete === 'function') nodes.delete();
-          poly.delete();
+          safeDelete(trsf);
+          safeDelete(nodes);
+          safeDelete(poly);
           extracted = true;
         } else if (poly) {
-          poly.delete();
+          safeDelete(poly);
         }
       }
 
       if (!extracted) {
-        // Fallback: extract start and end vertices of the edge
         const vExp = new occ.TopExp_Explorer_2(
           edge,
           occ.TopAbs_ShapeEnum.TopAbs_VERTEX,
@@ -933,33 +968,33 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
           const v1 = occ.TopoDS.Vertex_1(vExp.Current());
           const pt1 = occ.BRep_Tool.Pnt(v1);
           p1 = { x: pt1.X(), y: pt1.Y(), z: pt1.Z() };
-          pt1.delete();
-          v1.delete();
+          safeDelete(pt1);
+          safeDelete(v1);
           vExp.Next();
         }
         if (vExp.More()) {
           const v2 = occ.TopoDS.Vertex_1(vExp.Current());
           const pt2 = occ.BRep_Tool.Pnt(v2);
           p2 = { x: pt2.X(), y: pt2.Y(), z: pt2.Z() };
-          pt2.delete();
-          v2.delete();
+          safeDelete(pt2);
+          safeDelete(v2);
           vExp.Next();
         }
-        vExp.delete();
+        safeDelete(vExp);
 
         if (p1 && p2) {
           edges.push(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
         }
       }
 
-      loc.delete();
+      safeDelete(loc);
     }
-    edge.delete();
+    safeDelete(edge);
     edgeExplorer.Next();
   }
 
-  edgeExplorer.delete();
-  mesher.delete();
+  safeDelete(edgeExplorer);
+  safeDelete(mesher);
 
   const vArray = new Float32Array(vertices);
   const nArray = new Float32Array(normals);
@@ -967,6 +1002,7 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
   const eArray = new Float32Array(edges);
 
   return {
+    success: true,
     vertices: vArray,
     normals: nArray,
     indices: iArray,
@@ -979,6 +1015,7 @@ const _self = self as any;
 
 _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
   const req = e.data;
+  deletedPointers.clear(); // Task-level reset of safe deletion tracker
 
   try {
     switch (req.type) {
@@ -993,18 +1030,167 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         const occ = oc;
 
         const operations: FeatureEvalOp[] = req.payload?.operations || [];
+        const dirtyFromIndex: number = typeof req.payload?.dirtyFromIndex === 'number' ? req.payload.dirtyFromIndex : -1;
+        const isPureRollback: boolean = !!req.payload?.isPureRollback || dirtyFromIndex === -1;
 
-        // Clean up previous global solid if present
-        if (currentSolid) {
-          currentSolid.delete();
-          currentSolid = null;
+        // 1. 純回退或完全命中快取檢查 (Pure Rollback / Full Cache Hit)
+        if (isPureRollback && operations.length > 0) {
+          const lastOp = operations[operations.length - 1];
+          if (lastOp && lastOp.featureId && snapshotStore.has(lastOp.featureId)) {
+            const cachedSnap = snapshotStore.get(lastOp.featureId)!;
+            if (cachedSnap.shape && !cachedSnap.shape.IsNull()) {
+              if (currentSolid && currentSolid !== cachedSnap.shape) {
+                safeDelete(currentSolid);
+              }
+              // Clone shape reference for currentSolid
+              const copyMaker = new occ.BRepBuilderAPI_Copy_2(cachedSnap.shape, true, false);
+              currentSolid = copyMaker.Shape();
+              safeDelete(copyMaker);
+
+              const featureResults: Record<string, FeatureResult> = {};
+              const allDiagnostics: KernelDiagnostic[] = [];
+              for (const op of operations) {
+                if (op.featureId && snapshotStore.has(op.featureId)) {
+                  const snap = snapshotStore.get(op.featureId)!;
+                  featureResults[op.featureId] = snap.featureResult;
+                  if (snap.mesh.diagnostics) {
+                    allDiagnostics.push(...snap.mesh.diagnostics);
+                  }
+                }
+              }
+
+              let boundingBox: BodyResult['boundingBox'] = undefined;
+              try {
+                const bbox = new occ.Bnd_Box_1();
+                occ.BRepBndLib.Add(currentSolid, bbox);
+                const minPnt = bbox.CornerMin();
+                const maxPnt = bbox.CornerMax();
+                boundingBox = {
+                  min: { x: minPnt.X(), y: minPnt.Y(), z: minPnt.Z() },
+                  max: { x: maxPnt.X(), y: maxPnt.Y(), z: maxPnt.Z() },
+                };
+                safeDelete(minPnt);
+                safeDelete(maxPnt);
+                safeDelete(bbox);
+              } catch (bbErr) {
+                console.warn('SolidWorker: Failed to calculate bounding box during pure rollback:', bbErr);
+              }
+
+              const bodies: BodyResult[] = [
+                {
+                  bodyId: 'main-body',
+                  name: 'Solid Body 1',
+                  isSolid: true,
+                  boundingBox,
+                },
+              ];
+
+              const kernelResult: KernelResult = {
+                taskId: req.taskId,
+                success: true,
+                finalMesh: cachedSnap.mesh,
+                featureResults,
+                bodies,
+                diagnostics: allDiagnostics,
+              };
+
+              const transferBuffers: Transferable[] = [];
+              if (cachedSnap.mesh && cachedSnap.mesh.vertices) {
+                transferBuffers.push(cachedSnap.mesh.vertices.buffer);
+                transferBuffers.push(cachedSnap.mesh.normals.buffer);
+                transferBuffers.push(cachedSnap.mesh.indices.buffer);
+                if (cachedSnap.mesh.edgeVertices && cachedSnap.mesh.edgeVertices.buffer) {
+                  transferBuffers.push(cachedSnap.mesh.edgeVertices.buffer);
+                }
+              }
+
+              _self.postMessage(
+                {
+                  taskId: req.taskId,
+                  type: req.type,
+                  success: true,
+                  data: kernelResult,
+                } as SolidTaskResponse,
+                transferBuffers
+              );
+              break;
+            }
+          }
         }
 
-        // 維護特徵獨立實體字典 (Per-Feature Solid Cache)
-        const featureSolids = new Map<string, any>();
+        // 2. 增量重算評估 (Incremental Evaluation)
+        let evalStartIndex = 0;
+        if (dirtyFromIndex > 0 && dirtyFromIndex < operations.length) {
+          const prevOp = operations[dirtyFromIndex - 1];
+          if (prevOp && prevOp.featureId && snapshotStore.has(prevOp.featureId)) {
+            const prevSnap = snapshotStore.get(prevOp.featureId)!;
+            if (prevSnap.shape && !prevSnap.shape.IsNull()) {
+              if (currentSolid) {
+                safeDelete(currentSolid);
+                currentSolid = null;
+              }
+              const copyMaker = new occ.BRepBuilderAPI_Copy_2(prevSnap.shape, true, false);
+              currentSolid = copyMaker.Shape();
+              safeDelete(copyMaker);
+              evalStartIndex = dirtyFromIndex;
+            }
+          }
+        }
 
-        try {
-          for (const op of operations) {
+        if (evalStartIndex === 0) {
+          if (currentSolid) {
+            safeDelete(currentSolid);
+            currentSolid = null;
+          }
+          snapshotStore.clear();
+          featureSolidCache.clear();
+        } else {
+          // 清理從 dirtyFromIndex 開始及其之後的快照
+          const keysToDelete: string[] = [];
+          for (let k = evalStartIndex; k < operations.length; k++) {
+            const opId = operations[k].featureId;
+            if (opId) {
+              keysToDelete.push(opId);
+              if (snapshotStore.has(opId)) {
+                const snap = snapshotStore.get(opId)!;
+                safeDelete(snap.shape);
+                snapshotStore.delete(opId);
+              }
+              if (featureSolidCache.has(opId)) {
+                featureSolidCache.delete(opId);
+              }
+            }
+          }
+        }
+
+        const allDiagnostics: KernelDiagnostic[] = [];
+        const featureResults: Record<string, FeatureResult> = {};
+
+        // 恢復已計算且位於 evalStartIndex 之前的快照與特徵結果
+        for (let i = 0; i < evalStartIndex; i++) {
+          const op = operations[i];
+          if (op.featureId && snapshotStore.has(op.featureId)) {
+            const snap = snapshotStore.get(op.featureId)!;
+            featureResults[op.featureId] = snap.featureResult;
+            if (snap.mesh.diagnostics) {
+              allDiagnostics.push(...snap.mesh.diagnostics);
+            }
+            if (snap.shape && !snap.shape.IsNull()) {
+              featureSolidCache.set(op.featureId, snap.shape);
+            }
+          }
+        }
+
+        let hasAnySuccess = evalStartIndex > 0;
+
+        for (let i = evalStartIndex; i < operations.length; i++) {
+          const op = operations[i];
+          const tStart = performance.now();
+          const featureDiag: KernelDiagnostic[] = [];
+          let success = false;
+          let errorMessage: string | null = null;
+
+          try {
             if (
               op.type === 'EXTRUDE' ||
               op.type === 'CUT_EXTRUDE' ||
@@ -1013,78 +1199,74 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             ) {
               const featureSolid = createFeatureSolid(op, occ);
               if (!featureSolid || featureSolid.IsNull()) {
-                continue;
+                throw new Error(`Feature ${op.featureId || op.type} returned an empty solid`);
               }
 
               if (op.featureId) {
-                featureSolids.set(op.featureId, featureSolid);
+                featureSolidCache.set(op.featureId, featureSolid);
               }
 
               const isCut =
                 op.operation === 'CUT' || op.type === 'CUT_EXTRUDE' || op.type === 'REVOLVE_CUT';
 
               if (currentSolid === null) {
-                // First feature evaluation
-                if (
-                  !isCut &&
-                  (op.operation === 'JOIN' || op.type === 'EXTRUDE' || op.type === 'REVOLVE')
-                ) {
+                if (!isCut && (op.operation === 'JOIN' || op.type === 'EXTRUDE' || op.type === 'REVOLVE')) {
                   currentSolid = featureSolid;
-                } else {
-                  // CUT operation requires an existing base body
+                } else if (isCut) {
+                  featureDiag.push({
+                    level: 'warning',
+                    message: `Cut operation '${op.featureId || op.type}' ignored because no base solid exists.`,
+                    featureId: op.featureId,
+                  });
                 }
               } else {
                 if (!isCut) {
-                  // Boolean Fuse (JOIN)
                   const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, featureSolid);
                   fuse.Build();
                   if (fuse.IsDone()) {
                     const newSolid = fuse.Shape();
                     if (currentSolid !== featureSolid) {
-                      currentSolid.delete();
+                      safeDelete(currentSolid);
                     }
                     currentSolid = newSolid;
+                  } else {
+                    safeDelete(fuse);
+                    throw new Error(`Boolean Fuse failed for feature ${op.featureId || op.type}`);
                   }
-                  fuse.delete();
+                  safeDelete(fuse);
                 } else {
-                  // Boolean Cut (CUT)
                   const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, featureSolid);
                   cut.Build();
                   if (cut.IsDone()) {
                     const newSolid = cut.Shape();
                     if (currentSolid !== featureSolid) {
-                      currentSolid.delete();
+                      safeDelete(currentSolid);
                     }
                     currentSolid = newSolid;
+                  } else {
+                    safeDelete(cut);
+                    throw new Error(`Boolean Cut failed for feature ${op.featureId || op.type}`);
                   }
-                  cut.delete();
+                  safeDelete(cut);
                 }
               }
+              success = true;
             } else if (op.type === 'SWEEP') {
-              if (
-                !op.sweepData ||
-                !op.sweepData.pathSegments ||
-                op.sweepData.pathSegments.length === 0
-              ) {
-                continue;
+              if (!op.sweepData || !op.sweepData.pathSegments || op.sweepData.pathSegments.length === 0) {
+                throw new Error(`Sweep feature ${op.featureId || ''} missing path segments`);
               }
               if (!op.profiles || op.profiles.length === 0) {
-                continue;
+                throw new Error(`Sweep feature ${op.featureId || ''} missing profiles`);
               }
 
-              // 1. 構建 3D 導引路徑 pathWire
               const pathWire = buildPathWire(op.sweepData.pathSegments, occ);
-
               const sweepSolids: any[] = [];
 
               for (const profile of op.profiles) {
-                // 2. 建立截面 2D TopoDS_Face
                 const localFace = createFaceFromProfile(profile, occ);
-                // 3. 轉換至 op.plane 的 3D 空間姿態
                 const spatialFace = transformFaceTo3D(localFace, op.plane || {}, occ);
-                localFace.delete();
+                safeDelete(localFace);
 
-                // 4. 實例化 BRepOffsetAPI_MakePipe 生成實體
                 const pipeMaker =
                   typeof occ.BRepOffsetAPI_MakePipe_1 === 'function'
                     ? new occ.BRepOffsetAPI_MakePipe_1(pathWire, spatialFace)
@@ -1094,16 +1276,21 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 if (pipeMaker.IsDone()) {
                   const pipeSolid = pipeMaker.Shape();
                   sweepSolids.push(pipeSolid);
+                } else {
+                  safeDelete(spatialFace);
+                  safeDelete(pipeMaker);
+                  safeDelete(pathWire);
+                  throw new Error(`Pipe sweep failed for profile ${profile.id || ''}`);
                 }
 
-                spatialFace.delete();
-                pipeMaker.delete();
+                safeDelete(spatialFace);
+                safeDelete(pipeMaker);
               }
 
-              pathWire.delete();
+              safeDelete(pathWire);
 
               if (sweepSolids.length === 0) {
-                continue;
+                throw new Error(`Sweep feature ${op.featureId || ''} produced no valid solids`);
               }
 
               let featureSolid: any = null;
@@ -1115,15 +1302,15 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 builder.MakeCompound(compound);
                 for (const s of sweepSolids) {
                   builder.Add(compound, s);
-                  s.delete();
+                  safeDelete(s);
                 }
-                builder.delete();
+                safeDelete(builder);
                 featureSolid = compound;
               }
 
               if (featureSolid && !featureSolid.IsNull()) {
                 if (op.featureId) {
-                  featureSolids.set(op.featureId, featureSolid);
+                  featureSolidCache.set(op.featureId, featureSolid);
                 }
 
                 const isCut = op.operation === 'CUT';
@@ -1139,28 +1326,29 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                     if (fuse.IsDone()) {
                       const newSolid = fuse.Shape();
                       if (currentSolid !== featureSolid) {
-                        currentSolid.delete();
+                        safeDelete(currentSolid);
                       }
                       currentSolid = newSolid;
                     }
-                    fuse.delete();
+                    safeDelete(fuse);
                   } else {
                     const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, featureSolid);
                     cut.Build();
                     if (cut.IsDone()) {
                       const newSolid = cut.Shape();
                       if (currentSolid !== featureSolid) {
-                        currentSolid.delete();
+                        safeDelete(currentSolid);
                       }
                       currentSolid = newSolid;
                     }
-                    cut.delete();
+                    safeDelete(cut);
                   }
                 }
               }
+              success = true;
             } else if (op.type === 'LOFT') {
               if (!op.loftData || !op.loftData.sections || op.loftData.sections.length < 2) {
-                continue;
+                throw new Error(`Loft feature ${op.featureId || ''} requires at least 2 sections`);
               }
 
               const isSolid = op.loftData.isSolid ?? true;
@@ -1181,7 +1369,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   if (!localWire) continue;
 
                   const spatialWire = transformWireTo3D(localWire, section.plane, occ);
-                  localWire.delete();
+                  safeDelete(localWire);
 
                   thruSections.AddWire(spatialWire);
                   intermediateWires.push(spatialWire);
@@ -1193,17 +1381,20 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               let featureSolid: any = null;
               if (thruSections.IsDone()) {
                 featureSolid = thruSections.Shape();
+              } else {
+                for (const w of intermediateWires) safeDelete(w);
+                safeDelete(thruSections);
+                throw new Error(`Loft section connection failed for ${op.featureId || ''}`);
               }
 
-              // 釋放中繼 Wire 與構建器
               for (const w of intermediateWires) {
-                w.delete();
+                safeDelete(w);
               }
-              thruSections.delete();
+              safeDelete(thruSections);
 
               if (featureSolid && !featureSolid.IsNull()) {
                 if (op.featureId) {
-                  featureSolids.set(op.featureId, featureSolid);
+                  featureSolidCache.set(op.featureId, featureSolid);
                 }
 
                 const isCut = op.operation === 'CUT';
@@ -1219,38 +1410,38 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                     if (fuse.IsDone()) {
                       const newSolid = fuse.Shape();
                       if (currentSolid !== featureSolid) {
-                        currentSolid.delete();
+                        safeDelete(currentSolid);
                       }
                       currentSolid = newSolid;
                     }
-                    fuse.delete();
+                    safeDelete(fuse);
                   } else {
                     const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, featureSolid);
                     cut.Build();
                     if (cut.IsDone()) {
                       const newSolid = cut.Shape();
                       if (currentSolid !== featureSolid) {
-                        currentSolid.delete();
+                        safeDelete(currentSolid);
                       }
                       currentSolid = newSolid;
                     }
-                    cut.delete();
+                    safeDelete(cut);
                   }
                 }
               }
+              success = true;
             } else if (
               op.type === 'LINEAR_PATTERN' ||
               op.type === 'CIRCULAR_PATTERN' ||
               op.type === 'MIRROR_3D'
             ) {
-              // 從 featureSolids 取得目標特徵實體（若未指定或找不到，退化取 currentSolid 作為母體）
               let sourceSolid: any = null;
               let shouldDeleteSourceSolid = false;
               if (op.targetFeatureIds && op.targetFeatureIds.length > 0) {
                 const sources: any[] = [];
                 for (const tid of op.targetFeatureIds) {
-                  if (featureSolids.has(tid)) {
-                    sources.push(featureSolids.get(tid));
+                  if (featureSolidCache.has(tid)) {
+                    sources.push(featureSolidCache.get(tid));
                   }
                 }
                 if (sources.length === 1) {
@@ -1262,7 +1453,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   for (const s of sources) {
                     builder.Add(compound, s);
                   }
-                  builder.delete();
+                  safeDelete(builder);
                   sourceSolid = compound;
                   shouldDeleteSourceSolid = true;
                 }
@@ -1273,7 +1464,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               }
 
               if (!sourceSolid || sourceSolid.IsNull()) {
-                continue;
+                throw new Error(`Pattern/Mirror feature '${op.featureId || op.type}' has no valid target solid.`);
               }
 
               if (op.type === 'LINEAR_PATTERN') {
@@ -1287,13 +1478,13 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   const count2 = typeof pat.count2 === 'number' && pat.count2 > 0 ? pat.count2 : 1;
                   const spacing2 = typeof pat.spacing2 === 'number' ? pat.spacing2 : 0;
 
-                  for (let i = 0; i < count1; i++) {
-                    for (let j = 0; j < count2; j++) {
-                      if (i === 0 && j === 0) continue;
+                  for (let pIdx = 0; pIdx < count1; pIdx++) {
+                    for (let qIdx = 0; qIdx < count2; qIdx++) {
+                      if (pIdx === 0 && qIdx === 0) continue;
 
-                      const dx = i * spacing1 * dir1.x + j * spacing2 * (dir2?.x || 0);
-                      const dy = i * spacing1 * dir1.y + j * spacing2 * (dir2?.y || 0);
-                      const dz = i * spacing1 * dir1.z + j * spacing2 * (dir2?.z || 0);
+                      const dx = pIdx * spacing1 * dir1.x + qIdx * spacing2 * (dir2?.x || 0);
+                      const dy = pIdx * spacing1 * dir1.y + qIdx * spacing2 * (dir2?.y || 0);
+                      const dz = pIdx * spacing1 * dir1.z + qIdx * spacing2 * (dir2?.z || 0);
 
                       const vec = new occ.gp_Vec_4(dx, dy, dz);
                       const trsf = new occ.gp_Trsf_1();
@@ -1309,16 +1500,16 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                         fuse.Build();
                         if (fuse.IsDone()) {
                           const newSolid = fuse.Shape();
-                          currentSolid.delete();
+                          safeDelete(currentSolid);
                           currentSolid = newSolid;
                         }
-                        fuse.delete();
-                        transformedCopy.delete();
+                        safeDelete(fuse);
+                        safeDelete(transformedCopy);
                       }
 
-                      xform.delete();
-                      trsf.delete();
-                      vec.delete();
+                      safeDelete(xform);
+                      safeDelete(trsf);
+                      safeDelete(vec);
                     }
                   }
                 }
@@ -1370,20 +1561,20 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                       fuse.Build();
                       if (fuse.IsDone()) {
                         const newSolid = fuse.Shape();
-                        currentSolid.delete();
+                        safeDelete(currentSolid);
                         currentSolid = newSolid;
                       }
-                      fuse.delete();
-                      transformedCopy.delete();
+                      safeDelete(fuse);
+                      safeDelete(transformedCopy);
                     }
 
-                    xform.delete();
-                    trsf.delete();
+                    safeDelete(xform);
+                    safeDelete(trsf);
                   }
 
-                  rotAxis.delete();
-                  axDir.delete();
-                  axPnt.delete();
+                  safeDelete(rotAxis);
+                  safeDelete(axDir);
+                  safeDelete(axPnt);
                 }
               } else if (op.type === 'MIRROR_3D') {
                 const plane = op.mirrorPlane;
@@ -1408,31 +1599,32 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                     fuse.Build();
                     if (fuse.IsDone()) {
                       const newSolid = fuse.Shape();
-                      currentSolid.delete();
+                      safeDelete(currentSolid);
                       currentSolid = newSolid;
                     }
-                    fuse.delete();
-                    mirroredCopy.delete();
+                    safeDelete(fuse);
+                    safeDelete(mirroredCopy);
                   }
 
-                  xform.delete();
-                  trsf.delete();
-                  ax2.delete();
-                  dir.delete();
-                  pnt.delete();
+                  safeDelete(xform);
+                  safeDelete(trsf);
+                  safeDelete(ax2);
+                  safeDelete(dir);
+                  safeDelete(pnt);
                 }
               }
 
               if (shouldDeleteSourceSolid && sourceSolid) {
-                sourceSolid.delete();
+                safeDelete(sourceSolid);
               }
 
               if (op.featureId && currentSolid) {
-                featureSolids.set(op.featureId, currentSolid);
+                featureSolidCache.set(op.featureId, currentSolid);
               }
+              success = true;
             } else if (op.type === 'FILLET_3D') {
               if (!currentSolid || currentSolid.IsNull()) {
-                continue;
+                throw new Error(`Fillet 3D requires an existing base solid`);
               }
 
               const radius =
@@ -1478,28 +1670,32 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   addedCount++;
                 }
 
-                edge.delete();
+                safeDelete(edge);
                 exp.Next();
               }
-              exp.delete();
+              safeDelete(exp);
 
               if (addedCount > 0) {
                 fillet.Build();
                 if (fillet.IsDone()) {
                   const newSolid = fillet.Shape();
-                  currentSolid.delete();
+                  safeDelete(currentSolid);
                   currentSolid = newSolid;
+                } else {
+                  safeDelete(fillet);
+                  throw new Error(`Fillet operation failed to build`);
                 }
               }
 
-              fillet.delete();
+              safeDelete(fillet);
 
               if (op.featureId && currentSolid) {
-                featureSolids.set(op.featureId, currentSolid);
+                featureSolidCache.set(op.featureId, currentSolid);
               }
+              success = true;
             } else if (op.type === 'CHAMFER_3D') {
               if (!currentSolid || currentSolid.IsNull()) {
-                continue;
+                throw new Error(`Chamfer 3D requires an existing base solid`);
               }
 
               const distance =
@@ -1545,28 +1741,32 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   addedCount++;
                 }
 
-                edge.delete();
+                safeDelete(edge);
                 exp.Next();
               }
-              exp.delete();
+              safeDelete(exp);
 
               if (addedCount > 0) {
                 chamfer.Build();
                 if (chamfer.IsDone()) {
                   const newSolid = chamfer.Shape();
-                  currentSolid.delete();
+                  safeDelete(currentSolid);
                   currentSolid = newSolid;
+                } else {
+                  safeDelete(chamfer);
+                  throw new Error(`Chamfer operation failed to build`);
                 }
               }
 
-              chamfer.delete();
+              safeDelete(chamfer);
 
               if (op.featureId && currentSolid) {
-                featureSolids.set(op.featureId, currentSolid);
+                featureSolidCache.set(op.featureId, currentSolid);
               }
+              success = true;
             } else if (op.type === 'SHELL_3D') {
               if (!currentSolid || currentSolid.IsNull()) {
-                continue;
+                throw new Error(`Shell 3D requires an existing base solid`);
               }
 
               const rawThickness =
@@ -1578,7 +1778,6 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
               const closingFaces = new occ.TopTools_ListOfShape_1();
 
-              // 遍歷母體實體面 TopExp_Explorer(currentSolid, TopAbs_FACE)
               const expFace = new occ.TopExp_Explorer_2(
                 currentSolid,
                 occ.TopAbs_ShapeEnum.TopAbs_FACE,
@@ -1592,7 +1791,6 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 const faceShape = expFace.Current();
                 const face = occ.TopoDS.Face_1(faceShape);
 
-                // 計算該面的平均 Z 座標
                 const vExp = new occ.TopExp_Explorer_2(
                   face,
                   occ.TopAbs_ShapeEnum.TopAbs_VERTEX,
@@ -1606,30 +1804,30 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   const pnt = occ.BRep_Tool.Pnt(v);
                   zSum += pnt.Z();
                   vCount++;
-                  pnt.delete();
-                  v.delete();
+                  safeDelete(pnt);
+                  safeDelete(v);
                   vExp.Next();
                 }
-                vExp.delete();
+                safeDelete(vExp);
 
                 const avgZ = vCount > 0 ? zSum / vCount : 0;
                 if (avgZ > maxZ) {
                   maxZ = avgZ;
                   if (highestFace) {
-                    highestFace.delete();
+                    safeDelete(highestFace);
                   }
                   highestFace = face;
                 } else {
-                  face.delete();
+                  safeDelete(face);
                 }
 
                 expFace.Next();
               }
-              expFace.delete();
+              safeDelete(expFace);
 
               if (highestFace) {
                 closingFaces.Append_1(highestFace);
-                highestFace.delete();
+                safeDelete(highestFace);
               }
 
               let hollow: any = null;
@@ -1686,65 +1884,140 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 hollow.Build();
                 if (hollow.IsDone()) {
                   const newSolid = hollow.Shape();
-                  currentSolid.delete();
+                  safeDelete(currentSolid);
                   currentSolid = newSolid;
+                } else {
+                  safeDelete(hollow);
+                  safeDelete(closingFaces);
+                  throw new Error(`Shell operation failed to build thick solid`);
                 }
-                hollow.delete();
+                safeDelete(hollow);
               }
 
-              closingFaces.delete();
+              safeDelete(closingFaces);
 
               if (op.featureId && currentSolid) {
-                featureSolids.set(op.featureId, currentSolid);
+                featureSolidCache.set(op.featureId, currentSolid);
               }
+              success = true;
+            }
+
+            if (success) {
+              hasAnySuccess = true;
+            }
+          } catch (featureErr: any) {
+            errorMessage = featureErr?.message || 'Feature evaluation failed';
+            console.error(`SolidWorker: Feature ${op.featureId || op.type} error:`, featureErr);
+            featureDiag.push({
+              level: 'error',
+              message: errorMessage,
+              featureId: op.featureId,
+            });
+            allDiagnostics.push(...featureDiag);
+            success = false;
+          }
+
+          const fRes: FeatureResult = {
+            featureId: op.featureId,
+            success,
+            createdBodyIds: success ? ['main-body'] : [],
+            modifiedBodyIds: success ? ['main-body'] : [],
+            diagnostics: featureDiag,
+            error: errorMessage,
+            executionTimeMs: performance.now() - tStart,
+          };
+
+          if (op.featureId) {
+            featureResults[op.featureId] = fRes;
+
+            // 存入快照快取 (snapshotStore)
+            if (success && currentSolid && !currentSolid.IsNull()) {
+              const copyMaker = new occ.BRepBuilderAPI_Copy_2(currentSolid, true, false);
+              const shapeCopy = copyMaker.Shape();
+              safeDelete(copyMaker);
+
+              const meshCopy = tessellateSolid(shapeCopy, occ);
+
+              snapshotStore.set(op.featureId, {
+                featureId: op.featureId,
+                shape: shapeCopy,
+                mesh: meshCopy,
+                featureResult: fRes,
+              });
             }
           }
-        } finally {
-          // Clean up per-feature solid cache
-          for (const [, s] of featureSolids) {
-            if (s && s !== currentSolid && typeof s.delete === 'function') {
-              try {
-                if (!s.IsNull()) {
-                  s.delete();
-                }
-              } catch (_) {}
-            }
-          }
-          featureSolids.clear();
         }
 
-        if (currentSolid) {
-          const meshData = tessellateSolid(currentSolid, occ);
-          const transferBuffers: Transferable[] = [
-            meshData.vertices.buffer,
-            meshData.normals.buffer,
-            meshData.indices.buffer,
-          ];
-          if (meshData.edgeVertices && meshData.edgeVertices.buffer) {
-            transferBuffers.push(meshData.edgeVertices.buffer);
+        let meshResult: MeshResult | null = null;
+        let bodies: BodyResult[] = [];
+
+        if (currentSolid && !currentSolid.IsNull()) {
+          meshResult = tessellateSolid(currentSolid, occ);
+          meshResult.diagnostics = allDiagnostics;
+
+          let boundingBox: BodyResult['boundingBox'] = undefined;
+          try {
+            const bbox = new occ.Bnd_Box_1();
+            occ.BRepBndLib.Add(currentSolid, bbox);
+            const minPnt = bbox.CornerMin();
+            const maxPnt = bbox.CornerMax();
+            boundingBox = {
+              min: { x: minPnt.X(), y: minPnt.Y(), z: minPnt.Z() },
+              max: { x: maxPnt.X(), y: maxPnt.Y(), z: maxPnt.Z() },
+            };
+            safeDelete(minPnt);
+            safeDelete(maxPnt);
+            safeDelete(bbox);
+          } catch (bbErr) {
+            console.warn('SolidWorker: Failed to calculate bounding box:', bbErr);
           }
-          _self.postMessage(
+
+          bodies = [
             {
-              taskId: req.taskId,
-              type: req.type,
-              success: true,
-              data: meshData,
-            } as SolidTaskResponse,
-            transferBuffers
-          );
+              bodyId: 'main-body',
+              name: 'Solid Body 1',
+              isSolid: true,
+              boundingBox,
+            },
+          ];
         } else {
-          const emptyMesh: MeshResult = {
+          meshResult = {
+            success: false,
             vertices: new Float32Array(0),
             normals: new Float32Array(0),
             indices: new Uint32Array(0),
+            diagnostics: allDiagnostics,
           };
-          _self.postMessage({
+        }
+
+        const kernelResult: KernelResult = {
+          taskId: req.taskId,
+          success: hasAnySuccess,
+          finalMesh: meshResult,
+          featureResults,
+          bodies,
+          diagnostics: allDiagnostics,
+        };
+
+        const transferBuffers: Transferable[] = [];
+        if (meshResult && meshResult.vertices) {
+          transferBuffers.push(meshResult.vertices.buffer);
+          transferBuffers.push(meshResult.normals.buffer);
+          transferBuffers.push(meshResult.indices.buffer);
+          if (meshResult.edgeVertices && meshResult.edgeVertices.buffer) {
+            transferBuffers.push(meshResult.edgeVertices.buffer);
+          }
+        }
+
+        _self.postMessage(
+          {
             taskId: req.taskId,
             type: req.type,
             success: true,
-            data: emptyMesh,
-          } as SolidTaskResponse);
-        }
+            data: kernelResult,
+          } as SolidTaskResponse,
+          transferBuffers
+        );
         break;
       }
 
@@ -1761,13 +2034,11 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           throw new Error('No profiles provided for extrusion');
         }
 
-        // Clean up previous solid if exists
         if (currentSolid) {
-          currentSolid.delete();
+          safeDelete(currentSolid);
           currentSolid = null;
         }
 
-        // Create Compound container using BRep_Builder
         const builder = new occ.BRep_Builder();
         const compound = new occ.TopoDS_Compound();
         builder.MakeCompound(compound);
@@ -1780,19 +2051,16 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
           builder.Add(compound, prismSolid);
 
-          // Clean up intermediate per-profile C++ objects
-          face.delete();
-          vec.delete();
-          prismSolid.delete();
-          prismMaker.delete();
+          safeDelete(face);
+          safeDelete(vec);
+          safeDelete(prismSolid);
+          safeDelete(prismMaker);
         }
 
-        builder.delete();
+        safeDelete(builder);
 
-        // Store the compound as the current solid for subsequent export (STEP / STL)
         currentSolid = compound;
 
-        // Tessellate compound to get triangulated mesh
         const meshData = tessellateSolid(compound, occ);
         const transferBuffers: Transferable[] = [
           meshData.vertices.buffer,
@@ -1845,18 +2113,17 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             transferResult === occ.IFSelect_ReturnStatus.IFSelect_RetDone);
 
         if (!isTransferOk) {
-          stepWriter.delete();
+          safeDelete(stepWriter);
           throw new Error('STEP transfer failed');
         }
 
         const fileName = `/export_${Date.now()}.step`;
-        let writeResult: any = false;
         try {
-          writeResult = stepWriter.Write(fileName);
+          stepWriter.Write(fileName);
         } catch (writeErr) {
           console.error('STEP write exception:', writeErr);
           try {
-            writeResult = stepWriter.Write(fileName.replace(/^\//, ''));
+            stepWriter.Write(fileName.replace(/^\//, ''));
           } catch (writeErr2) {
             console.error('STEP write fallback exception:', writeErr2);
           }
@@ -1878,7 +2145,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           console.warn('FS error reading STEP:', fsErr);
           throw new Error('STEP file generation failed on FS layer');
         }
-        stepWriter.delete();
+        safeDelete(stepWriter);
 
         if (!stepContent) {
           throw new Error('STEP file generation failed on FS layer');
@@ -1897,7 +2164,6 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         if (!oc || !currentSolid) throw new Error('No solid available to export');
         const occ = oc;
 
-        // Ensure the solid has a mesh before exporting to STL
         let mesher = null;
         try {
           mesher = new occ.BRepMesh_IncrementalMesh_2(currentSolid, 0.1, false, 0.5, false);
@@ -1931,11 +2197,11 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         }
 
         if (mesher) {
-          mesher.delete();
+          safeDelete(mesher);
         }
 
         if (!result) {
-          stlWriter.delete();
+          safeDelete(stlWriter);
           throw new Error('STL write failed');
         }
 
@@ -1955,7 +2221,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           console.warn('FS error reading STL:', fsErr);
           throw new Error('STL file generation failed on FS layer');
         }
-        stlWriter.delete();
+        safeDelete(stlWriter);
 
         if (stlContent && stlContent.byteLength > 0) {
           _self.postMessage(
@@ -1979,12 +2245,9 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         const format = req.payload?.format || 'STEP';
         const operations = req.payload?.operations as FeatureEvalOp[] | undefined;
 
-        // 若有傳入 operations 陣列，重新執行 featureTree 生成最新 finalShape/currentSolid
         if (operations && Array.isArray(operations) && operations.length > 0) {
           if (currentSolid) {
-            try {
-              currentSolid.delete();
-            } catch (_) {}
+            safeDelete(currentSolid);
             currentSolid = null;
           }
 
@@ -2000,13 +2263,13 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   fuseMaker.Build();
                   if (fuseMaker.IsDone()) {
                     const fused = fuseMaker.Shape();
-                    accumSolid.delete();
-                    featSolid.delete();
-                    fuseMaker.delete();
+                    safeDelete(accumSolid);
+                    safeDelete(featSolid);
+                    safeDelete(fuseMaker);
                     accumSolid = fused;
                   } else {
-                    fuseMaker.delete();
-                    featSolid.delete();
+                    safeDelete(fuseMaker);
+                    safeDelete(featSolid);
                   }
                 }
               }
@@ -2017,13 +2280,13 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 cutMaker.Build();
                 if (cutMaker.IsDone()) {
                   const resultShape = cutMaker.Shape();
-                  accumSolid.delete();
-                  cutSolid.delete();
-                  cutMaker.delete();
+                  safeDelete(accumSolid);
+                  safeDelete(cutSolid);
+                  safeDelete(cutMaker);
                   accumSolid = resultShape;
                 } else {
-                  cutMaker.delete();
-                  cutSolid.delete();
+                  safeDelete(cutMaker);
+                  safeDelete(cutSolid);
                 }
               }
             }
@@ -2046,7 +2309,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           }
 
           const stepWriter = new occ.STEPControl_Writer_1();
-          const transferResult = stepWriter.Transfer(
+          stepWriter.Transfer(
             currentSolid,
             occ.STEPControl_StepModelType.STEPControl_AsIs,
             true
@@ -2073,7 +2336,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             console.warn('FS error reading STEP:', fsErr);
             throw new Error('STEP file generation failed on FS layer');
           }
-          stepWriter.delete();
+          safeDelete(stepWriter);
 
           if (stepContentBuffer && stepContentBuffer.byteLength > 0) {
             _self.postMessage(
@@ -2089,7 +2352,6 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             throw new Error('STEP file generation failed on FS layer');
           }
         } else {
-          // STL Export
           let mesher = null;
           try {
             mesher = new occ.BRepMesh_IncrementalMesh_2(currentSolid, 0.1, false, 0.5, false);
@@ -2117,9 +2379,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           }
 
           if (mesher) {
-            try {
-              mesher.delete();
-            } catch {}
+            safeDelete(mesher);
           }
 
           let stlContentBuffer: Uint8Array | null = null;
@@ -2136,7 +2396,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             console.warn('FS error reading STL:', fsErr);
             throw new Error('STL file generation failed on FS layer');
           }
-          stlWriter.delete();
+          safeDelete(stlWriter);
 
           if (stlContentBuffer && stlContentBuffer.byteLength > 0) {
             _self.postMessage(

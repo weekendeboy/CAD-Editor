@@ -41,11 +41,14 @@ import {
 import { executeTrim } from '../core/2d/TrimManager';
 import { solveConstraints, analyzeSketchDOF } from '../core/solver/ConstraintSolver';
 import {
-  getRegenSequence,
+  getRegenPlan,
   markDownstreamDirty,
+  applyRegenResults,
   validateFeatureDependencies,
   getDirectDependencies,
 } from '../core/3d/FeatureRegenEngine';
+import { buildFeatureEvalOps } from '../core/3d/FeaturePipelineAdapter';
+import { solidEngine } from '../core/3d/SolidEngine';
 
 /**
  * 依據 ID 尋找對應的 CustomPlane (包含特徵樹上的 DatumPlaneFeature/SketchFeature、doc.planes 以及預設 3 大基準面)
@@ -182,6 +185,21 @@ function checkDAGOrderValid(features: CADFeature[]): boolean {
   return true;
 }
 
+/**
+ * 輔助函式：當草圖內部圖元或約束變更時，標記該草圖特徵及其所有下游特徵為 isDirty = true
+ */
+function markSketchDirtyInDoc(doc: CADDocument, sketchId: string): CADDocument {
+  if (!sketchId || !doc || !doc.featureTree) return doc;
+  const updatedTree = doc.featureTree.map((f) =>
+    f.id === sketchId ? ({ ...f, isDirty: true } as CADFeature) : f
+  );
+  const dirtyTree = markDownstreamDirty(updatedTree, sketchId);
+  return {
+    ...doc,
+    featureTree: dirtyTree,
+  };
+}
+
 export const useCADStore = create<CADState>((set, get) => ({
   document: createInitialDocument(),
   activeLayerId: '0',
@@ -195,6 +213,13 @@ export const useCADStore = create<CADState>((set, get) => ({
   orthoEnabled: false,
   showProfiles: true,
   show3DEdges: true,
+  cumulativePartMesh: null,
+  featureResults: {},
+  bodies: [],
+  kernelDiagnostics: [],
+  getFeatureResult: (featureId: string) => {
+    return get().featureResults[featureId];
+  },
   toggleShow3DEdges: () => set((state) => ({ show3DEdges: !state.show3DEdges })),
   projectedEntities: [],
   setProjectedEntities: (entities) => set({ projectedEntities: entities }),
@@ -278,32 +303,38 @@ export const useCADStore = create<CADState>((set, get) => ({
     return { selectedFeatureId: id };
   }),
 
-  addFeature: (feature) => set((state) => {
+  addFeature: (feature) => {
+    const state = get();
     const currentRollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
     const tree = state.document.featureTree;
+    const newFeatureWithDirty: CADFeature = { ...feature, isDirty: true };
     const newFeatureTree = [
       ...tree.slice(0, currentRollback),
-      feature,
+      newFeatureWithDirty,
       ...tree.slice(currentRollback),
     ];
+    const dirtyTree = markDownstreamDirty(newFeatureTree, feature.id);
     const newRollbackIndex = currentRollback + 1;
     const nextActiveSketchId = feature.type === 'SKETCH' ? feature.id : state.activeSketchId;
 
-    return {
+    set({
       ...pushUndoState(state),
       activeSketchId: nextActiveSketchId,
       selectedFeatureId: feature.id,
       document: {
         ...state.document,
-        featureTree: newFeatureTree,
+        featureTree: dirtyTree,
         rollbackIndex: newRollbackIndex,
       },
-    };
-  }),
+    });
 
-  removeFeature: (id) => set((state) => {
+    get().regenerateFeatureTree();
+  },
+
+  removeFeature: (id) => {
+    const state = get();
     const featureIndex = state.document.featureTree.findIndex((f) => f.id === id);
-    if (featureIndex === -1) return state;
+    if (featureIndex === -1) return;
 
     const filteredTree = state.document.featureTree.filter((f) => f.id !== id);
     const validationMap = validateFeatureDependencies(filteredTree);
@@ -335,7 +366,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       ? (updatedTree.find((f) => f.type === 'SKETCH')?.id || null)
       : state.activeSketchId;
 
-    return {
+    set({
       ...pushUndoState(state),
       document: {
         ...state.document,
@@ -344,12 +375,15 @@ export const useCADStore = create<CADState>((set, get) => ({
       },
       selectedFeatureId: state.selectedFeatureId === id ? null : state.selectedFeatureId,
       activeSketchId: nextActiveSketchId,
-    };
-  }),
+    });
 
-  updateFeature: (id, updates) => set((state) => {
+    get().regenerateFeatureTree();
+  },
+
+  updateFeature: (id, updates) => {
+    const state = get();
     const exists = state.document.featureTree.some((f) => f.id === id);
-    if (!exists) return state;
+    if (!exists) return;
 
     const updatedTree = state.document.featureTree.map((f) =>
       f.id === id ? ({ ...f, ...updates, isDirty: true } as CADFeature) : f
@@ -369,19 +403,22 @@ export const useCADStore = create<CADState>((set, get) => ({
     const targetFeature = finalTree.find((f) => f.id === id);
     const nextActiveSketchId = (targetFeature && targetFeature.type === 'SKETCH') ? id : state.activeSketchId;
 
-    return {
+    set({
       ...pushUndoState(state),
       activeSketchId: nextActiveSketchId,
       document: {
         ...state.document,
         featureTree: finalTree,
       },
-    };
-  }),
+    });
 
-  toggleFeatureSuppression: (id) => set((state) => {
+    get().regenerateFeatureTree();
+  },
+
+  toggleFeatureSuppression: (id) => {
+    const state = get();
     const feature = state.document.featureTree.find((f) => f.id === id);
-    if (!feature) return state;
+    if (!feature) return;
 
     const newSuppressed = !feature.suppressed;
     const updatedTree = state.document.featureTree.map((f) =>
@@ -394,15 +431,17 @@ export const useCADStore = create<CADState>((set, get) => ({
       ? (dirtyTree.find((f) => f.type === 'SKETCH' && !f.suppressed)?.id || null)
       : (feature.type === 'SKETCH' && !newSuppressed ? id : state.activeSketchId);
 
-    return {
+    set({
       ...pushUndoState(state),
       activeSketchId: nextActiveSketchId,
       document: {
         ...state.document,
         featureTree: dirtyTree,
       },
-    };
-  }),
+    });
+
+    get().regenerateFeatureTree();
+  },
 
   renameFeature: (id, newName) => set((state) => {
     const trimmed = newName.trim();
@@ -423,7 +462,8 @@ export const useCADStore = create<CADState>((set, get) => ({
     };
   }),
 
-  reorderFeature: (sourceIndex, targetIndex) => set((state) => {
+  reorderFeature: (sourceIndex, targetIndex) => {
+    const state = get();
     const tree = [...state.document.featureTree];
     if (
       sourceIndex < 0 ||
@@ -432,7 +472,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       targetIndex >= tree.length ||
       sourceIndex === targetIndex
     ) {
-      return state;
+      return;
     }
 
     const [moved] = tree.splice(sourceIndex, 1);
@@ -440,21 +480,27 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!checkDAGOrderValid(tree)) {
       console.warn('Reordering cancelled: Breaks feature dependency DAG hierarchy.');
-      return state;
+      return;
     }
 
-    return {
+    const movedId = moved.id;
+    const dirtyTree = markDownstreamDirty(tree, movedId);
+
+    set({
       ...pushUndoState(state),
       document: {
         ...state.document,
-        featureTree: tree,
+        featureTree: dirtyTree,
       },
-    };
-  }),
+    });
 
-  setRollbackIndex: (index) => set((state) => {
+    get().regenerateFeatureTree();
+  },
+
+  setRollbackIndex: (index) => {
+    const state = get();
     const clamped = Math.max(0, Math.min(index, state.document.featureTree.length));
-    if (state.document.rollbackIndex === clamped) return state;
+    if (state.document.rollbackIndex === clamped) return;
 
     const activeFeatures = state.document.featureTree.slice(0, clamped);
     let nextActiveSketchId = state.activeSketchId;
@@ -466,50 +512,193 @@ export const useCADStore = create<CADState>((set, get) => ({
       }
     }
 
-    return {
+    set({
       activeSketchId: nextActiveSketchId,
       document: {
         ...state.document,
         rollbackIndex: clamped,
       },
-    };
-  }),
-
-  regenerateFeatureTree: () => set((state) => {
-    const regenResult = getRegenSequence(state.document);
-    const { validationErrors, hasCycle, cycleNodes } = regenResult;
-
-    const regeneratedTree = state.document.featureTree.map((f) => {
-      const errors = validationErrors.get(f.id);
-      if (errors && errors.length > 0) {
-        return {
-          ...f,
-          error: errors.join('; '),
-          isDirty: true,
-        };
-      }
-      if (hasCycle && cycleNodes.includes(f.id)) {
-        return {
-          ...f,
-          error: 'Cyclic dependency detected in feature tree',
-          isDirty: true,
-        };
-      }
-      return {
-        ...f,
-        error: null,
-        isDirty: false,
-      };
     });
 
-    return {
-      ...pushUndoState(state),
-      document: {
-        ...state.document,
-        featureTree: regeneratedTree,
-      },
-    };
-  }),
+    get().regenerateFeatureTree();
+  },
+
+  /**
+   * 非同步真實 OCC Worker 重生成管線 (Zero-Fake State Alignment)
+   */
+  regenerateFeatureTree: async () => {
+    const state = get();
+    const { featureTree, rollbackIndex, planes } = state.document;
+    const cachedFeatureIds = Object.keys(state.featureResults);
+
+    // 步驟 A（依賴排程與初篩）：
+    const regenPlan = getRegenPlan(featureTree, rollbackIndex, cachedFeatureIds);
+    const { evalSequence, dirtyFeatures, brokenDependencies, hasCycle, cycleNodes, dirtyFromIndex, isPureRollback } = regenPlan;
+
+    // 1. 循環依賴檢查
+    if (hasCycle) {
+      const cycleSet = new Set(cycleNodes);
+      const updatedTreeWithCycleErr = featureTree.map((f) => {
+        if (cycleSet.has(f.id)) {
+          return {
+            ...f,
+            error: '循環依賴 (Circular Dependency)',
+            isDirty: true,
+          };
+        }
+        return f;
+      });
+
+      set((s) => ({
+        document: {
+          ...s.document,
+          featureTree: updatedTreeWithCycleErr,
+        },
+      }));
+      return;
+    }
+
+    // 2. 孤兒依賴檢查
+    const treeWithErrors = featureTree.map((f) => {
+      const errs = brokenDependencies.get(f.id);
+      if (errs && errs.length > 0) {
+        return {
+          ...f,
+          error: `遺失父特徵依賴: ${errs.join(', ')}`,
+          isDirty: true,
+        };
+      }
+      return f;
+    });
+
+    // 步驟 B（轉譯運算指令）：
+    const ops = buildFeatureEvalOps(treeWithErrors, rollbackIndex, planes || {});
+
+    // 若 ops.length === 0，表示樹中目前沒有任何需要三維拉伸/長料/除料的 3D 特徵
+    if (!ops || ops.length === 0) {
+      const clearedTree = treeWithErrors.map((f) => {
+        if (brokenDependencies.has(f.id)) {
+          return f;
+        }
+        return {
+          ...f,
+          isDirty: false,
+          error: f.error?.includes('遺失父特徵依賴') ? f.error : null,
+        };
+      });
+
+      set((s) => ({
+        document: {
+          ...s.document,
+          featureTree: clearedTree,
+        },
+        cumulativePartMesh: null,
+        featureResults: {},
+        bodies: [],
+        kernelDiagnostics: [],
+      }));
+      return;
+    }
+
+    // 步驟 C（呼叫 OCC Worker 核心運算）：
+    try {
+      const result = await solidEngine.evaluateFeatureTree(ops, dirtyFromIndex, isPureRollback);
+
+      const diagnostics = result.diagnostics || [];
+      const featureErrorMap = new Map<string, string>();
+
+      for (const diag of diagnostics) {
+        if (diag.level === 'error' && diag.featureId) {
+          featureErrorMap.set(diag.featureId, diag.message);
+        }
+      }
+
+      const isSuccess = result.success !== false && featureErrorMap.size === 0;
+
+      if (isSuccess) {
+        // 全域計算成功：收集所有對應特徵的成功狀態
+        const opsResults = ops.map((op) => ({
+          featureId: op.featureId,
+          success: true,
+        }));
+
+        // 也包含目前處於 active 範圍內無獨立 3D 運算輸出的草圖/基準面
+        const activeDirtyIds = dirtyFeatures.map((f) => f.id);
+        for (const dId of activeDirtyIds) {
+          if (!opsResults.some((r) => r.featureId === dId) && !brokenDependencies.has(dId)) {
+            opsResults.push({ featureId: dId, success: true });
+          }
+        }
+
+        const regeneratedTree = applyRegenResults(treeWithErrors, opsResults);
+
+        // 步驟 D（不可變更新 Store 狀態）：
+        set((s) => ({
+          document: {
+            ...s.document,
+            featureTree: regeneratedTree,
+          },
+          cumulativePartMesh: result.finalMesh || null,
+          featureResults: result.featureResults || {},
+          bodies: result.bodies || [],
+          kernelDiagnostics: result.diagnostics || [],
+        }));
+      } else {
+        // 運算失敗或回傳特徵級診斷錯誤：保留其 isDirty = true，寫入 feature.error
+        const opFeatureIds = new Set(ops.map((op) => op.featureId));
+        const failedTree = treeWithErrors.map((f) => {
+          const diagErr = featureErrorMap.get(f.id);
+          if (diagErr) {
+            return {
+              ...f,
+              isDirty: true,
+              error: diagErr,
+            };
+          }
+          if (result.success === false && opFeatureIds.has(f.id)) {
+            return {
+              ...f,
+              isDirty: true,
+              error: f.error || 'SolidEngine 幾何運算失敗',
+            };
+          }
+          return f;
+        });
+
+        set((s) => ({
+          document: {
+            ...s.document,
+            featureTree: failedTree,
+          },
+          cumulativePartMesh: result.finalMesh || null,
+          featureResults: result.featureResults || {},
+          bodies: result.bodies || [],
+          kernelDiagnostics: result.diagnostics || [],
+        }));
+      }
+    } catch (err: any) {
+      console.error('regenerateFeatureTree failed:', err);
+      // 例外發生時：保留 isDirty = true，不抹除既有模型
+      const opFeatureIds = new Set(ops.map((op) => op.featureId));
+      const errorTree = treeWithErrors.map((f) => {
+        if (opFeatureIds.has(f.id)) {
+          return {
+            ...f,
+            isDirty: true,
+            error: err?.message || 'SolidEngine Worker 執行例外',
+          };
+        }
+        return f;
+      });
+
+      set((s) => ({
+        document: {
+          ...s.document,
+          featureTree: errorTree,
+        },
+      }));
+    }
+  },
 
   // ============================================================================
   // 基準面 (Datum Plane) 特徵、參數化連動與草圖建立 Actions 實作
@@ -536,6 +725,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       dependencies: [refPlaneId],
       suppressed: false,
       visible: true,
+      isDirty: true,
     };
 
     const rollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
@@ -561,13 +751,16 @@ export const useCADStore = create<CADState>((set, get) => ({
       document: updatedDocument,
     });
 
+    get().regenerateFeatureTree();
+
     return newFeatureId;
   },
 
-  updateDatumPlaneOffset: (planeFeatureId, distance) => set((state) => {
+  updateDatumPlaneOffset: (planeFeatureId, distance) => {
+    const state = get();
     const tree = state.document.featureTree;
     const featureIndex = tree.findIndex((f) => f.id === planeFeatureId && f.type === 'DATUM_PLANE');
-    if (featureIndex === -1) return state;
+    if (featureIndex === -1) return;
 
     const datumFeature = tree[featureIndex] as DatumPlaneFeature;
     const refPlaneId = datumFeature.referencePlaneId || datumFeature.referenceFeatureId || 'datum-front';
@@ -626,11 +819,13 @@ export const useCADStore = create<CADState>((set, get) => ({
       },
     };
 
-    return {
+    set({
       ...pushUndoState(state),
       document: updatedDocument,
-    };
-  }),
+    });
+
+    get().regenerateFeatureTree();
+  },
 
   toggleFeatureVisibility: (featureId) => set((state) => {
     const feature = state.document.featureTree.find((f) => f.id === featureId);
@@ -672,6 +867,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       solverState: 'UnderDefined',
       suppressed: false,
       visible: true,
+      isDirty: false,
     };
 
     const rollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
@@ -725,6 +921,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       solverState: 'UnderDefined',
       suppressed: false,
       visible: true,
+      isDirty: false,
     };
 
     const rollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
@@ -756,7 +953,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       currentTool: 'SELECT',
     });
 
-    // 觸發全域視圖自適應事件，聚焦在草圖基準面原點周圍
     if (typeof window !== 'undefined') {
       setTimeout(() => {
         window.dispatchEvent(
@@ -777,13 +973,16 @@ export const useCADStore = create<CADState>((set, get) => ({
   },
 
   // 3D 特徵管理 Actions 實作
-  addExtrudeFeature: (feature) => set((state) => {
+  addExtrudeFeature: (feature) => {
+    const state = get();
+    const newFeatureId = 'extrude-' + Date.now().toString();
     const newFeature: ExtrudeFeature = {
       ...feature,
-      id: 'extrude-' + Date.now().toString(),
+      id: newFeatureId,
       type: 'EXTRUDE' as const,
       dependencies: feature.sketchId ? [feature.sketchId] : [],
       suppressed: false,
+      isDirty: true,
     };
     
     const currentRollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
@@ -793,17 +992,20 @@ export const useCADStore = create<CADState>((set, get) => ({
       newFeature,
       ...tree.slice(currentRollback),
     ];
+    const dirtyTree = markDownstreamDirty(newFeatureTree, newFeatureId);
 
-    return {
+    set({
       ...pushUndoState(state),
       selectedFeatureId: newFeature.id,
       document: {
         ...state.document,
-        featureTree: newFeatureTree,
+        featureTree: dirtyTree,
         rollbackIndex: currentRollback + 1,
       },
-    };
-  }),
+    });
+
+    get().regenerateFeatureTree();
+  },
 
   updateExtrudeFeature: (id, updates) => get().updateFeature(id, updates),
 
@@ -978,10 +1180,11 @@ export const useCADStore = create<CADState>((set, get) => ({
     };
   }),
   
-  addEntity: (sketchIdOrEntity: any, entity?: any) => set((state) => {
+  addEntity: (sketchIdOrEntity: any, entity?: any) => {
+    const state = get();
     const targetSketchId = typeof sketchIdOrEntity === 'string' ? sketchIdOrEntity : state.activeSketchId;
     const actualEntity = typeof sketchIdOrEntity === 'string' ? entity : sketchIdOrEntity;
-    if (!targetSketchId || !actualEntity) return state;
+    if (!targetSketchId || !actualEntity) return;
 
     const activeLayer = state.activeLayerId || '0';
     const targetLayerId = (!actualEntity.layerId || actualEntity.layerId === '0' || actualEntity.layerId === 'layer-0')
@@ -994,22 +1197,28 @@ export const useCADStore = create<CADState>((set, get) => ({
       isConstruction: actualEntity.isConstruction ?? (targetLayerId === 'CONSTRUCTION'),
     };
 
-    return {
-      ...pushUndoState(state),
-      document: insertEntityIntoSketch(state.document, targetSketchId, newEntity)
-    };
-  }),
+    const docInserted = insertEntityIntoSketch(state.document, targetSketchId, newEntity);
+    const docDirty = markSketchDirtyInDoc(docInserted, targetSketchId);
 
-  importDxfData: (entities, layers) => set((state) => {
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  importDxfData: (entities, layers) => {
+    const state = get();
     if (!entities || entities.length === 0 || !state.activeSketchId) {
-      return state;
+      return;
     }
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const preparedEntities: CADEntity2D[] = entities.map((e) => ({
       ...e,
@@ -1040,54 +1249,72 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    return {
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
+
+    set({
       ...pushUndoState(state),
-      document: updatedDocument,
+      document: docDirty,
       selectedEntityIds: [],
-    };
-  }),
+    });
+
+    get().regenerateFeatureTree();
+  },
 
   importEntities: (entities) => get().importDxfData(entities, {}),
 
-  removeEntity: (id) => set((state) => {
-    if (!state.activeSketchId) return state;
-    return {
-      ...pushUndoState(state),
-      document: removeEntityFromSketch(state.document, state.activeSketchId, id),
-      selectedEntityIds: state.selectedEntityIds.filter((entityId) => entityId !== id)
-    };
-  }),
+  removeEntity: (id) => {
+    const state = get();
+    if (!state.activeSketchId) return;
 
-  updateEntity: (id, updates) => set((state) => {
-    if (!state.activeSketchId) return state;
+    const docRemoved = removeEntityFromSketch(state.document, state.activeSketchId, id);
+    const docDirty = markSketchDirtyInDoc(docRemoved, state.activeSketchId);
+
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+      selectedEntityIds: state.selectedEntityIds.filter((entityId) => entityId !== id),
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  updateEntity: (id, updates) => {
+    const state = get();
+    if (!state.activeSketchId) return;
     
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
     
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const existingEntity = sketch.entities.find((e) => e.id === id);
-    if (!existingEntity) return state;
+    if (!existingEntity) return;
 
     const updatedEntity = { ...existingEntity, ...updates } as CADEntity2D;
 
-    return {
-      ...pushUndoState(state),
-      document: updateEntityInSketch(state.document, state.activeSketchId, updatedEntity)
-    };
-  }),
+    const docUpdated = updateEntityInSketch(state.document, state.activeSketchId, updatedEntity);
+    const docDirty = markSketchDirtyInDoc(docUpdated, state.activeSketchId);
 
-  updateEntities: (newEntities) => set((state) => {
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  updateEntities: (newEntities) => {
+    const state = get();
     if (!state.activeSketchId || !newEntities || newEntities.length === 0) {
-      return state;
+      return;
     }
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const entityMap = new Map(newEntities.map((e) => [e.id, e]));
     const updatedEntities = sketch.entities.map((e) => entityMap.get(e.id) || e);
@@ -1104,51 +1331,69 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-    };
-  }),
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-  toggleConstruction: (entityId: string) => set((state) => {
-    if (!state.activeSketchId) return state;
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  toggleConstruction: (entityId: string) => {
+    const state = get();
+    if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const existingEntity = sketch.entities.find((e) => e.id === entityId);
-    if (!existingEntity) return state;
+    if (!existingEntity) return;
 
     const updatedEntity = {
       ...existingEntity,
       isConstruction: !existingEntity.isConstruction,
     } as CADEntity2D;
 
-    return {
-      ...pushUndoState(state),
-      document: updateEntityInSketch(state.document, state.activeSketchId, updatedEntity),
-    };
-  }),
+    const docUpdated = updateEntityInSketch(state.document, state.activeSketchId, updatedEntity);
+    const docDirty = markSketchDirtyInDoc(docUpdated, state.activeSketchId);
 
-  addConstraint: (constraint) => set((state) => {
-    if (!state.activeSketchId) return state;
-    return {
+    set({
       ...pushUndoState(state),
-      document: addConstraintToSketch(state.document, state.activeSketchId, constraint),
-    };
-  }),
+      document: docDirty,
+    });
 
-  addDimension: (dimension, constraint) => set((state) => {
-    if (!state.activeSketchId) return state;
+    get().regenerateFeatureTree();
+  },
+
+  addConstraint: (constraint) => {
+    const state = get();
+    if (!state.activeSketchId) return;
+
+    const docAdded = addConstraintToSketch(state.document, state.activeSketchId, constraint);
+    const docDirty = markSketchDirtyInDoc(docAdded, state.activeSketchId);
+
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  addDimension: (dimension, constraint) => {
+    const state = get();
+    if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     let actualConstraint = { ...constraint };
     if (dimension.type === 'linear') {
@@ -1170,7 +1415,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       }
     }
 
-    // 檢查是否有參照 3D 背景投影邊線 (projected / virtual entity)
     const referencedProjEntities = (actualConstraint.entityIds || [])
       .map((id) => state.projectedEntities.find((p) => p.id === id))
       .filter(Boolean) as CADEntity2D[];
@@ -1241,11 +1485,15 @@ export const useCADStore = create<CADState>((set, get) => ({
       newDocument = addDimensionToSketch(currentDoc, state.activeSketchId, finalDimension, actualConstraint);
     }
 
-    return {
+    const docDirty = markSketchDirtyInDoc(newDocument, state.activeSketchId);
+
+    set({
       ...pushUndoState(state),
-      document: newDocument,
-    };
-  }),
+      document: docDirty,
+    });
+
+    get().regenerateFeatureTree();
+  },
 
   updateDimensionPosition: (dimensionId, newPosition) => set((state) => {
     if (!state.activeSketchId) return state;
@@ -1310,245 +1558,186 @@ export const useCADStore = create<CADState>((set, get) => ({
     };
   }),
 
-  removeConstraint: (constraintId) => set((state) => {
-    if (!state.activeSketchId) return state;
-    return {
-      ...pushUndoState(state),
-      document: removeConstraintFromSketch(state.document, state.activeSketchId, constraintId),
-    };
-  }),
+  removeConstraint: (constraintId) => {
+    const state = get();
+    if (!state.activeSketchId) return;
 
-  removeDimension: (dimensionId) => set((state) => {
-    if (!state.activeSketchId) return state;
-    return {
+    const docRemoved = removeConstraintFromSketch(state.document, state.activeSketchId, constraintId);
+    const docDirty = markSketchDirtyInDoc(docRemoved, state.activeSketchId);
+
+    set({
       ...pushUndoState(state),
-      document: removeDimensionFromSketch(state.document, state.activeSketchId, dimensionId),
+      document: docDirty,
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  removeDimension: (dimensionId) => {
+    const state = get();
+    if (!state.activeSketchId) return;
+
+    const docRemoved = removeDimensionFromSketch(state.document, state.activeSketchId, dimensionId);
+    const docDirty = markSketchDirtyInDoc(docRemoved, state.activeSketchId);
+
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
       selectedEntityIds: state.selectedEntityIds.filter((id) => id !== dimensionId),
-    };
-  }),
+    });
 
-  updateConstraintValue: (constraintId, value) => set((state) => {
-    if (!state.activeSketchId) return state;
+    get().regenerateFeatureTree();
+  },
 
-    const updatedDocument: CADDocument = {
-      ...state.document,
-      featureTree: state.document.featureTree.map((f) => {
-        if (f.id === state.activeSketchId && f.type === 'SKETCH') {
-          const sketch = f as SketchFeature;
-
-          const linkedDim = sketch.dimensions?.find((d) => d.constraintId === constraintId);
-          const isDiameter = linkedDim ? !!linkedDim.isDiameter : false;
-
-          const finalConstraintValue = (linkedDim && linkedDim.type === 'radial')
-            ? (isDiameter ? value / 2 : value)
-            : value;
-
-          const updatedConstraints = sketch.constraints.map((c) => {
-            if (c.id === constraintId) {
-              return { ...c, value: finalConstraintValue, targetVal: Math.abs(finalConstraintValue) };
-            }
-            return c;
-          });
-
-          const updatedSketch = applyConstraintsToSketch({
-            ...sketch,
-            constraints: updatedConstraints,
-          });
-
-          if (updatedSketch.dimensions) {
-            updatedSketch.dimensions = updatedSketch.dimensions.map((dim) => {
-              if (dim.constraintId === constraintId) {
-                const constraint = updatedConstraints.find((c) => c.id === constraintId);
-                if (constraint) {
-                  if (dim.type === 'radial') {
-                    if (constraint.entityIds.length === 1) {
-                      const entity = updatedSketch.entities.find((e) => e.id === constraint.entityIds[0]);
-                      if (entity && (entity.type === 'circle' || entity.type === 'arc')) {
-                        const center = { ...entity.center };
-                        const origP0 = dim.points[0];
-                        const origP1 = dim.points[1] || { x: origP0.x + 10, y: origP0.y };
-                        const dx = origP1.x - origP0.x;
-                        const dy = origP1.y - origP0.y;
-                        const len = Math.hypot(dx, dy);
-                        const dir = len > 1e-6 ? { x: dx / len, y: dy / len } : { x: 1, y: 0 };
-                        const newEdge = {
-                          x: center.x + dir.x * entity.radius,
-                          y: center.y + dir.y * entity.radius,
-                        };
-                        return {
-                          ...dim,
-                          points: [center, newEdge],
-                        };
-                      }
-                    }
-                  } else if (dim.type === 'linear') {
-                    if (constraint.entityIds.length === 1) {
-                      const entity = updatedSketch.entities.find((e) => e.id === constraint.entityIds[0]);
-                      if (entity && entity.type === 'line') {
-                        return {
-                          ...dim,
-                          points: [{ ...entity.start }, { ...entity.end }],
-                        };
-                      }
-                    } else if (constraint.entityIds.length >= 2) {
-                      const id1 = constraint.entityIds[0];
-                      const id2 = constraint.entityIds[1];
-                      const idx1 = constraint.pointIndices?.[0] ?? 0;
-                      const idx2 = constraint.pointIndices?.[1] ?? 0;
-                      const e1 = updatedSketch.entities.find((e) => e.id === id1);
-                      const e2 = updatedSketch.entities.find((e) => e.id === id2);
-                      if (e1 && e2) {
-                        const getPoint = (entity: CADEntity2D, index: number) => {
-                          if (entity.type === 'line') {
-                            return index === 1 ? entity.end : entity.start;
-                          } else if (entity.type === 'circle' || entity.type === 'arc') {
-                            return entity.center;
-                          } else if (entity.type === 'polyline') {
-                            return entity.points[index] || entity.points[0];
-                          }
-                          return null;
-                        };
-                        const pt1 = getPoint(e1, idx1);
-                        const pt2 = getPoint(e2, idx2);
-                        if (pt1 && pt2) {
-                          return {
-                            ...dim,
-                            points: [{ ...pt1 }, { ...pt2 }],
-                          };
-                        }
-                      }
-                    }
-                  } else if (dim.type === 'angular') {
-                    if (constraint.entityIds.length >= 2) {
-                      const id1 = constraint.entityIds[0];
-                      const id2 = constraint.entityIds[1];
-                      const e1 = updatedSketch.entities.find((e) => e.id === id1);
-                      const e2 = updatedSketch.entities.find((e) => e.id === id2);
-                      if (e1 && e2 && e1.type === 'line' && e2.type === 'line') {
-                        return {
-                          ...dim,
-                          points: [{ ...e1.start }, { ...e1.end }, { ...e2.start }, { ...e2.end }],
-                        };
-                      }
-                    }
-                  }
-                }
-              } else {
-                const linkedConstraint = updatedConstraints.find((c) => c.id === dim.constraintId);
-                const eIds = linkedConstraint?.entityIds || dim.entityIds;
-                const pIndices = linkedConstraint?.pointIndices || dim.pointIndices;
-
-                if (dim.type === 'radial') {
-                  if (eIds && eIds.length === 1) {
-                    const entity = updatedSketch.entities.find((e) => e.id === eIds[0]);
-                    if (entity && (entity.type === 'circle' || entity.type === 'arc')) {
-                      const center = { ...entity.center };
-                      const origP0 = dim.points[0];
-                      const origP1 = dim.points[1] || { x: origP0.x + 10, y: origP0.y };
-                      const dx = origP1.x - origP0.x;
-                      const dy = origP1.y - origP0.y;
-                      const len = Math.hypot(dx, dy);
-                      const dir = len > 1e-6 ? { x: dx / len, y: dy / len } : { x: 1, y: 0 };
-                      const newEdge = {
-                        x: center.x + dir.x * entity.radius,
-                        y: center.y + dir.y * entity.radius,
-                      };
-                      return {
-                        ...dim,
-                        points: [center, newEdge],
-                      };
-                    }
-                  }
-                } else if (dim.type === 'linear') {
-                  if (eIds) {
-                    if (eIds.length === 1) {
-                      const entity = updatedSketch.entities.find((e) => e.id === eIds[0]);
-                      if (entity && entity.type === 'line') {
-                        return {
-                          ...dim,
-                          points: [{ ...entity.start }, { ...entity.end }],
-                        };
-                      }
-                    } else if (eIds.length >= 2) {
-                      const id1 = eIds[0];
-                      const id2 = eIds[1];
-                      const idx1 = pIndices?.[0] ?? 0;
-                      const idx2 = pIndices?.[1] ?? 0;
-                      const e1 = updatedSketch.entities.find((e) => e.id === id1);
-                      const e2 = updatedSketch.entities.find((e) => e.id === id2);
-                      if (e1 && e2) {
-                        const getPoint = (entity: CADEntity2D, index: number) => {
-                          if (entity.type === 'line') {
-                            return index === 1 ? entity.end : entity.start;
-                          } else if (entity.type === 'circle' || entity.type === 'arc') {
-                            return entity.center;
-                          } else if (entity.type === 'polyline') {
-                            return entity.points[index] || entity.points[0];
-                          }
-                          return null;
-                        };
-                        const pt1 = getPoint(e1, idx1);
-                        const pt2 = getPoint(e2, idx2);
-                        if (pt1 && pt2) {
-                          return {
-                            ...dim,
-                            points: [{ ...pt1 }, { ...pt2 }],
-                          };
-                        }
-                      }
-                    }
-                  }
-                } else if (dim.type === 'angular') {
-                  if (eIds && eIds.length >= 2) {
-                    const id1 = eIds[0];
-                    const id2 = eIds[1];
-                    const e1 = updatedSketch.entities.find((e) => e.id === id1);
-                    const e2 = updatedSketch.entities.find((e) => e.id === id2);
-                    if (e1 && e2 && e1.type === 'line' && e2.type === 'line') {
-                      return {
-                        ...dim,
-                        points: [{ ...e1.start }, { ...e1.end }, { ...e2.start }, { ...e2.end }],
-                      };
-                    }
-                  }
-                }
-              }
-              return dim;
-            });
-          }
-
-          return updatedSketch;
-        }
-        return f;
-      }),
-    };
-
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-    };
-  }),
-
-  updateDimensionValue: (dimensionId, newValue) => set((state) => {
-    if (!state.activeSketchId) return state;
-    const safeValue = Math.abs(newValue);
-    if (isNaN(safeValue) || safeValue <= 0) return state;
+  updateConstraintValue: (constraintId, value) => {
+    const state = get();
+    if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
+
+    const linkedDim = sketch.dimensions?.find((d) => d.constraintId === constraintId);
+    const isDiameter = linkedDim ? !!linkedDim.isDiameter : false;
+
+    const finalConstraintValue = (linkedDim && linkedDim.type === 'radial')
+      ? (isDiameter ? value / 2 : value)
+      : value;
+
+    const updatedConstraints = sketch.constraints.map((c) => {
+      if (c.id === constraintId) {
+        return { ...c, value: finalConstraintValue, targetVal: Math.abs(finalConstraintValue) };
+      }
+      return c;
+    });
+
+    const updatedSketch = applyConstraintsToSketch({
+      ...sketch,
+      constraints: updatedConstraints,
+    });
+
+    if (updatedSketch.dimensions) {
+      updatedSketch.dimensions = updatedSketch.dimensions.map((dim) => {
+        if (dim.constraintId === constraintId) {
+          const constraint = updatedConstraints.find((c) => c.id === constraintId);
+          if (constraint) {
+            if (dim.type === 'radial') {
+              if (constraint.entityIds.length === 1) {
+                const entity = updatedSketch.entities.find((e) => e.id === constraint.entityIds[0]);
+                if (entity && (entity.type === 'circle' || entity.type === 'arc')) {
+                  const center = { ...entity.center };
+                  const origP0 = dim.points[0];
+                  const origP1 = dim.points[1] || { x: origP0.x + 10, y: origP0.y };
+                  const dx = origP1.x - origP0.x;
+                  const dy = origP1.y - origP0.y;
+                  const len = Math.hypot(dx, dy);
+                  const dir = len > 1e-6 ? { x: dx / len, y: dy / len } : { x: 1, y: 0 };
+                  const newEdge = {
+                    x: center.x + dir.x * entity.radius,
+                    y: center.y + dir.y * entity.radius,
+                  };
+                  return {
+                    ...dim,
+                    points: [center, newEdge],
+                  };
+                }
+              }
+            } else if (dim.type === 'linear') {
+              if (constraint.entityIds.length === 1) {
+                const entity = updatedSketch.entities.find((e) => e.id === constraint.entityIds[0]);
+                if (entity && entity.type === 'line') {
+                  return {
+                    ...dim,
+                    points: [{ ...entity.start }, { ...entity.end }],
+                  };
+                }
+              } else if (constraint.entityIds.length >= 2) {
+                const id1 = constraint.entityIds[0];
+                const id2 = constraint.entityIds[1];
+                const idx1 = constraint.pointIndices?.[0] ?? 0;
+                const idx2 = constraint.pointIndices?.[1] ?? 0;
+                const e1 = updatedSketch.entities.find((e) => e.id === id1);
+                const e2 = updatedSketch.entities.find((e) => e.id === id2);
+                if (e1 && e2) {
+                  const getPoint = (entity: CADEntity2D, index: number) => {
+                    if (entity.type === 'line') {
+                      return index === 1 ? entity.end : entity.start;
+                    } else if (entity.type === 'circle' || entity.type === 'arc') {
+                      return entity.center;
+                    } else if (entity.type === 'polyline') {
+                      return entity.points[index] || entity.points[0];
+                    }
+                    return null;
+                  };
+                  const pt1 = getPoint(e1, idx1);
+                  const pt2 = getPoint(e2, idx2);
+                  if (pt1 && pt2) {
+                    return {
+                      ...dim,
+                      points: [{ ...pt1 }, { ...pt2 }],
+                    };
+                  }
+                }
+              }
+            } else if (dim.type === 'angular') {
+              if (constraint.entityIds.length >= 2) {
+                const id1 = constraint.entityIds[0];
+                const id2 = constraint.entityIds[1];
+                const e1 = updatedSketch.entities.find((e) => e.id === id1);
+                const e2 = updatedSketch.entities.find((e) => e.id === id2);
+                if (e1 && e2 && e1.type === 'line' && e2.type === 'line') {
+                  return {
+                    ...dim,
+                    points: [{ ...e1.start }, { ...e1.end }, { ...e2.start }, { ...e2.end }],
+                  };
+                }
+              }
+            }
+          }
+        }
+        return dim;
+      });
+    }
+
+    const updatedDocument: CADDocument = {
+      ...state.document,
+      featureTree: state.document.featureTree.map((f) =>
+        f.id === state.activeSketchId ? updatedSketch : f
+      ),
+    };
+
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
+
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  updateDimensionValue: (dimensionId, newValue) => {
+    const state = get();
+    if (!state.activeSketchId) return;
+    const safeValue = Math.abs(newValue);
+    if (isNaN(safeValue) || safeValue <= 0) return;
+
+    const sketch = state.document.featureTree.find(
+      (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+
+    if (!sketch) return;
 
     const targetDim = sketch.dimensions?.find((d) => d.id === dimensionId);
-    if (!targetDim) return state;
+    if (!targetDim) return;
 
     let targetConstraintId = targetDim.constraintId;
     let targetConstraint = targetConstraintId
       ? sketch.constraints.find((c) => c.id === targetConstraintId)
       : undefined;
 
-    // 若未直接關聯 constraintId，嘗試透過 entityIds 匹配已存在的約束
     if (!targetConstraint && targetDim.entityIds && targetDim.entityIds.length > 0) {
       targetConstraint = sketch.constraints.find((c) => {
         if (targetDim.entityIds?.length === 1 && c.entityIds.length === 1) {
@@ -1575,7 +1764,6 @@ export const useCADStore = create<CADState>((set, get) => ({
     let updatedConstraints: Constraint[];
 
     if (targetConstraint) {
-      // 強制更新 targetVal 與 value（確保絕對值正數）
       updatedConstraints = sketch.constraints.map((c) => {
         if (c.id === targetConstraint!.id) {
           return {
@@ -1611,7 +1799,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       updatedConstraints = [...sketch.constraints, newConstraint];
     }
 
-    // 檢查是否有參照 3D 背景投影邊線，如有則加入至求解器中作為固定參考基準
     const allConstraintEntityIds = [
       ...(targetDim.entityIds || []),
       ...(targetConstraint?.entityIds || []),
@@ -1634,7 +1821,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       }
     }
 
-    // 呼叫約束求解器計算新幾何形狀與 DOF 自由度狀態及輪廓
     const updatedSketchTemp = applyConstraintsToSketch({
       ...sketch,
       entities: workingSketchEntities,
@@ -1656,7 +1842,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       return null;
     };
 
-    // 同步更新尺寸標註的端點位置，確保跨圖元尺寸跟隨新幾何位置移動
     const updatedDimensions = (sketch.dimensions || []).map((dim) => {
       const isTarget = dim.id === dimensionId;
       const currentCId = dim.constraintId || (isTarget ? targetConstraintId : undefined);
@@ -1751,11 +1936,15 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    return {
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
+
+    set({
       ...pushUndoState(state),
-      document: updatedDocument,
-    };
-  }),
+      document: docDirty,
+    });
+
+    get().regenerateFeatureTree();
+  },
 
   dragVertexStart: () => set((state) => {
     return {
@@ -1834,14 +2023,15 @@ export const useCADStore = create<CADState>((set, get) => ({
     return { document: updatedDocument };
   }),
 
-  dragVertexCommit: () => set((state) => {
-    if (!state.activeSketchId) return state;
+  dragVertexCommit: () => {
+    const state = get();
+    if (!state.activeSketchId) return;
     
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
     
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const finalSketch = applyConstraintsToSketch(sketch);
 
@@ -1852,22 +2042,27 @@ export const useCADStore = create<CADState>((set, get) => ({
        )
     };
 
-    return {
-       document: updatedDocument,
-    };
-  }),
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-  trimEntity: (entityId, clickPoint) => set((state) => {
-    if (!state.activeSketchId) return state;
+    set({
+       document: docDirty,
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  trimEntity: (entityId, clickPoint) => {
+    const state = get();
+    if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const trimResult = executeTrim(entityId, clickPoint, sketch.entities);
-    if (!trimResult) return state;
+    if (!trimResult) return;
 
     const { toRemoveIds, toAddEntities } = trimResult;
     const toRemoveSet = new Set(toRemoveIds);
@@ -1905,24 +2100,29 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-      selectedEntityIds: state.selectedEntityIds.filter((id) => !toRemoveSet.has(id)),
-    };
-  }),
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-  extendEntity: (entityId, clickPoint) => set((state) => {
-    if (!state.activeSketchId) return state;
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+      selectedEntityIds: state.selectedEntityIds.filter((id) => !toRemoveSet.has(id)),
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  extendEntity: (entityId, clickPoint) => {
+    const state = get();
+    if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const updatedSketch = applyExtendToSketch(sketch, entityId, clickPoint);
-    if (updatedSketch === sketch) return state;
+    if (updatedSketch === sketch) return;
 
     const updatedDocument: CADDocument = {
       ...state.document,
@@ -1931,23 +2131,28 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-    };
-  }),
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-  applyFillet: (entityId1, entityId2, radius) => set((state) => {
-    if (!state.activeSketchId) return state;
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  applyFillet: (entityId1, entityId2, radius) => {
+    const state = get();
+    if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const updatedSketch = applyFilletToSketch(sketch, entityId1, entityId2, radius);
-    if (updatedSketch === sketch) return state;
+    if (updatedSketch === sketch) return;
 
     const updatedDocument: CADDocument = {
       ...state.document,
@@ -1956,24 +2161,29 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-      selectedEntityIds: state.selectedEntityIds.filter((id) => id !== entityId1 && id !== entityId2),
-    };
-  }),
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-  applyChamfer: (entityId1, entityId2, distance) => set((state) => {
-    if (!state.activeSketchId) return state;
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+      selectedEntityIds: state.selectedEntityIds.filter((id) => id !== entityId1 && id !== entityId2),
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  applyChamfer: (entityId1, entityId2, distance) => {
+    const state = get();
+    if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const updatedSketch = applyChamferToSketch(sketch, entityId1, entityId2, distance);
-    if (updatedSketch === sketch) return state;
+    if (updatedSketch === sketch) return;
 
     const updatedDocument: CADDocument = {
       ...state.document,
@@ -1982,24 +2192,29 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-      selectedEntityIds: state.selectedEntityIds.filter((id) => id !== entityId1 && id !== entityId2),
-    };
-  }),
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-  offsetEntity: (entityId, distance, sidePoint) => set((state) => {
-    if (!state.activeSketchId) return state;
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+      selectedEntityIds: state.selectedEntityIds.filter((id) => id !== entityId1 && id !== entityId2),
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  offsetEntity: (entityId, distance, sidePoint) => {
+    const state = get();
+    if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const updatedSketch = applyOffsetToSketch(sketch, entityId, distance, sidePoint);
-    if (updatedSketch === sketch) return state;
+    if (updatedSketch === sketch) return;
 
     const updatedDocument: CADDocument = {
       ...state.document,
@@ -2008,23 +2223,28 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-    };
-  }),
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-  mirrorEntities: (sourceEntityIds, p1, p2) => set((state) => {
-    if (!state.activeSketchId) return state;
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  mirrorEntities: (sourceEntityIds, p1, p2) => {
+    const state = get();
+    if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const updatedSketch = applyMirrorToSketch(sketch, sourceEntityIds, p1, p2);
-    if (updatedSketch === sketch) return state;
+    if (updatedSketch === sketch) return;
 
     const updatedDocument: CADDocument = {
       ...state.document,
@@ -2033,23 +2253,28 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-    };
-  }),
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-  moveEntities: (entityIds, basePoint, targetPoint) => set((state) => {
-    if (!state.activeSketchId || !entityIds || entityIds.length === 0) return state;
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  moveEntities: (entityIds, basePoint, targetPoint) => {
+    const state = get();
+    if (!state.activeSketchId || !entityIds || entityIds.length === 0) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const updatedSketch = applyMoveToSketch(sketch, entityIds, basePoint, targetPoint);
-    if (updatedSketch === sketch) return state;
+    if (updatedSketch === sketch) return;
 
     const updatedDocument: CADDocument = {
       ...state.document,
@@ -2058,25 +2283,30 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-      selectedEntityIds: entityIds,
-    };
-  }),
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-  copyEntities: (entityIds, basePoint, targetPoint) => set((state) => {
-    if (!state.activeSketchId || !entityIds || entityIds.length === 0) return state;
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+      selectedEntityIds: entityIds,
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  copyEntities: (entityIds, basePoint, targetPoint) => {
+    const state = get();
+    if (!state.activeSketchId || !entityIds || entityIds.length === 0) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const prevEntityCount = sketch.entities.length;
     const updatedSketch = applyCopyToSketch(sketch, entityIds, basePoint, targetPoint);
-    if (updatedSketch === sketch) return state;
+    if (updatedSketch === sketch) return;
 
     const newEntities = updatedSketch.entities.slice(prevEntityCount);
     const newEntityIds = newEntities.map((e) => e.id);
@@ -2088,24 +2318,29 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-      selectedEntityIds: newEntityIds.length > 0 ? newEntityIds : state.selectedEntityIds,
-    };
-  }),
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-  scaleEntities: (entityIds, basePoint, factor) => set((state) => {
-    if (!state.activeSketchId || !entityIds || entityIds.length === 0 || factor <= 0) return state;
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+      selectedEntityIds: newEntityIds.length > 0 ? newEntityIds : state.selectedEntityIds,
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  scaleEntities: (entityIds, basePoint, factor) => {
+    const state = get();
+    if (!state.activeSketchId || !entityIds || entityIds.length === 0 || factor <= 0) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const updatedSketch = applyScaleToSketch(sketch, entityIds, basePoint, factor);
-    if (updatedSketch === sketch) return state;
+    if (updatedSketch === sketch) return;
 
     const updatedDocument: CADDocument = {
       ...state.document,
@@ -2114,24 +2349,29 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-      selectedEntityIds: entityIds,
-    };
-  }),
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-  rotateEntities: (entityIds, basePoint, angleRad) => set((state) => {
-    if (!state.activeSketchId || !entityIds || entityIds.length === 0) return state;
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+      selectedEntityIds: entityIds,
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  rotateEntities: (entityIds, basePoint, angleRad) => {
+    const state = get();
+    if (!state.activeSketchId || !entityIds || entityIds.length === 0) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const updatedSketch = applyRotateToSketch(sketch, entityIds, basePoint, angleRad);
-    if (updatedSketch === sketch) return state;
+    if (updatedSketch === sketch) return;
 
     const updatedDocument: CADDocument = {
       ...state.document,
@@ -2140,24 +2380,29 @@ export const useCADStore = create<CADState>((set, get) => ({
       ),
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-      selectedEntityIds: entityIds,
-    };
-  }),
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-  circularArrayEntities: (entityIds, centerPoint, items, fillAngleDeg) => set((state) => {
-    if (!state.activeSketchId || !entityIds || entityIds.length === 0 || items <= 1) return state;
+    set({
+      ...pushUndoState(state),
+      document: docDirty,
+      selectedEntityIds: entityIds,
+    });
+
+    get().regenerateFeatureTree();
+  },
+
+  circularArrayEntities: (entityIds, centerPoint, items, fillAngleDeg) => {
+    const state = get();
+    if (!state.activeSketchId || !entityIds || entityIds.length === 0 || items <= 1) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const updatedSketch = applyCircularArrayToSketch(sketch, entityIds, centerPoint, items, fillAngleDeg);
-    if (updatedSketch === sketch) return state;
+    if (updatedSketch === sketch) return;
 
     const updatedDocument: CADDocument = {
       ...state.document,
@@ -2167,25 +2412,29 @@ export const useCADStore = create<CADState>((set, get) => ({
     };
 
     const newEntityIds = updatedSketch.entities.map((e) => e.id);
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-    return {
+    set({
       ...pushUndoState(state),
-      document: updatedDocument,
+      document: docDirty,
       selectedEntityIds: newEntityIds,
-    };
-  }),
+    });
 
-  rectArrayEntities: (entityIds, cols, rows, colSpacing, rowSpacing) => set((state) => {
-    if (!state.activeSketchId || !entityIds || entityIds.length === 0 || cols < 1 || rows < 1 || (cols === 1 && rows === 1)) return state;
+    get().regenerateFeatureTree();
+  },
+
+  rectArrayEntities: (entityIds, cols, rows, colSpacing, rowSpacing) => {
+    const state = get();
+    if (!state.activeSketchId || !entityIds || entityIds.length === 0 || cols < 1 || rows < 1 || (cols === 1 && rows === 1)) return;
 
     const sketch = state.document.featureTree.find(
       (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
 
-    if (!sketch) return state;
+    if (!sketch) return;
 
     const updatedSketch = applyRectArrayToSketch(sketch, entityIds, cols, rows, colSpacing, rowSpacing);
-    if (updatedSketch === sketch) return state;
+    if (updatedSketch === sketch) return;
 
     const updatedDocument: CADDocument = {
       ...state.document,
@@ -2195,13 +2444,16 @@ export const useCADStore = create<CADState>((set, get) => ({
     };
 
     const newEntityIds = updatedSketch.entities.map((e) => e.id);
+    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-    return {
+    set({
       ...pushUndoState(state),
-      document: updatedDocument,
+      document: docDirty,
       selectedEntityIds: newEntityIds,
-    };
-  }),
+    });
+
+    get().regenerateFeatureTree();
+  },
 
   toggleOsnap: () => set((state) => ({ osnapEnabled: !state.osnapEnabled })),
   toggleOrtho: () => set((state) => ({ orthoEnabled: !state.orthoEnabled })),
@@ -2229,7 +2481,7 @@ export const useCADStore = create<CADState>((set, get) => ({
   })),
 
   clearOtrackAnchors: () => {
-    // 全域提供 OTrack 追蹤點清空介面，可在需要時供組件或繪圖狀態機呼叫
+    // 全域提供 OTrack 追蹤點清空介面
   },
 
   setPolarModalOpen: (open) => set({ isPolarModalOpen: open }),
@@ -2282,42 +2534,32 @@ export const useCADStore = create<CADState>((set, get) => ({
     set({
       document: doc,
       activeLayerId: '0',
-      activeSketchId: doc.activeSketchId,
+      viewMode: '2D',
+      currentTool: 'SELECT',
+      activeSketchId: 'sketch-1',
       selectedEntityIds: [],
       selectedFeatureId: null,
-      currentTool: 'SELECT',
-      viewMode: '2D',
+      selectedFaceInfo: null,
+      extrudePreview: null,
+      revolvePreview: null,
+      isPickingRevolveAxis: false,
       undoStack: [],
       redoStack: [],
-      osnapSettings: {
-        endpoint: true,
-        midpoint: true,
-        center: true,
-        quadrant: true,
-        intersection: true,
-        extension: true,
-        perpendicular: true,
-        tangent: true,
-        parallel: true,
-      },
-      polarTrackingEnabled: true,
-      polarAngleStep: 45,
-      customPolarAngles: [],
-      arrayItems: 4,
-      arrayFillAngle: 360,
-      isOsnapModalOpen: false,
-      isPolarModalOpen: false,
-      isLayerModalOpen: false,
-      showProfiles: true,
     });
-  }
+  },
 }));
 
-// Selector Hooks
+// 常用的 state Selectors
 export const useCADDocument = () => useCADStore((state) => state.document);
 export const useViewMode = () => useCADStore((state) => state.viewMode);
 export const useCurrentTool = () => useCADStore((state) => state.currentTool);
-export const useActiveSketch = () => useCADStore((state) => state.activeSketchId);
+export const useActiveSketch = () => useCADStore((state) => {
+  if (!state.activeSketchId) return null;
+  const feature = state.document.featureTree.find(
+    (f) => f.id === state.activeSketchId && f.type === 'SKETCH'
+  );
+  return (feature as SketchFeature) || null;
+});
 export const useActiveLayerId = () => useCADStore((state) => state.activeLayerId);
 export const useCADLayers = () => useCADStore((state) => state.document.layers);
 export const useShowProfiles = () => useCADStore((state) => state.showProfiles);
