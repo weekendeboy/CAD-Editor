@@ -196,6 +196,8 @@ export const useCADStore = create<CADState>((set, get) => ({
   showProfiles: true,
   show3DEdges: true,
   toggleShow3DEdges: () => set((state) => ({ show3DEdges: !state.show3DEdges })),
+  projectedEntities: [],
+  setProjectedEntities: (entities) => set({ projectedEntities: entities }),
   extrudePreview: null,
   setExtrudePreview: (preview) => set({ extrudePreview: preview }),
   revolvePreview: null,
@@ -818,6 +820,8 @@ export const useCADStore = create<CADState>((set, get) => ({
     return { selectedEntityIds: [...state.selectedEntityIds, id] };
   }),
   
+  setSelectedEntityIds: (ids) => set({ selectedEntityIds: ids }),
+  
   clearSelection: () => set({ selectedEntityIds: [], selectedFeatureId: null }),
 
   setActiveLayer: (layerId: string) => set({ activeLayerId: layerId }),
@@ -974,22 +978,25 @@ export const useCADStore = create<CADState>((set, get) => ({
     };
   }),
   
-  addEntity: (entity) => set((state) => {
-    if (!state.activeSketchId) return state;
+  addEntity: (sketchIdOrEntity: any, entity?: any) => set((state) => {
+    const targetSketchId = typeof sketchIdOrEntity === 'string' ? sketchIdOrEntity : state.activeSketchId;
+    const actualEntity = typeof sketchIdOrEntity === 'string' ? entity : sketchIdOrEntity;
+    if (!targetSketchId || !actualEntity) return state;
+
     const activeLayer = state.activeLayerId || '0';
-    const targetLayerId = (!entity.layerId || entity.layerId === '0' || entity.layerId === 'layer-0')
+    const targetLayerId = (!actualEntity.layerId || actualEntity.layerId === '0' || actualEntity.layerId === 'layer-0')
       ? activeLayer
-      : entity.layerId;
+      : actualEntity.layerId;
 
     const newEntity: CADEntity2D = {
-      ...entity,
+      ...actualEntity,
       layerId: targetLayerId,
-      isConstruction: entity.isConstruction ?? (targetLayerId === 'CONSTRUCTION'),
+      isConstruction: actualEntity.isConstruction ?? (targetLayerId === 'CONSTRUCTION'),
     };
 
     return {
       ...pushUndoState(state),
-      document: insertEntityIntoSketch(state.document, state.activeSketchId, newEntity)
+      document: insertEntityIntoSketch(state.document, targetSketchId, newEntity)
     };
   }),
 
@@ -1163,12 +1170,46 @@ export const useCADStore = create<CADState>((set, get) => ({
       }
     }
 
+    // 檢查是否有參照 3D 背景投影邊線 (projected / virtual entity)
+    const referencedProjEntities = (actualConstraint.entityIds || [])
+      .map((id) => state.projectedEntities.find((p) => p.id === id))
+      .filter(Boolean) as CADEntity2D[];
+
+    let initialEntities = [...sketch.entities];
+    for (const pEnt of referencedProjEntities) {
+      if (!initialEntities.some((e) => e.id === pEnt.id)) {
+        initialEntities.push({
+          ...pEnt,
+          isProjected: true,
+          isConstruction: true,
+          state: 'FullyDefined',
+          color: '#f59e0b',
+        });
+      }
+    }
+
+    let currentDoc = state.document;
+    if (initialEntities.length > sketch.entities.length) {
+      currentDoc = {
+        ...state.document,
+        featureTree: state.document.featureTree.map((f) => {
+          if (f.id === state.activeSketchId && f.type === 'SKETCH') {
+            return {
+              ...f,
+              entities: initialEntities,
+            };
+          }
+          return f;
+        }),
+      };
+    }
+
     const testConstraints = [...sketch.constraints, actualConstraint];
-    const solverResult = solveConstraints(sketch.entities, testConstraints);
+    const solverResult = solveConstraints(initialEntities, testConstraints);
     const dofState = analyzeSketchDOF(solverResult.entities, testConstraints);
 
     let finalDimension = dimension;
-    let newDocument = state.document;
+    let newDocument = currentDoc;
 
     if (dofState.state === 'OverDefined') {
       finalDimension = { 
@@ -1180,8 +1221,8 @@ export const useCADStore = create<CADState>((set, get) => ({
       };
       
       newDocument = {
-        ...state.document,
-        featureTree: state.document.featureTree.map((f) => {
+        ...currentDoc,
+        featureTree: currentDoc.featureTree.map((f) => {
           if (f.id === state.activeSketchId && f.type === 'SKETCH') {
             return {
               ...f,
@@ -1197,7 +1238,7 @@ export const useCADStore = create<CADState>((set, get) => ({
         entityIds: actualConstraint.entityIds,
         pointIndices: actualConstraint.pointIndices
       };
-      newDocument = addDimensionToSketch(state.document, state.activeSketchId, finalDimension, actualConstraint);
+      newDocument = addDimensionToSketch(currentDoc, state.activeSketchId, finalDimension, actualConstraint);
     }
 
     return {
@@ -1570,9 +1611,33 @@ export const useCADStore = create<CADState>((set, get) => ({
       updatedConstraints = [...sketch.constraints, newConstraint];
     }
 
+    // 檢查是否有參照 3D 背景投影邊線，如有則加入至求解器中作為固定參考基準
+    const allConstraintEntityIds = [
+      ...(targetDim.entityIds || []),
+      ...(targetConstraint?.entityIds || []),
+      ...updatedConstraints.flatMap((c) => c.entityIds || []),
+    ];
+    const referencedProjEntities = allConstraintEntityIds
+      .map((id) => state.projectedEntities.find((p) => p.id === id))
+      .filter(Boolean) as CADEntity2D[];
+
+    let workingSketchEntities = [...sketch.entities];
+    for (const pEnt of referencedProjEntities) {
+      if (!workingSketchEntities.some((e) => e.id === pEnt.id)) {
+        workingSketchEntities.push({
+          ...pEnt,
+          isProjected: true,
+          isConstruction: true,
+          state: 'FullyDefined',
+          color: '#f59e0b',
+        });
+      }
+    }
+
     // 呼叫約束求解器計算新幾何形狀與 DOF 自由度狀態及輪廓
     const updatedSketchTemp = applyConstraintsToSketch({
       ...sketch,
+      entities: workingSketchEntities,
       constraints: updatedConstraints,
     });
     
@@ -1601,7 +1666,7 @@ export const useCADStore = create<CADState>((set, get) => ({
 
       if (dim.type === 'radial') {
         if (eIds && eIds.length === 1) {
-          const entity = updatedEntities.find((e) => e.id === eIds[0]);
+          const entity = updatedEntities.find((e) => e.id === eIds[0]) || state.projectedEntities.find((p) => p.id === eIds[0]);
           if (entity && (entity.type === 'circle' || entity.type === 'arc')) {
             const center = { ...entity.center };
             const origP0 = dim.points[0] || center;
@@ -1624,7 +1689,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       } else if (dim.type === 'linear') {
         if (eIds) {
           if (eIds.length === 1) {
-            const entity = updatedEntities.find((e) => e.id === eIds[0]);
+            const entity = updatedEntities.find((e) => e.id === eIds[0]) || state.projectedEntities.find((p) => p.id === eIds[0]);
             if (entity && entity.type === 'line') {
               return {
                 ...dim,
@@ -1637,8 +1702,8 @@ export const useCADStore = create<CADState>((set, get) => ({
             const id2 = eIds[1];
             const idx1 = pIndices?.[0] ?? 0;
             const idx2 = pIndices?.[1] ?? 0;
-            const e1 = id1 === 'origin' ? { id: 'origin', type: 'point' } : updatedEntities.find((e) => e.id === id1);
-            const e2 = id2 === 'origin' ? { id: 'origin', type: 'point' } : updatedEntities.find((e) => e.id === id2);
+            const e1 = id1 === 'origin' ? { id: 'origin', type: 'point' } : (updatedEntities.find((e) => e.id === id1) || state.projectedEntities.find((p) => p.id === id1));
+            const e2 = id2 === 'origin' ? { id: 'origin', type: 'point' } : (updatedEntities.find((e) => e.id === id2) || state.projectedEntities.find((p) => p.id === id2));
             if (e1 && e2) {
               const pt1 = getEntityPoint(e1, idx1);
               const pt2 = getEntityPoint(e2, idx2);
@@ -1656,8 +1721,8 @@ export const useCADStore = create<CADState>((set, get) => ({
         if (eIds && eIds.length >= 2) {
           const id1 = eIds[0];
           const id2 = eIds[1];
-          const e1 = updatedEntities.find((e) => e.id === id1);
-          const e2 = updatedEntities.find((e) => e.id === id2);
+          const e1 = updatedEntities.find((e) => e.id === id1) || state.projectedEntities.find((p) => p.id === id1);
+          const e2 = updatedEntities.find((e) => e.id === id2) || state.projectedEntities.find((p) => p.id === id2);
           if (e1 && e2 && e1.type === 'line' && e2.type === 'line') {
             return {
               ...dim,

@@ -155,7 +155,7 @@ export class SolidEngine {
           throw new Error('Failed to load valid OpenCASCADE WASM binary buffer');
         }
 
-        await this.dispatch<void>('INIT', { wasmBuffer }, [wasmBuffer]);
+        await this.dispatch<void>('INIT', { wasmBuffer, occBaseUrl }, [wasmBuffer]);
       })();
     }
     return this.initPromise;

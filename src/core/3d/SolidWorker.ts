@@ -22,11 +22,11 @@ const getBaseUrl = () => {
   return self.location.origin + '/';
 };
 
-async function initWorker(wasmBuffer?: ArrayBuffer) {
+async function initWorker(wasmBuffer?: ArrayBuffer, occBaseUrl?: string) {
   if (!oc) {
-    const baseUrl = getBaseUrl();
-    const jsUrl = `${baseUrl}occ/opencascade.wasm.js`;
-    const wasmUrl = `${baseUrl}occ/opencascade.wasm.wasm`;
+    const baseUrl = occBaseUrl || getBaseUrl();
+    const jsUrl = `${baseUrl}opencascade.wasm.js`;
+    const wasmUrl = `${baseUrl}opencascade.wasm.wasm`;
 
     // 由於我們現在使用 classic worker (?worker)，可以直接使用 importScripts
     try {
@@ -385,6 +385,7 @@ function transformWireTo3D(
   const alignXform = new occ.BRepBuilderAPI_Transform_2(wire2D, alignTrsf, true);
   const transformedShape = alignXform.Shape();
   const transformedWire = occ.TopoDS.Wire_1(transformedShape);
+  transformedShape.delete();
 
   // Clean up intermediate transformation objects
   fromOrig.delete();
@@ -445,6 +446,7 @@ function transformFaceTo3D(
   const alignXform = new occ.BRepBuilderAPI_Transform_2(face2D, alignTrsf, true);
   const transformedShape = alignXform.Shape();
   const transformedFace = occ.TopoDS.Face_1(transformedShape);
+  transformedShape.delete();
 
   // Clean up intermediate transformation objects
   fromOrig.delete();
@@ -799,14 +801,107 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
     explorer.Next();
   }
 
-  mesher.delete();
   explorer.delete();
+
+  // Extract true topological B-Rep edges using TopExp_Explorer over TopAbs_EDGE
+  const edges: number[] = [];
+  const edgeExplorer = new occ.TopExp_Explorer_2(
+    solid,
+    occ.TopAbs_ShapeEnum.TopAbs_EDGE,
+    occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+  );
+
+  const edgeSet = new Set<number>();
+
+  while (edgeExplorer.More()) {
+    const edge = occ.TopoDS.Edge_1(edgeExplorer.Current());
+    const hashCode = typeof edge.HashCode === 'function'
+      ? edge.HashCode(0x7FFFFFFF)
+      : (typeof edge.HashCode_1 === 'function' ? edge.HashCode_1(0x7FFFFFFF) : Math.random());
+
+    if (!edgeSet.has(hashCode)) {
+      edgeSet.add(hashCode);
+      const loc = new occ.TopLoc_Location_1();
+      let extracted = false;
+
+      if (typeof occ.BRep_Tool.Polygon3D === 'function') {
+        const poly = occ.BRep_Tool.Polygon3D(edge, loc);
+        if (poly && !poly.IsNull()) {
+          const polyObj = poly.get();
+          const nodes = polyObj.Nodes();
+          const nbNodes = polyObj.NbNodes();
+          const trsf = loc.Transformation();
+
+          for (let i = 1; i < nbNodes; i++) {
+            const p1 = nodes.Value(i).Transformed(trsf);
+            const p2 = nodes.Value(i + 1).Transformed(trsf);
+            edges.push(p1.X(), p1.Y(), p1.Z(), p2.X(), p2.Y(), p2.Z());
+            p1.delete();
+            p2.delete();
+          }
+          trsf.delete();
+          if (typeof nodes.delete === 'function') nodes.delete();
+          poly.delete();
+          extracted = true;
+        } else if (poly) {
+          poly.delete();
+        }
+      }
+
+      if (!extracted) {
+        // Fallback: extract start and end vertices of the edge
+        const vExp = new occ.TopExp_Explorer_2(
+          edge,
+          occ.TopAbs_ShapeEnum.TopAbs_VERTEX,
+          occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+        );
+        let p1: { x: number; y: number; z: number } | null = null;
+        let p2: { x: number; y: number; z: number } | null = null;
+
+        if (vExp.More()) {
+          const v1 = occ.TopoDS.Vertex_1(vExp.Current());
+          const pt1 = occ.BRep_Tool.Pnt(v1);
+          p1 = { x: pt1.X(), y: pt1.Y(), z: pt1.Z() };
+          pt1.delete();
+          v1.delete();
+          vExp.Next();
+        }
+        if (vExp.More()) {
+          const v2 = occ.TopoDS.Vertex_1(vExp.Current());
+          const pt2 = occ.BRep_Tool.Pnt(v2);
+          p2 = { x: pt2.X(), y: pt2.Y(), z: pt2.Z() };
+          pt2.delete();
+          v2.delete();
+          vExp.Next();
+        }
+        vExp.delete();
+
+        if (p1 && p2) {
+          edges.push(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
+        }
+      }
+
+      loc.delete();
+    }
+    edge.delete();
+    edgeExplorer.Next();
+  }
+
+  edgeExplorer.delete();
+  mesher.delete();
 
   const vArray = new Float32Array(vertices);
   const nArray = new Float32Array(normals);
   const iArray = indexOffset > 65535 ? new Uint32Array(indices) : new Uint16Array(indices);
+  const eArray = new Float32Array(edges);
 
-  return { vertices: vArray, normals: nArray, indices: iArray };
+  return {
+    vertices: vArray,
+    normals: nArray,
+    indices: iArray,
+    edgeVertices: eArray,
+    edges: eArray,
+  };
 }
 
 const _self = self as any;
@@ -817,7 +912,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
   try {
     switch (req.type) {
       case 'INIT': {
-        await initWorker(req.payload?.wasmBuffer);
+        await initWorker(req.payload?.wasmBuffer, req.payload?.occBaseUrl);
         _self.postMessage({ taskId: req.taskId, type: req.type, success: true } as SolidTaskResponse);
         break;
       }
@@ -1532,6 +1627,14 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
         if (currentSolid) {
           const meshData = tessellateSolid(currentSolid, occ);
+          const transferBuffers: Transferable[] = [
+            meshData.vertices.buffer,
+            meshData.normals.buffer,
+            meshData.indices.buffer,
+          ];
+          if (meshData.edgeVertices && meshData.edgeVertices.buffer) {
+            transferBuffers.push(meshData.edgeVertices.buffer);
+          }
           _self.postMessage(
             {
               taskId: req.taskId,
@@ -1539,7 +1642,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               success: true,
               data: meshData,
             } as SolidTaskResponse,
-            [meshData.vertices.buffer, meshData.normals.buffer, meshData.indices.buffer]
+            transferBuffers
           );
         } else {
           const emptyMesh: MeshResult = {
@@ -1603,6 +1706,14 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
         // Tessellate compound to get triangulated mesh
         const meshData = tessellateSolid(compound, occ);
+        const transferBuffers: Transferable[] = [
+          meshData.vertices.buffer,
+          meshData.normals.buffer,
+          meshData.indices.buffer,
+        ];
+        if (meshData.edgeVertices && meshData.edgeVertices.buffer) {
+          transferBuffers.push(meshData.edgeVertices.buffer);
+        }
 
         _self.postMessage(
           {
@@ -1611,7 +1722,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             success: true,
             data: meshData,
           } as SolidTaskResponse,
-          [meshData.vertices.buffer, meshData.normals.buffer, meshData.indices.buffer]
+          transferBuffers
         );
         break;
       }

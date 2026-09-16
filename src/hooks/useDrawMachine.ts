@@ -299,6 +299,7 @@ export function useDrawMachine() {
   const activeLayerId = useCADStore((state) => state.activeLayerId);
   const lastRadius = useCADStore((state) => state.lastRadius);
   const setLastRadius = useCADStore((state) => state.setLastRadius);
+  const projectedEntities = useCADStore((state) => state.projectedEntities || []);
 
   const [drawSession, setDrawSession] = useState<DrawSession>(createInitialDrawSession());
   const [currentSnap, setCurrentSnap] = useState<SnapResult | null>(null);
@@ -551,6 +552,21 @@ export function useDrawMachine() {
       currentEntities = sketch.entities;
     }
   }
+
+  // 包含草圖圖元與 3D 實體背景投影邊線（用於端點/中點鎖點與追蹤）
+  const allSnappableEntities = useMemo(() => {
+    return [...currentEntities, ...projectedEntities];
+  }, [currentEntities, projectedEntities]);
+
+  // 檢查是否為草圖內部真實存在的圖元（虛擬投影邊線不加入草圖內部幾何約束）
+  const isRealSketchEntity = useCallback(
+    (id?: string | null): boolean => {
+      if (!id) return false;
+      if (id.startsWith('virtual_') || id.startsWith('proj_ref_') || id === 'origin') return false;
+      return currentEntities.some((e) => e.id === id);
+    },
+    [currentEntities]
+  );
 
   const cancelDrawing = useCallback(() => {
     setDrawSession(createInitialDrawSession());
@@ -1110,11 +1126,11 @@ export function useDrawMachine() {
 
   const resolveEffectiveCursor = useCallback(
     (worldPt: Point2D, scale: number = 1.0) => {
-      // 1. 獨立計算 OSnap 實體鎖點
+      // 1. 獨立計算 OSnap 實體鎖點（支援草圖圖元與 3D 投影邊線/端點）
       const osnapResult = osnapEnabled
         ? findSnapPoint(
             worldPt,
-            currentEntities,
+            allSnappableEntities,
             scale,
             15,
             drawSession.startPoint || undefined,
@@ -1133,7 +1149,7 @@ export function useDrawMachine() {
         activePolarExt = findPolarExtensionIntersection(
           drawSession.startPoint,
           worldPt,
-          currentEntities,
+          allSnappableEntities,
           otrackManagerRef.current?.anchors || [],
           polarAngleStep,
           customPolarAngles,
@@ -1156,7 +1172,7 @@ export function useDrawMachine() {
           15 / scale,
           targetPolarAngles,
           drawSession.isDrawing && drawSession.startPoint ? drawSession.startPoint : undefined,
-          currentEntities
+          allSnappableEntities
         );
         if (trackingRes.guideLines.length > 0) {
           otrackPt = trackingRes.point;
@@ -1377,7 +1393,7 @@ export function useDrawMachine() {
     [
       osnapEnabled,
       osnapSettings,
-      currentEntities,
+      allSnappableEntities,
       orthoEnabled,
       drawSession.isDrawing,
       drawSession.startPoint,
@@ -1936,7 +1952,7 @@ export function useDrawMachine() {
             setDeferredTangent(null);
           }
 
-          if (startSnap && startSnap.entityId !== newLine.id && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
+          if (startSnap && startSnap.entityId !== newLine.id && isRealSketchEntity(startSnap.entityId) && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
             addConstraint({
               id: crypto.randomUUID(),
               type: 'coincident',
@@ -1945,7 +1961,7 @@ export function useDrawMachine() {
             });
           }
 
-          if (res.snap && res.snap.entityId !== newLine.id && (res.snap.type === 'endpoint' || res.snap.type === 'center') && res.snap.pointIndex !== undefined) {
+          if (res.snap && res.snap.entityId !== newLine.id && isRealSketchEntity(res.snap.entityId) && (res.snap.type === 'endpoint' || res.snap.type === 'center') && res.snap.pointIndex !== undefined) {
             addConstraint({
               id: crypto.randomUUID(),
               type: 'coincident',
@@ -2107,7 +2123,7 @@ export function useDrawMachine() {
             setFirstEntityId(newEntityId);
             setLastEntityId(newEntityId);
 
-            if (startSnap && startSnap.entityId !== newEntityId && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
+            if (startSnap && startSnap.entityId !== newEntityId && isRealSketchEntity(startSnap.entityId) && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
               addConstraint({
                 id: crypto.randomUUID(),
                 type: 'coincident',
@@ -2164,7 +2180,7 @@ export function useDrawMachine() {
             setLastEntityId(newEntityId);
           }
 
-          if (res.snap && res.snap.entityId !== newEntityId && !isClosing && (res.snap.type === 'endpoint' || res.snap.type === 'center') && res.snap.pointIndex !== undefined) {
+          if (res.snap && res.snap.entityId !== newEntityId && !isClosing && isRealSketchEntity(res.snap.entityId) && (res.snap.type === 'endpoint' || res.snap.type === 'center') && res.snap.pointIndex !== undefined) {
             let newEndIndex = 1;
             if (polylineMode === 'ARC' && arcData) {
               newEndIndex = arcData.isStartPointMatchingPStart ? 1 : 0;
@@ -2576,7 +2592,7 @@ export function useDrawMachine() {
             let closestEntity: CADEntity2D | null = null;
             let minDistance = threshold;
 
-            for (const entity of currentEntities) {
+            for (const entity of allSnappableEntities) {
               if (entity.type === 'line' || entity.type === 'circle' || entity.type === 'arc') {
                 const dist = getDistanceToEntity(clickPt, entity);
                 if (dist < minDistance) {
@@ -2657,7 +2673,7 @@ export function useDrawMachine() {
               const threshold = 15 / scale;
               let closestEntity: CADEntity2D | null = null;
               let minDistance = threshold;
-              for (const entity of currentEntities) {
+              for (const entity of allSnappableEntities) {
                 if (entity.type === 'line' && entity.id !== dimSelectedLineId) {
                   const dist = getDistanceToEntity(clickPt, entity);
                   if (dist < minDistance) {
@@ -2745,8 +2761,8 @@ export function useDrawMachine() {
             cancelDrawing();
           }
         } else if (drawSession.step === 3 && dimSelectedLineId && dimSelectedLineId2) {
-          const line1 = currentEntities.find((e) => e.id === dimSelectedLineId) as LineEntity;
-          const line2 = currentEntities.find((e) => e.id === dimSelectedLineId2) as LineEntity;
+          const line1 = allSnappableEntities.find((e) => e.id === dimSelectedLineId) as LineEntity;
+          const line2 = allSnappableEntities.find((e) => e.id === dimSelectedLineId2) as LineEntity;
 
           if (line1 && line2) {
             const dimensionId = crypto.randomUUID();
@@ -3713,7 +3729,7 @@ export function useDrawMachine() {
         }
         setLastEntityId(newLine.id);
 
-        if (startSnap && startSnap.entityId !== newLine.id && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
+        if (startSnap && startSnap.entityId !== newLine.id && isRealSketchEntity(startSnap.entityId) && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
           addConstraint({
             id: crypto.randomUUID(),
             type: 'coincident',
@@ -3792,7 +3808,7 @@ export function useDrawMachine() {
           setFirstEntityId(newEntityId);
           setLastEntityId(newEntityId);
 
-          if (startSnap && startSnap.entityId !== newEntityId && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
+          if (startSnap && startSnap.entityId !== newEntityId && isRealSketchEntity(startSnap.entityId) && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
             addConstraint({
               id: crypto.randomUUID(),
               type: 'coincident',

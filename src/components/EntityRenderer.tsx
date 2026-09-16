@@ -41,6 +41,7 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
 
     const isSelected = selectedIds.includes(entity.id);
     const entityState: EntityState = (entity.state || solverState || 'UnderDefined') as EntityState;
+    const isProjected = Boolean(entity.isProjected || entity.id.includes('_proj_'));
 
     // 依據規格判定圖元顏色、線寬與虛線樣式：
     let strokeColor = '#60a5fa';
@@ -52,13 +53,17 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
     const byLayerLineType = entity.lineType || (layer ? layer.lineType : 'CONTINUOUS');
 
     if (isSelected) {
-      strokeColor = '#38bdf8';
-      strokeWidth = 3;
+      strokeColor = isProjected ? '#fbbf24' : '#38bdf8';
+      strokeWidth = isProjected ? 3.5 : 3;
       if (entity.isConstruction) {
         strokeDasharray = '6,4';
       } else if (byLayerLineType === 'DASHED' || byLayerLineType === 'HIDDEN') {
         strokeDasharray = '8,4';
       }
+    } else if (isProjected) {
+      // 投影幾何圖元 (Projected Geometry)：專屬明亮高可見度琥珀黃金 (#f59e0b)，加粗 2.5px
+      strokeColor = entity.color && entity.color !== '#38bdf8' && entity.color !== '#60a5fa' ? entity.color : '#f59e0b';
+      strokeWidth = Math.max(2.5, strokeWidth);
     } else if (entity.isConstruction) {
       strokeColor = '#c084fc';
       strokeDasharray = '6,4';

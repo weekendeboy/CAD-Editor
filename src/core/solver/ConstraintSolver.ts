@@ -95,7 +95,12 @@ function resolvePoint(
   if (!ent) return null;
   const pt = getEntityPoint(ent, ptIdx);
   if (!pt) return null;
-  const isFixed = fixedPoints.has(`${id}_${ptIdx}`);
+  const isFixed =
+    fixedPoints.has(`${id}_${ptIdx}`) ||
+    Boolean(ent.isProjected) ||
+    id.startsWith('virtual_') ||
+    id.startsWith('proj_') ||
+    id.includes('_proj_');
   return { pt, isFixed, isOrigin: false };
 }
 
@@ -121,6 +126,20 @@ export function solveConstraints(
   const fixedPoints = new Set<string>();
   fixedPoints.add('origin_0');
   
+  // 自動鎖定所有 3D 投影邊線與外部參考幾何，確保背景投影絕對不動 (Ground Reference)
+  for (const ent of entities) {
+    if (ent.isProjected || ent.id.startsWith('virtual_') || ent.id.startsWith('proj_') || ent.id.includes('_proj_')) {
+      fixedPoints.add(`${ent.id}_0`);
+      fixedPoints.add(`${ent.id}_1`);
+      fixedPoints.add(`${ent.id}_center`);
+      if (ent.type === 'polyline') {
+        for (let i = 0; i < ent.points.length; i++) {
+          fixedPoints.add(`${ent.id}_${i}`);
+        }
+      }
+    }
+  }
+
   for (const c of constraints) {
     if (c.type === 'fix' && c.entityIds.length > 0) {
       const entId = c.entityIds[0];
@@ -345,10 +364,34 @@ export function solveConstraints(
               const dirX = dx / currentLen;
               const dirY = dy / currentLen;
               const delta = targetLen - currentLen;
+              const isLineToLine = (!c.pointIndices || c.pointIndices.length === 0) && workingEntities[idA]?.type === 'line' && workingEntities[idB]?.type === 'line';
+
               if (isFixedA && !isFixedB) {
-                if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptB.x + dirX * delta, y: ptB.y + dirY * delta });
+                if (!ptBData.isOrigin) {
+                  const entB = workingEntities[idB];
+                  if (isLineToLine && entB?.type === 'line') {
+                    workingEntities[idB] = {
+                      ...entB,
+                      start: { x: entB.start.x + dirX * delta, y: entB.start.y + dirY * delta },
+                      end: { x: entB.end.x + dirX * delta, y: entB.end.y + dirY * delta },
+                    };
+                  } else {
+                    workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptB.x + dirX * delta, y: ptB.y + dirY * delta });
+                  }
+                }
               } else if (!isFixedA && isFixedB) {
-                if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x - dirX * delta, y: ptA.y - dirY * delta });
+                if (!ptAData.isOrigin) {
+                  const entA = workingEntities[idA];
+                  if (isLineToLine && entA?.type === 'line') {
+                    workingEntities[idA] = {
+                      ...entA,
+                      start: { x: entA.start.x - dirX * delta, y: entA.start.y - dirY * delta },
+                      end: { x: entA.end.x - dirX * delta, y: entA.end.y - dirY * delta },
+                    };
+                  } else {
+                    workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x - dirX * delta, y: ptA.y - dirY * delta });
+                  }
+                }
               } else if (!isFixedA && !isFixedB) {
                 const half = delta / 2;
                 if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x - dirX * half, y: ptA.y - dirY * half });
@@ -494,10 +537,34 @@ export function solveConstraints(
             const err = Math.abs(deltaX);
             maxDisp = Math.max(maxDisp, err);
             if (err > SOLVER_TOLERANCE) {
+              const isLineToLine = (!c.pointIndices || c.pointIndices.length === 0) && workingEntities[idA]?.type === 'line' && workingEntities[idB]?.type === 'line';
+
               if (isFixedA && !isFixedB) {
-                if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptB.x + deltaX, y: ptB.y });
+                if (!ptBData.isOrigin) {
+                  const entB = workingEntities[idB];
+                  if (isLineToLine && entB?.type === 'line') {
+                    workingEntities[idB] = {
+                      ...entB,
+                      start: { x: entB.start.x + deltaX, y: entB.start.y },
+                      end: { x: entB.end.x + deltaX, y: entB.end.y },
+                    };
+                  } else {
+                    workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptB.x + deltaX, y: ptB.y });
+                  }
+                }
               } else if (!isFixedA && isFixedB) {
-                if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x - deltaX, y: ptA.y });
+                if (!ptAData.isOrigin) {
+                  const entA = workingEntities[idA];
+                  if (isLineToLine && entA?.type === 'line') {
+                    workingEntities[idA] = {
+                      ...entA,
+                      start: { x: entA.start.x - deltaX, y: entA.start.y },
+                      end: { x: entA.end.x - deltaX, y: entA.end.y },
+                    };
+                  } else {
+                    workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x - deltaX, y: ptA.y });
+                  }
+                }
               } else if (!isFixedA && !isFixedB) {
                 const halfX = deltaX / 2;
                 if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x - halfX, y: ptA.y });
@@ -554,10 +621,34 @@ export function solveConstraints(
             const err = Math.abs(deltaY);
             maxDisp = Math.max(maxDisp, err);
             if (err > SOLVER_TOLERANCE) {
+              const isLineToLine = (!c.pointIndices || c.pointIndices.length === 0) && workingEntities[idA]?.type === 'line' && workingEntities[idB]?.type === 'line';
+
               if (isFixedA && !isFixedB) {
-                if (!ptBData.isOrigin) workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptB.x, y: ptB.y + deltaY });
+                if (!ptBData.isOrigin) {
+                  const entB = workingEntities[idB];
+                  if (isLineToLine && entB?.type === 'line') {
+                    workingEntities[idB] = {
+                      ...entB,
+                      start: { x: entB.start.x, y: entB.start.y + deltaY },
+                      end: { x: entB.end.x, y: entB.end.y + deltaY },
+                    };
+                  } else {
+                    workingEntities[idB] = setEntityPoint(workingEntities[idB], idxB, { x: ptB.x, y: ptB.y + deltaY });
+                  }
+                }
               } else if (!isFixedA && isFixedB) {
-                if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x, y: ptA.y - deltaY });
+                if (!ptAData.isOrigin) {
+                  const entA = workingEntities[idA];
+                  if (isLineToLine && entA?.type === 'line') {
+                    workingEntities[idA] = {
+                      ...entA,
+                      start: { x: entA.start.x, y: entA.start.y - deltaY },
+                      end: { x: entA.end.x, y: entA.end.y - deltaY },
+                    };
+                  } else {
+                    workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x, y: ptA.y - deltaY });
+                  }
+                }
               } else if (!isFixedA && !isFixedB) {
                 const halfY = deltaY / 2;
                 if (!ptAData.isOrigin) workingEntities[idA] = setEntityPoint(workingEntities[idA], idxA, { x: ptA.x, y: ptA.y - halfY });
@@ -699,7 +790,15 @@ export function analyzeSketchDOF(
   entities: CADEntity2D[],
   constraints: Constraint[]
 ): SketchDofState {
-  const activeEntities = entities.filter((e) => !e.isConstruction && e.visible !== false);
+  const activeEntities = entities.filter(
+    (e) =>
+      !e.isConstruction &&
+      e.visible !== false &&
+      !e.isProjected &&
+      !e.id.startsWith('virtual_') &&
+      !e.id.startsWith('proj_') &&
+      !e.id.includes('_proj_')
+  );
   const entityStates: Record<string, EntityState> = {};
 
   let totalDof = 0;

@@ -5,8 +5,11 @@ import { CADGrid } from './CADGrid';
 import { EntityRenderer } from './EntityRenderer';
 import { ProfileRenderer } from './ProfileRenderer';
 import { DimensionRenderer } from './DimensionRenderer';
-import { Point2D, SketchFeature, Dimension, CADEntity2D } from '../types/cad';
+import { Point2D, SketchFeature, Dimension, CADEntity2D, LineEntity } from '../types/cad';
 import { useDrawMachine } from '../hooks/useDrawMachine';
+import { findSnapPoint } from '../core/2d/SnapManager';
+
+const useCadStore = useCADStore;
 import { RubberbandPreview } from './RubberbandPreview';
 import { SnapMarker } from './SnapMarker';
 import { isEntityInSelectionBox, SelectionBox } from '../core/2d/BoxSelection';
@@ -88,7 +91,11 @@ function hitTest(p: Point2D, entities: CADEntity2D[], threshold: number): string
   return hitId;
 }
 
-export const CADSketchCanvas: React.FC = () => {
+const DEFAULT_PROJECTED_EDGES = [
+  { start: { x: -40, y: -40 }, end: { x: 40, y: -40 } }
+];
+
+export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [mouseWorldPos, setMouseWorldPos] = useState<Point2D>({ x: 0, y: 0 });
@@ -122,6 +129,8 @@ export const CADSketchCanvas: React.FC = () => {
     selectedEntityIds,
     osnapEnabled,
     selectEntity,
+    setSelectedEntityIds,
+    addEntity,
     clearSelection,
     updateConstraintValue,
     updateDimensionValue,
@@ -141,6 +150,11 @@ export const CADSketchCanvas: React.FC = () => {
     setIsPickingRevolveAxis,
     setViewMode,
   } = useCADStore();
+
+  const targetSketchId = sketchId || activeSketchId || 'feat_sketch_1';
+
+  // 取得 3D 投影邊緣，若無則暫時提供一條測試線以便驗證功能
+  const projected3DEdges = useCadStore((s: any) => s.projected3DEdges || DEFAULT_PROJECTED_EDGES);
 
   const handleSelectEntity = useCallback(
     (id: string, e: React.MouseEvent) => {
@@ -273,6 +287,7 @@ export const CADSketchCanvas: React.FC = () => {
   // Dynamic DDE / HUD states
   const [hudInputLength, setHudInputLength] = useState<string>('');
   const [isHudFocused, setIsHudFocused] = useState<boolean>(false);
+  const [hoveredVirtualEdgeId, setHoveredVirtualEdgeId] = useState<string | null>(null);
   const hudRef = useRef<HTMLInputElement>(null);
 
   // Auto-reset DDE HUD when drawing ends
@@ -470,8 +485,8 @@ export const CADSketchCanvas: React.FC = () => {
         let p1 = dim.points[0];
         let p2 = dim.points[1];
         if (dim.entityIds && dim.entityIds.length >= 2 && sketch) {
-          const e1 = sketch.entities.find((e) => e.id === dim.entityIds![0]);
-          const e2 = sketch.entities.find((e) => e.id === dim.entityIds![1]);
+          const e1 = sketch.entities.find((e) => e.id === dim.entityIds![0]) || useCADStore.getState().projectedEntities.find((e) => e.id === dim.entityIds![0]);
+          const e2 = sketch.entities.find((e) => e.id === dim.entityIds![1]) || useCADStore.getState().projectedEntities.find((e) => e.id === dim.entityIds![1]);
           const idx1 = dim.pointIndices?.[0] ?? 0;
           const idx2 = dim.pointIndices?.[1] ?? 0;
           const getPt = (ent: CADEntity2D, idx: number) => {
@@ -689,43 +704,138 @@ export const CADSketchCanvas: React.FC = () => {
       }
     }
 
-    const edges: [Point2D, Point2D][] = [];
+    // 收集所有候選邊線段
+    const rawEdges: [Point2D, Point2D][] = [];
+
+    // 1. 若 3D 實體有特徵邊線 (edgeVertices)，提取並投影
     if (edgeVertices && edgeVertices.length >= 6) {
       const numEdges = Math.floor(edgeVertices.length / 6);
       for (let i = 0; i < numEdges; i++) {
         const idx = i * 6;
         const p1_3d = { x: edgeVertices[idx], y: edgeVertices[idx + 1], z: edgeVertices[idx + 2] };
         const p2_3d = { x: edgeVertices[idx + 3], y: edgeVertices[idx + 4], z: edgeVertices[idx + 5] };
-        edges.push([
-          project3DTo2DPlane(p1_3d, plane),
-          project3DTo2DPlane(p2_3d, plane),
-        ]);
+        const p1_2d = project3DTo2DPlane(p1_3d, plane);
+        const p2_2d = project3DTo2DPlane(p2_3d, plane);
+        if (Math.hypot(p1_2d.x - p2_2d.x, p1_2d.y - p2_2d.y) > 0.05) {
+          rawEdges.push([p1_2d, p2_2d]);
+        }
+      }
+    }
+
+    // 2. 共面外邊界邊萃取演算法 (Planar Mesh Boundary Extractor)
+    // 當三角網格構成多邊形（例如拉伸矩形面）時，內部共面剖分對角線必然出現 2 次（相反方向），
+    // 而多邊形的外邊界邊各只出現 1 次！
+    if (triangles.length > 0) {
+      const edgeCountMap = new Map<string, { count: number; edge: [Point2D, Point2D] }>();
+      const roundCoord = (v: number) => Math.round(v * 100) / 100; // 0.01 精度對齊
+
+      for (const tri of triangles) {
+        const p = [tri[0], tri[1], tri[2]];
+        for (let j = 0; j < 3; j++) {
+          const ptA = p[j];
+          const ptB = p[(j + 1) % 3];
+          if (Math.hypot(ptA.x - ptB.x, ptA.y - ptB.y) <= 0.05) continue; // 過濾退化邊
+
+          const raX = roundCoord(ptA.x);
+          const raY = roundCoord(ptA.y);
+          const rbX = roundCoord(ptB.x);
+          const rbY = roundCoord(ptB.y);
+
+          // 無向邊 key 排序
+          const isForward = raX < rbX || (raX === rbX && raY < rbY);
+          const key = isForward ? `${raX},${raY}_${rbX},${rbY}` : `${rbX},${rbY}_${raX},${raY}`;
+
+          const existing = edgeCountMap.get(key);
+          if (existing) {
+            existing.count += 1;
+          } else {
+            edgeCountMap.set(key, { count: 1, edge: [ptA, ptB] });
+          }
+        }
+      }
+
+      // 只提取出現次數為 1 的邊（外邊界）！
+      // 如此一來，矩形內部的三角剖分對角線因為出現 2 次會被 100% 剔除，完美呈現完整的單一矩形輪廓！
+      for (const entry of edgeCountMap.values()) {
+        if (entry.count === 1) {
+          rawEdges.push(entry.edge);
+        }
+      }
+    }
+
+    // 3. 邊線去重 (Deduplicate overlapping edges)
+    const cleanEdges: [Point2D, Point2D][] = [];
+    for (const [p1, p2] of rawEdges) {
+      const len = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+      if (len < 0.05) continue;
+
+      const isDuplicate = cleanEdges.some(([ep1, ep2]) => {
+        const d1 = Math.hypot(p1.x - ep1.x, p1.y - ep1.y) + Math.hypot(p2.x - ep2.x, p2.y - ep2.y);
+        const d2 = Math.hypot(p1.x - ep2.x, p1.y - ep2.y) + Math.hypot(p2.x - ep1.x, p2.y - ep1.y);
+        return d1 < 0.1 || d2 < 0.1;
+      });
+
+      if (!isDuplicate) {
+        cleanEdges.push([p1, p2]);
+      }
+    }
+
+    // 4. 提取獨特端點清單 (Endpoints for Snapping)
+    const endpoints: Point2D[] = [];
+    for (const [p1, p2] of cleanEdges) {
+      for (const pt of [p1, p2]) {
+        const exists = endpoints.some((ep) => Math.hypot(ep.x - pt.x, ep.y - pt.y) < 0.1);
+        if (!exists) {
+          endpoints.push(pt);
+        }
       }
     }
 
     return {
       projected2DPoints,
       triangles,
-      edges,
+      edges: cleanEdges,
+      endpoints,
     };
   }, [activeSketchId, document?.featureTree, solidMesh]);
 
   const virtualEntities = useMemo<CADEntity2D[]>(() => {
-    if (!projectedSolidData) return [];
-    return projectedSolidData.edges.map((edge, idx) => {
-      const line: import('../types/cad').LineEntity = {
-        id: `virtual_edge_${idx}`,
-        type: 'line',
-        layerId: '0',
-        visible: true,
-        locked: true,
-        isConstruction: true,
-        start: { ...edge[0] },
-        end: { ...edge[1] },
-      };
-      return line;
-    });
-  }, [projectedSolidData]);
+    if (projectedSolidData && projectedSolidData.edges.length > 0) {
+      return projectedSolidData.edges.map((edge, idx) => {
+        const line: import('../types/cad').LineEntity = {
+          id: `virtual_edge_${idx}`,
+          type: 'line',
+          layerId: '0',
+          visible: true,
+          locked: true,
+          isConstruction: true,
+          start: { ...edge[0] },
+          end: { ...edge[1] },
+        };
+        return line;
+      });
+    }
+    return projected3DEdges.map((line: any, idx: number) => ({
+      id: `proj_ref_${idx}`,
+      type: 'line',
+      layerId: 'layer_ref_3d',
+      color: '#94a3b8', // 灰色參考線
+      state: 'fully_constrained',
+      isConstruction: true,
+      visible: true,
+      locked: true,
+      start: { x: line.start?.x || 0, y: line.start?.y || 0 },
+      end: { x: line.end?.x || 0, y: line.end?.y || 0 }
+    }));
+  }, [projectedSolidData, projected3DEdges]);
+
+  // 同步 3D 投影虛擬邊線至全域 CADStore，使所有繪圖工具（LINE、CIRCLE、POLYLINE 等）能即時捕捉 3D 投影端點
+  useEffect(() => {
+    useCADStore.getState().setProjectedEntities(virtualEntities);
+    return () => {
+      useCADStore.getState().setProjectedEntities([]);
+    };
+  }, [virtualEntities]);
 
   // 處理夾點熱點按壓事件 (handleGripPointerDown)
   const handleGripPointerDown = useCallback(
@@ -754,6 +864,12 @@ export const CADSketchCanvas: React.FC = () => {
     );
   }, [rawEntities, currentConstraints, activeGrip, currentSnap, mouseWorldPos]);
 
+  const entities = currentEntities;
+
+  const allSnappableEntities = React.useMemo(() => {
+    return [...entities, ...virtualEntities];
+  }, [entities, virtualEntities]);
+
   // 處理滑鼠移動時更新世界座標與繪圖狀態
   const handlePointerMove = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -769,6 +885,15 @@ export const CADSketchCanvas: React.FC = () => {
       const worldPt = screenToWorld(screenPt);
       setMouseWorldPos(worldPt);
       handleDrawPointerMove(worldPt, scale);
+
+      // PROJECT 工具下即時感應懸停邊線
+      if (currentTool === 'PROJECT') {
+        const hitThreshold = Math.max(2.5, 12 / scale);
+        const hitId = hitTest(worldPt, virtualEntities, hitThreshold);
+        setHoveredVirtualEdgeId(hitId || null);
+      } else if (hoveredVirtualEdgeId !== null) {
+        setHoveredVirtualEdgeId(null);
+      }
 
       if (activeGrip) {
         // 夾點拖曳中：已由 currentEntities 即時計算動態形變，阻斷框選邏輯
@@ -924,17 +1049,18 @@ export const CADSketchCanvas: React.FC = () => {
           }
         } else if (currentTool === 'PROJECT') {
           const clickPt = currentSnap ? currentSnap.point : worldPt;
-          const hitThreshold = Math.max(1.5, 8 / scale);
+          const hitThreshold = Math.max(2.5, 12 / scale);
           const hitId = hitTest(clickPt, virtualEntities, hitThreshold);
 
           if (hitId) {
-            const hitEntity = virtualEntities.find((e) => e.id === hitId) as import('../types/cad').LineEntity;
-            if (hitEntity && activeSketchId) {
-              const newProjectedLine: import('../types/cad').LineEntity = {
-                id: `ent_line_proj_${Date.now().toString().slice(-6)}`,
+            const hitEntity = virtualEntities.find((e) => e.id === hitId) as LineEntity;
+            if (hitEntity) {
+              const newProjectedLine: LineEntity = {
+                id: `ent_line_proj_${Date.now().toString().slice(-6)}_${Math.random().toString(36).slice(2, 5)}`,
                 type: 'line',
                 layerId: useCADStore.getState().activeLayerId || '0',
-                color: '#38bdf8',
+                color: '#f59e0b',
+                isProjected: true,
                 state: 'FullyDefined',
                 isConstruction: false,
                 visible: true,
@@ -942,7 +1068,8 @@ export const CADSketchCanvas: React.FC = () => {
                 start: { ...hitEntity.start },
                 end: { ...hitEntity.end }
               };
-              useCADStore.getState().addEntity(newProjectedLine);
+              addEntity(newProjectedLine);
+              setSelectedEntityIds([newProjectedLine.id]);
             }
           }
         } else {
@@ -1137,10 +1264,18 @@ export const CADSketchCanvas: React.FC = () => {
     ? 'SNAP: FREE'
     : 'SNAP: OFF';
 
+  const isDrawing = drawSession.isDrawing;
+  const toSvgX = (x: number) => worldToScreen({ x, y: 0 }).x;
+  const toSvgY = (y: number) => worldToScreen({ x: 0, y }).y;
+
   return (
     <div
       ref={containerRef}
-      className={`relative w-full h-full overflow-hidden bg-[#1E1E1E] ${currentTool === 'PROJECT' ? 'cursor-copy' : ''}`}
+      className={`relative w-full h-full overflow-hidden bg-[#1E1E1E] ${
+        currentTool === 'PAN' ? 'cursor-grab' : 
+        currentTool === 'PROJECT' ? 'cursor-copy' : 
+        isDrawing ? 'cursor-crosshair' : 'cursor-crosshair'
+      }`}
       onWheel={viewportHandlers.onWheel}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -1164,7 +1299,11 @@ export const CADSketchCanvas: React.FC = () => {
           width={dimensions.width}
           height={dimensions.height}
           style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
-          className={currentTool === 'PROJECT' ? 'cursor-copy' : ''}
+          className={`w-full h-full ${
+            currentTool === 'PAN' ? 'cursor-grab' : 
+            currentTool === 'PROJECT' ? 'cursor-copy' : 
+            isDrawing ? 'cursor-crosshair' : 'cursor-crosshair'
+          }`}
         >
           {/* 3D 實體背景投影層 (3D Solid Projection Layer) */}
           {projectedSolidData && (
@@ -1172,7 +1311,7 @@ export const CADSketchCanvas: React.FC = () => {
               className="cad-3d-projection-layer pointer-events-none select-none"
               style={{ pointerEvents: 'none' }}
             >
-              {/* 3D 網格三角形投影輪廓 (淡灰色參考線) */}
+              {/* 3D 網格表面微淡陰影（stroke="none"，絕無內部剖分對角線，呈現乾淨實體面） */}
               {projectedSolidData.triangles.map((tri, triIdx) => {
                 const sp1 = worldToScreen(tri[0]);
                 const sp2 = worldToScreen(tri[1]);
@@ -1181,18 +1320,18 @@ export const CADSketchCanvas: React.FC = () => {
                   <polygon
                     key={`proj-tri-${triIdx}`}
                     points={`${sp1.x},${sp1.y} ${sp2.x},${sp2.y} ${sp3.x},${sp3.y}`}
-                    stroke="#cbd5e1"
-                    strokeWidth={1}
-                    fill="none"
-                    opacity={0.35}
+                    stroke="none"
+                    fill="#94a3b8"
+                    fillOpacity={0.06}
                   />
                 );
               })}
 
-              {/* 3D 實體特徵邊線投影 (如有 edgeVertices) */}
+              {/* 3D 實體外邊界與特徵邊線投影（完整的矩形輪廓線） */}
               {projectedSolidData.edges.map((edge, edgeIdx) => {
                 const sp1 = worldToScreen(edge[0]);
                 const sp2 = worldToScreen(edge[1]);
+                const isHovered = hoveredVirtualEdgeId === `virtual_edge_${edgeIdx}`;
                 return (
                   <line
                     key={`proj-edge-${edgeIdx}`}
@@ -1200,9 +1339,27 @@ export const CADSketchCanvas: React.FC = () => {
                     y1={sp1.y}
                     x2={sp2.x}
                     y2={sp2.y}
-                    stroke="#94a3b8"
-                    strokeWidth={1.2}
-                    opacity={0.65}
+                    stroke={isHovered ? '#f59e0b' : '#64748b'}
+                    strokeWidth={isHovered ? 2.5 : 1.5}
+                    strokeDasharray={isHovered ? undefined : '5,3'}
+                    opacity={isHovered ? 1.0 : 0.75}
+                  />
+                );
+              })}
+
+              {/* 3D 投影端點節點標記 (在未投影幾何前即可清晰鎖定 3D 端點) */}
+              {projectedSolidData.endpoints.map((pt, ptIdx) => {
+                const sp = worldToScreen(pt);
+                return (
+                  <circle
+                    key={`proj-pt-${ptIdx}`}
+                    cx={sp.x}
+                    cy={sp.y}
+                    r={3}
+                    fill="#38bdf8"
+                    stroke="#ffffff"
+                    strokeWidth={1}
+                    opacity={0.8}
                   />
                 );
               })}
@@ -1210,10 +1367,32 @@ export const CADSketchCanvas: React.FC = () => {
           )}
 
           {/* 封閉面渲染層 */}
-          <ProfileRenderer
-            profiles={currentProfiles}
-            worldToScreen={worldToScreen}
-          />
+          <g id="cad-closed-profiles-layer">
+            <ProfileRenderer
+              profiles={currentProfiles}
+              worldToScreen={worldToScreen}
+            />
+          </g>
+          <g id="cad-virtual-edges-layer" pointerEvents="none">
+            {virtualEntities.map((ent) => {
+              if (ent.type === 'line') {
+                return (
+                  <line
+                    key={ent.id}
+                    x1={toSvgX(ent.start.x)}
+                    y1={toSvgY(ent.start.y)}
+                    x2={toSvgX(ent.end.x)}
+                    y2={toSvgY(ent.end.y)}
+                    stroke="#94a3b8"
+                    strokeWidth="2"
+                    strokeDasharray="4,4"
+                    opacity="0.6"
+                  />
+                );
+              }
+              return null;
+            })}
+          </g>
           <g style={{ pointerEvents: 'all' }}>
             <EntityRenderer
               entities={currentEntities}

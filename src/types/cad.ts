@@ -19,6 +19,7 @@ export interface BaseCADEntity2D {
   lineType?: string;
   lineWidth?: number;
   isConstruction?: boolean;
+  isProjected?: boolean; // 投影幾何圖元識別 (Projected Geometry)
   state?: EntityState;
 }
 

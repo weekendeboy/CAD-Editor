@@ -163,6 +163,7 @@ export interface MeshResult {
   normals: Float32Array;
   indices: Uint32Array | Uint16Array;
   edgeVertices?: Float32Array;
+  edges?: Float32Array;
 }
 
 export type ExtrudeProfileResponseData = MeshResult;

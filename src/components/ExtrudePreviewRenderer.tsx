@@ -11,6 +11,7 @@ import {
 } from '../types/cad';
 import { mapPoint2DTo3D } from '../core/3d/FeaturePipelineAdapter';
 import { findClosedProfiles } from '../core/2d/TopologyEngine';
+import { discretizeSketchProfile } from '../core/2d/ProfileDiscretizer';
 
 interface ExtrudePreviewMeshProps {
   preview: NonNullable<ExtrudePreviewState>;
@@ -115,17 +116,18 @@ const ExtrudePreviewMesh: React.FC<ExtrudePreviewMeshProps> = ({ preview }) => {
     const geoms: { geom: THREE.ExtrudeGeometry; edges: THREE.EdgesGeometry }[] = [];
 
     profiles.forEach((prof) => {
-      if (!prof.outerLoop || prof.outerLoop.length < 3) return;
+      const disc = discretizeSketchProfile(prof, 5);
+      if (!disc.outerLoop || disc.outerLoop.length < 3) return;
 
       const shape = new THREE.Shape();
-      prof.outerLoop.forEach((pt, idx) => {
+      disc.outerLoop.forEach((pt, idx) => {
         if (idx === 0) shape.moveTo(pt.x, pt.y);
         else shape.lineTo(pt.x, pt.y);
       });
       shape.closePath();
 
-      if (prof.innerLoops && prof.innerLoops.length > 0) {
-        prof.innerLoops.forEach((holePts) => {
+      if (disc.innerLoops && disc.innerLoops.length > 0) {
+        disc.innerLoops.forEach((holePts) => {
           if (holePts.length >= 3) {
             const hole = new THREE.Path();
             holePts.forEach((pt, idx) => {

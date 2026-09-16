@@ -28,6 +28,15 @@ export interface EntityGrip {
  * @returns 該圖元對應的夾點清單
  */
 export function getEntityGrips(entity: CADEntity2D): EntityGrip[] {
+  if (
+    entity.isProjected ||
+    entity.id.startsWith('virtual_') ||
+    entity.id.startsWith('proj_') ||
+    entity.id.includes('_proj_')
+  ) {
+    return [];
+  }
+
   const grips: EntityGrip[] = [];
 
   switch (entity.type) {

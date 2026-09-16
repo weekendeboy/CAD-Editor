@@ -122,11 +122,16 @@ export interface CADActions {
   toggleLayerVisibility: (layerId: string) => void;
   toggleLayerLock: (layerId: string) => void;
 
+  // 3D 實體背景投影邊線（提供 2D 草圖鎖點與投影幾何參考）
+  projectedEntities: CADEntity2D[];
+  setProjectedEntities: (entities: CADEntity2D[]) => void;
+
   // 視圖與工具控制
   setViewMode: (mode: '2D' | '3D') => void;
   setTool: (tool: CADTool) => void;
   setActiveSketch: (sketchId: string | null) => void;
   selectEntity: (id: string) => void;
+  setSelectedEntityIds: (ids: string[]) => void;
   clearSelection: () => void;
 
   // 2D 圖元編輯 Actions

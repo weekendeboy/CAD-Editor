@@ -50,6 +50,8 @@ export const Sketch3DRenderer: React.FC = () => {
         if (!entity.visible && entity.visible !== undefined) return;
 
         if (entity.type === 'line') {
+          // 若為當前旋轉預覽目標草圖，直線圖元交由 RevolvePreviewRenderer 提供 3D 互動選軸與高亮
+          if (isRevolveTarget) return;
           const line = entity as LineEntity;
           const p1 = mapPoint2DTo3D(line.start, plane);
           const p2 = mapPoint2DTo3D(line.end, plane);
