@@ -177,14 +177,24 @@ export class SolidEngine {
     return this.dispatch<MeshResult>('EXTRUDE_PROFILES', { profiles, depth });
   }
 
-  public async evaluateFeatureTree(operations: FeatureEvalOp[], dirtyFromIndex?: number, isPureRollback?: boolean): Promise<KernelResult> {
+  public async evaluateFeatureTree(
+    operations: FeatureEvalOp[],
+    dirtyOpIndex?: number | null,
+    isPureRollback?: boolean
+  ): Promise<KernelResult> {
     await this.init();
 
     // 【P3 核心】發送任務前，遞增事務版本號並綁定到此作用域
     this.currentRegenRevision++;
     const myRevision = this.currentRegenRevision;
 
-    const result = await this.dispatch<KernelResult>('EVALUATE_FEATURE_TREE', { operations, dirtyFromIndex, isPureRollback });
+    const opIdx = typeof dirtyOpIndex === 'number' ? dirtyOpIndex : null;
+    const result = await this.dispatch<KernelResult>('EVALUATE_FEATURE_TREE', {
+      operations,
+      dirtyOpIndex: opIdx,
+      dirtyFromIndex: opIdx, // 向下相容
+      isPureRollback: isPureRollback ?? (opIdx === null),
+    });
 
     // 【P3 核心】Worker 回傳後，檢查是否在運算期間有新的任務被觸發
     if (this.currentRegenRevision !== myRevision) {

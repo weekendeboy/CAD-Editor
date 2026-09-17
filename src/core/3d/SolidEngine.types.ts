@@ -1,5 +1,32 @@
 import type { CustomPlane, Point3D, SketchProfile } from '../../types/cad';
 import type { TopoReference } from './PersistentTopology.types';
+import type {
+  MeshSubshapeMapping,
+  RuntimeBRepFaceRef,
+  RuntimeBRepEdgeRef,
+  RuntimeBRepVertexRef,
+  FaceTriangleRange,
+  EdgeSegmentRange,
+  MeshSelection,
+  SubshapeResolutionStatus,
+  FaceResolutionResult,
+  EdgeResolutionResult,
+  VertexResolutionResult,
+} from './MeshSubshapeMapping.types';
+
+export type {
+  MeshSubshapeMapping,
+  RuntimeBRepFaceRef,
+  RuntimeBRepEdgeRef,
+  RuntimeBRepVertexRef,
+  FaceTriangleRange,
+  EdgeSegmentRange,
+  MeshSelection,
+  SubshapeResolutionStatus,
+  FaceResolutionResult,
+  EdgeResolutionResult,
+  VertexResolutionResult,
+};
 
 export interface KernelDiagnostic {
   level: 'info' | 'warning' | 'error';
@@ -25,7 +52,7 @@ export interface BodyResult {
   };
 }
 
-export interface FeatureResult {
+export interface FeatureEvaluationResult {
   featureId: string;
   success: boolean;
   createdBodyIds: string[];    // 此特徵新產生的實體 ID（例如長料生成新 Body）
@@ -33,15 +60,30 @@ export interface FeatureResult {
   diagnostics: KernelDiagnostic[];
   error: string | null;
   executionTimeMs: number;
+
+  /**
+   * 語意契約欄位 (Architecture Contract v1):
+   * Feature Evaluation Result 代表該特徵經 Kernel 運算後的產物與影響，
+   * 絕非也不等於當下整個零件的 Current Solid。
+   */
+  toolShape?: unknown;
+  resultBody?: unknown;
+  inputBody?: unknown;
+  featureDelta?: unknown;
+  topologyMap?: unknown;
 }
+
+/** 向下相容別名，確保既有介面與型別定義一致無痛運作 */
+export type FeatureResult = FeatureEvaluationResult;
 
 export interface KernelResult {
   taskId: string;
   success: boolean;
   finalMesh: MeshResult | null;
-  featureResults: Record<string, FeatureResult>; // 各特徵執行結果映射 (featureId -> FeatureResult)
-  bodies: BodyResult[];                          // 當前活躍的實體清單
+  featureResults: Record<string, FeatureEvaluationResult>; // 各特徵執行結果映射 (featureId -> FeatureEvaluationResult)
+  bodies: BodyResult[];                                   // 當前活躍的實體清單
   diagnostics: KernelDiagnostic[];
+  mapping?: MeshSubshapeMapping;                          // Render Mesh <-> B-Rep Topology Mapping
 }
 
 export interface FeatureEvalOp {
@@ -172,7 +214,14 @@ export interface ExtrudeProfilesPayload {
 export interface EvaluateFeatureTreePayload {
   taskId: string;
   operations: FeatureEvalOp[];
-  dirtyFromIndex?: number; // 增量重算優化：從哪一個特徵開始重新評估
+  /**
+   * 增量重算優化：FeatureEvalOp[] 中首個需要重新執行的 Operation Index。
+   * null 表示沒有需要重新執行的 Operation（例如純回退棒移動或僅末端草圖被編輯）。
+   */
+  dirtyOpIndex?: number | null;
+  /** @deprecated 請改用 dirtyOpIndex。保留以向下相容舊版呼叫端 */
+  dirtyFromIndex?: number | null;
+  isPureRollback?: boolean;
 }
 
 export interface ExportStepPayload {
@@ -216,6 +265,7 @@ export interface MeshResult {
   indices: Uint32Array | Uint16Array;
   edgeVertices?: Float32Array;
   edges?: Float32Array; // 保留以維持向下相容
+  mapping?: MeshSubshapeMapping; // Render Mesh <-> B-Rep Topology Mapping
   diagnostics?: KernelDiagnostic[]; // 接收 Worker 傳回的幾何建立失敗原因
 }
 

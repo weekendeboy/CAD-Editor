@@ -13,24 +13,83 @@ import {
   MeshResult,
   KernelDiagnostic,
   BodyResult,
+  FeatureEvaluationResult,
   FeatureResult,
   KernelResult,
 } from './SolidEngine.types';
+import type {
+  MeshSubshapeMapping,
+  RuntimeBRepFaceRef,
+  RuntimeBRepEdgeRef,
+  RuntimeBRepVertexRef,
+  FaceTriangleRange,
+  EdgeSegmentRange,
+} from './MeshSubshapeMapping.types';
+import {
+  FeatureEvaluationCache,
+  HistoryReplaySnapshot,
+} from './FeatureEvaluationCache';
+import {
+  extractTopologyMap,
+  resolveTopoReferenceToOCC,
+} from './TopologyExtractor';
 import type { SketchProfile, ProfileSegment } from '../../types/cad';
 
 let oc: any = null;
-let currentSolid: any = null; // Store the current solid compound for evaluation and export
-const featureSolidCache = new Map<string, any>(); // Feature-level solid cache for parametric regeneration
+let currentSolid: any = null; // Store the current solid compound for evaluation and export (History Replay Body State)
 
-interface FeatureSnapshot {
-  featureId: string;
-  shape: any; // TopoDS_Shape 實體快照
-  mesh: MeshResult; // 已離散化的網格快照
-  featureResult: FeatureResult;
-  topologyMap?: any;
-}
+/**
+ * 特徵評估結果快取 (Feature Evaluation Cache)
+ * 專門保存特徵自身的評估產物（如 Extrude 生成的獨立 toolShape）。
+ * 嚴禁將當前累積的整顆零件實體 (currentSolid) 誤存為特徵的 toolShape。
+ */
+const featureEvaluationCache = new FeatureEvaluationCache<any>();
 
-const snapshotStore = new Map<string, FeatureSnapshot>();
+/** 向下相容映射介面 (相容既有 cache 存取方法) */
+const featureSolidCache = {
+  get: (id: string) => featureEvaluationCache.getToolShape(id),
+  has: (id: string) => featureEvaluationCache.hasToolShape(id),
+  set: (id: string, shape: any) => {
+    const existing = featureEvaluationCache.get(id);
+    if (existing) {
+      existing.toolShape = shape;
+    } else {
+      featureEvaluationCache.set(id, {
+        featureId: id,
+        toolShape: shape,
+        result: {
+          featureId: id,
+          success: true,
+          createdBodyIds: ['main-body'],
+          modifiedBodyIds: [],
+          diagnostics: [],
+          error: null,
+          executionTimeMs: 0,
+        },
+      });
+    }
+  },
+  delete: (id: string) => {
+    return featureEvaluationCache.delete(id, (s) => safeDelete(s));
+  },
+  clear: () => {
+    featureEvaluationCache.clear((s) => safeDelete(s));
+  },
+  entries: function* () {
+    for (const [id, entry] of featureEvaluationCache.entries()) {
+      if (entry.toolShape) {
+        yield [id, entry.toolShape] as [string, any];
+      }
+    }
+  },
+};
+
+/**
+ * 歷史回放快照儲存 (History Replay Snapshot Store)
+ * 專門用於增量重算與回退優化 (Rollback / Incremental Replay)。
+ * 保存整顆零件在此步驟後的累計 currentSolid 快照。
+ */
+const snapshotStore = new Map<string, HistoryReplaySnapshot<any>>();
 
 // Set to track WASM pointers deleted in the current task session to prevent double-delete crashes
 const deletedPointers = new Set<number>();
@@ -66,7 +125,7 @@ function safeDelete(obj: any): void {
  * 【P4 架構修復】在寫入快取時，強制建立一份深拷貝的 Shape。
  * 保證即使上層管線中途刪除了 currentSolid，快取仍擁有自己獨立的 C++ 實體記憶體指標。
  */
-function cacheShapeClone(featureId: string, sourceShape: any, occ: any, cacheMap: Map<string, any>) {
+function cacheShapeClone(featureId: string, sourceShape: any, occ: any, cacheMap: { set: (id: string, shape: any) => void }) {
   if (!sourceShape || sourceShape.IsNull()) return;
   const copyMaker = new occ.BRepBuilderAPI_Copy_2(sourceShape, true, false);
   const copy = copyMaker.Shape();
@@ -815,13 +874,32 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
   return compound;
 }
 
-function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
+function tessellateSolid(
+  solid: any,
+  occ: any,
+  options?: { bodyId?: string; generation?: number; featureId?: string }
+): ExtrudeProfileResponseData {
+  const bodyId = options?.bodyId || 'main-body';
+  const generation = options?.generation ?? 1;
+
   if (!solid || solid.IsNull()) {
     return {
       success: false,
       vertices: new Float32Array(0),
       normals: new Float32Array(0),
       indices: new Uint32Array(0),
+      mapping: {
+        bodyId,
+        generation,
+        faces: [],
+        edges: [],
+        vertices: [],
+        triangleToFaceIndex: new Int32Array(0),
+        faceTriangleRanges: [],
+        meshEdgeToBRepEdgeIndex: new Int32Array(0),
+        edgeSegmentRanges: [],
+        meshVertexToBRepVertexIndex: new Int32Array(0),
+      },
     };
   }
 
@@ -832,16 +910,96 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
   const indices: number[] = [];
   let indexOffset = 0;
 
+  const brepFaces: RuntimeBRepFaceRef[] = [];
+  const triangleToFaceIndex: number[] = [];
+  const faceTriangleRanges: FaceTriangleRange[] = [];
+
   const explorer = new occ.TopExp_Explorer_2(
     solid,
     occ.TopAbs_ShapeEnum.TopAbs_FACE,
     occ.TopAbs_ShapeEnum.TopAbs_SHAPE
   );
 
+  let faceIndex = 0;
   while (explorer.More()) {
     const face = occ.TopoDS.Face_1(explorer.Current());
     const loc = new occ.TopLoc_Location_1();
     const triangulation = occ.BRep_Tool.Triangulation(face, loc);
+
+    let surfaceType: RuntimeBRepFaceRef['surfaceType'] = 'other';
+    let normal: { x: number; y: number; z: number } | undefined = undefined;
+    let centroid: { x: number; y: number; z: number } | undefined = undefined;
+    let area: number | undefined = undefined;
+
+    let adaptor: any = null;
+    try {
+      adaptor = new occ.BRepAdaptor_Surface_2(face, true);
+      const sType = adaptor.GetType();
+      if (sType === occ.GeomAbs_SurfaceType.GeomAbs_Plane) {
+        surfaceType = 'plane';
+        const planeObj = adaptor.Plane();
+        const ax3 = planeObj.Axis();
+        const dir = ax3.Direction();
+        normal = {
+          x: Math.round(dir.X() * 10000) / 10000,
+          y: Math.round(dir.Y() * 10000) / 10000,
+          z: Math.round(dir.Z() * 10000) / 10000,
+        };
+        safeDelete(dir);
+        safeDelete(ax3);
+        safeDelete(planeObj);
+      } else if (sType === occ.GeomAbs_SurfaceType.GeomAbs_Cylinder) {
+        surfaceType = 'cylinder';
+      } else if (sType === occ.GeomAbs_SurfaceType.GeomAbs_Cone) {
+        surfaceType = 'cone';
+      } else if (sType === occ.GeomAbs_SurfaceType.GeomAbs_Sphere) {
+        surfaceType = 'sphere';
+      } else if (sType === occ.GeomAbs_SurfaceType.GeomAbs_Torus) {
+        surfaceType = 'torus';
+      } else if (
+        sType === occ.GeomAbs_SurfaceType.GeomAbs_BSplineSurface ||
+        sType === occ.GeomAbs_SurfaceType.GeomAbs_BezierSurface
+      ) {
+        surfaceType = 'bspline';
+      }
+    } catch (_) {
+      surfaceType = 'other';
+    } finally {
+      safeDelete(adaptor);
+    }
+
+    let gprops: any = null;
+    try {
+      gprops = new occ.GProp_GProps();
+      if (typeof occ.BRepGProp.SurfaceProperties_1 === 'function') {
+        occ.BRepGProp.SurfaceProperties_1(face, gprops);
+      } else if (typeof occ.BRepGProp.SurfaceProperties === 'function') {
+        occ.BRepGProp.SurfaceProperties(face, gprops);
+      }
+      area = gprops.Mass();
+      const cMass = gprops.CentreOfMass();
+      centroid = {
+        x: Math.round(cMass.X() * 10000) / 10000,
+        y: Math.round(cMass.Y() * 10000) / 10000,
+        z: Math.round(cMass.Z() * 10000) / 10000,
+      };
+      safeDelete(cMass);
+    } catch (_) {
+      // optional
+    } finally {
+      safeDelete(gprops);
+    }
+
+    const runtimeFaceRef: RuntimeBRepFaceRef = {
+      bodyId,
+      faceIndex,
+      runtimeId: `brep_face_${bodyId}_${faceIndex}`,
+      surfaceType,
+      normal,
+      area: typeof area === 'number' ? Math.round(area * 10000) / 10000 : undefined,
+      centroid,
+    };
+    brepFaces.push(runtimeFaceRef);
 
     if (!triangulation.IsNull()) {
       const tri = triangulation.get();
@@ -881,6 +1039,9 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
         : (face as any).Orientation();
       const reverse = faceOrientation === occ.TopAbs_Orientation.TopAbs_REVERSED;
 
+      const startTriangle = indices.length / 3;
+      const triangleCount = numTriangles;
+
       for (let i = 1; i <= numTriangles; i++) {
         const triangle = triangleArray.Value(i);
         const n1 = triangle.Value(1);
@@ -895,6 +1056,16 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
         safeDelete(triangle);
       }
 
+      faceTriangleRanges.push({
+        faceIndex,
+        startTriangle,
+        triangleCount,
+      });
+
+      for (let t = 0; t < triangleCount; t++) {
+        triangleToFaceIndex.push(faceIndex);
+      }
+
       indexOffset += numNodes;
 
       safeDelete(nodeArray);
@@ -902,17 +1073,27 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
       if (normalArray) safeDelete(normalArray);
       safeDelete(triangulation);
     } else {
+      faceTriangleRanges.push({
+        faceIndex,
+        startTriangle: indices.length / 3,
+        triangleCount: 0,
+      });
       safeDelete(triangulation);
     }
 
     safeDelete(face);
     safeDelete(loc);
+    faceIndex++;
     explorer.Next();
   }
 
   safeDelete(explorer);
 
   const edges: number[] = [];
+  const brepEdges: RuntimeBRepEdgeRef[] = [];
+  const meshEdgeToBRepEdgeIndex: number[] = [];
+  const edgeSegmentRanges: EdgeSegmentRange[] = [];
+
   const edgeExplorer = new occ.TopExp_Explorer_2(
     solid,
     occ.TopAbs_ShapeEnum.TopAbs_EDGE,
@@ -920,6 +1101,7 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
   );
 
   const edgeSet = new Set<number>();
+  let edgeIndex = 0;
 
   while (edgeExplorer.More()) {
     const edge = occ.TopoDS.Edge_1(edgeExplorer.Current());
@@ -928,12 +1110,13 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
         ? edge.HashCode(0x7fffffff)
         : typeof edge.HashCode_1 === 'function'
         ? edge.HashCode_1(0x7fffffff)
-        : Math.random();
+        : edgeIndex;
 
     if (!edgeSet.has(hashCode)) {
       edgeSet.add(hashCode);
       const loc = new occ.TopLoc_Location_1();
       let extracted = false;
+      const startSegment = edges.length / 6;
 
       if (typeof occ.BRep_Tool.Polygon3D === 'function') {
         const poly = occ.BRep_Tool.Polygon3D(edge, loc);
@@ -991,6 +1174,90 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
         }
       }
 
+      const segmentCount = edges.length / 6 - startSegment;
+
+      let curveType: RuntimeBRepEdgeRef['curveType'] = 'other';
+      let curveAdaptor: any = null;
+      let direction: { x: number; y: number; z: number } | undefined = undefined;
+      try {
+        curveAdaptor = new occ.BRepAdaptor_Curve_2(edge);
+        const cType = curveAdaptor.GetType();
+        if (cType === occ.GeomAbs_CurveType.GeomAbs_Line) {
+          curveType = 'line';
+          const lineObj = curveAdaptor.Line();
+          const dir = lineObj.Direction();
+          direction = {
+            x: Math.round(dir.X() * 10000) / 10000,
+            y: Math.round(dir.Y() * 10000) / 10000,
+            z: Math.round(dir.Z() * 10000) / 10000,
+          };
+          safeDelete(dir);
+          safeDelete(lineObj);
+        } else if (cType === occ.GeomAbs_CurveType.GeomAbs_Circle) {
+          curveType = 'circle';
+        } else if (cType === occ.GeomAbs_CurveType.GeomAbs_Ellipse) {
+          curveType = 'ellipse';
+        } else if (
+          cType === occ.GeomAbs_CurveType.GeomAbs_BSplineCurve ||
+          cType === occ.GeomAbs_CurveType.GeomAbs_BezierCurve
+        ) {
+          curveType = 'bspline';
+        }
+      } catch (_) {
+        curveType = 'other';
+      } finally {
+        safeDelete(curveAdaptor);
+      }
+
+      let length: number | undefined = undefined;
+      try {
+        const gprops = new occ.GProp_GProps();
+        occ.BRepGProp.LinearProperties(edge, gprops);
+        length = gprops.Mass();
+        safeDelete(gprops);
+      } catch (_) {}
+
+      let startPoint: { x: number; y: number; z: number } | undefined = undefined;
+      let endPoint: { x: number; y: number; z: number } | undefined = undefined;
+      if (segmentCount > 0) {
+        const firstIdx = startSegment * 6;
+        startPoint = {
+          x: Math.round(edges[firstIdx] * 10000) / 10000,
+          y: Math.round(edges[firstIdx + 1] * 10000) / 10000,
+          z: Math.round(edges[firstIdx + 2] * 10000) / 10000,
+        };
+        const lastIdx = (startSegment + segmentCount - 1) * 6;
+        endPoint = {
+          x: Math.round(edges[lastIdx + 3] * 10000) / 10000,
+          y: Math.round(edges[lastIdx + 4] * 10000) / 10000,
+          z: Math.round(edges[lastIdx + 5] * 10000) / 10000,
+        };
+      }
+
+      const runtimeEdgeRef: RuntimeBRepEdgeRef = {
+        bodyId,
+        edgeIndex,
+        runtimeId: `brep_edge_${bodyId}_${edgeIndex}`,
+        curveType,
+        length: typeof length === 'number' ? Math.round(length * 10000) / 10000 : undefined,
+        direction,
+        startPoint,
+        endPoint,
+      };
+      brepEdges.push(runtimeEdgeRef);
+
+      if (segmentCount > 0) {
+        edgeSegmentRanges.push({
+          edgeIndex,
+          startSegment,
+          segmentCount,
+        });
+        for (let s = 0; s < segmentCount; s++) {
+          meshEdgeToBRepEdgeIndex.push(edgeIndex);
+        }
+      }
+
+      edgeIndex++;
       safeDelete(loc);
     }
     safeDelete(edge);
@@ -998,12 +1265,86 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
   }
 
   safeDelete(edgeExplorer);
+
+  // 遍歷實體角落 B-Rep 頂點
+  const brepVertices: RuntimeBRepVertexRef[] = [];
+  const meshVertexToBRepVertexIndex: number[] = [];
+
+  const vertexExplorer = new occ.TopExp_Explorer_2(
+    solid,
+    occ.TopAbs_ShapeEnum.TopAbs_VERTEX,
+    occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+  );
+  let vertexIndex = 0;
+  const vertexSet = new Set<number>();
+
+  while (vertexExplorer.More()) {
+    const vertex = occ.TopoDS.Vertex_1(vertexExplorer.Current());
+    const hashCode =
+      typeof vertex.HashCode === 'function'
+        ? vertex.HashCode(0x7fffffff)
+        : typeof vertex.HashCode_1 === 'function'
+        ? vertex.HashCode_1(0x7fffffff)
+        : vertexIndex;
+
+    if (!vertexSet.has(hashCode)) {
+      vertexSet.add(hashCode);
+      const pt = occ.BRep_Tool.Pnt(vertex);
+      brepVertices.push({
+        bodyId,
+        vertexIndex,
+        runtimeId: `brep_vertex_${bodyId}_${vertexIndex}`,
+        point: {
+          x: Math.round(pt.X() * 10000) / 10000,
+          y: Math.round(pt.Y() * 10000) / 10000,
+          z: Math.round(pt.Z() * 10000) / 10000,
+        },
+      });
+      safeDelete(pt);
+      vertexIndex++;
+    }
+    safeDelete(vertex);
+    vertexExplorer.Next();
+  }
+  safeDelete(vertexExplorer);
+
+  // 建立 Mesh 節點 (vertices) -> B-Rep 頂點映射 (若非角落頂點則為 -1)
+  const totalMeshNodes = vertices.length / 3;
+  for (let m = 0; m < totalMeshNodes; m++) {
+    const mx = vertices[m * 3];
+    const my = vertices[m * 3 + 1];
+    const mz = vertices[m * 3 + 2];
+    let matchedIdx = -1;
+    for (let b = 0; b < brepVertices.length; b++) {
+      const bp = brepVertices[b].point;
+      const d = Math.hypot(mx - bp.x, my - bp.y, mz - bp.z);
+      if (d < 0.05) {
+        matchedIdx = b;
+        break;
+      }
+    }
+    meshVertexToBRepVertexIndex.push(matchedIdx);
+  }
+
   safeDelete(mesher);
 
   const vArray = new Float32Array(vertices);
   const nArray = new Float32Array(normals);
   const iArray = indexOffset > 65535 ? new Uint32Array(indices) : new Uint16Array(indices);
   const eArray = new Float32Array(edges);
+
+  const mapping: MeshSubshapeMapping = {
+    bodyId,
+    generation,
+    faces: brepFaces,
+    edges: brepEdges,
+    vertices: brepVertices,
+    triangleToFaceIndex: new Int32Array(triangleToFaceIndex),
+    faceTriangleRanges,
+    meshEdgeToBRepEdgeIndex: new Int32Array(meshEdgeToBRepEdgeIndex),
+    edgeSegmentRanges,
+    meshVertexToBRepVertexIndex: new Int32Array(meshVertexToBRepVertexIndex),
+  };
 
   return {
     success: true,
@@ -1012,6 +1353,7 @@ function tessellateSolid(solid: any, occ: any): ExtrudeProfileResponseData {
     indices: iArray,
     edgeVertices: eArray,
     edges: eArray,
+    mapping,
   };
 }
 
@@ -1034,30 +1376,40 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         const occ = oc;
 
         const operations: FeatureEvalOp[] = req.payload?.operations || [];
-        const dirtyFromIndex: number = typeof req.payload?.dirtyFromIndex === 'number' ? req.payload.dirtyFromIndex : -1;
-        const isPureRollback: boolean = !!req.payload?.isPureRollback || dirtyFromIndex === -1;
+
+        // Architecture Contract v1:
+        // Worker 接收 dirtyOpIndex 作為 FeatureEvalOp[] 的 Operation Index。
+        // null 表示無髒操作（如純回退移動、或末端草圖被編輯）。
+        let dirtyOpIndex: number | null = null;
+        if (typeof req.payload?.dirtyOpIndex === 'number') {
+          dirtyOpIndex = req.payload.dirtyOpIndex;
+        } else if (typeof req.payload?.dirtyFromIndex === 'number' && req.payload.dirtyFromIndex >= 0) {
+          dirtyOpIndex = req.payload.dirtyFromIndex;
+        }
+
+        const isPureRollback: boolean = !!req.payload?.isPureRollback || dirtyOpIndex === null || dirtyOpIndex === -1;
 
         // 1. 純回退或完全命中快取檢查 (Pure Rollback / Full Cache Hit)
         if (isPureRollback && operations.length > 0) {
           const lastOp = operations[operations.length - 1];
           if (lastOp && lastOp.featureId && snapshotStore.has(lastOp.featureId)) {
             const cachedSnap = snapshotStore.get(lastOp.featureId)!;
-            if (cachedSnap.shape && !cachedSnap.shape.IsNull()) {
-              if (currentSolid && currentSolid !== cachedSnap.shape) {
+            if (cachedSnap.cumulativeBody && !cachedSnap.cumulativeBody.IsNull()) {
+              if (currentSolid && currentSolid !== cachedSnap.cumulativeBody) {
                 safeDelete(currentSolid);
               }
-              const copyMaker = new occ.BRepBuilderAPI_Copy_2(cachedSnap.shape, true, false);
+              const copyMaker = new occ.BRepBuilderAPI_Copy_2(cachedSnap.cumulativeBody, true, false);
               currentSolid = copyMaker.Shape();
               safeDelete(copyMaker);
 
-              const featureResults: Record<string, FeatureResult> = {};
+              const featureResults: Record<string, FeatureEvaluationResult> = {};
               const allDiagnostics: KernelDiagnostic[] = [];
               for (const op of operations) {
                 if (op.featureId && snapshotStore.has(op.featureId)) {
                   const snap = snapshotStore.get(op.featureId)!;
                   featureResults[op.featureId] = snap.featureResult;
-                  if (snap.mesh.diagnostics) {
-                    allDiagnostics.push(...snap.mesh.diagnostics);
+                  if (snap.cumulativeMesh.diagnostics) {
+                    allDiagnostics.push(...snap.cumulativeMesh.diagnostics);
                   }
                 }
               }
@@ -1089,18 +1441,29 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               ];
 
               // 【P4 核心修復】隔離 Mesh Buffer，切斷 Transferable 的 Detached Bug
-              const vClone = cachedSnap.mesh.vertices.slice();
-              const nClone = cachedSnap.mesh.normals.slice();
-              const iClone = cachedSnap.mesh.indices.slice();
-              const eClone = cachedSnap.mesh.edgeVertices ? cachedSnap.mesh.edgeVertices.slice() : undefined;
+              const vClone = cachedSnap.cumulativeMesh.vertices.slice();
+              const nClone = cachedSnap.cumulativeMesh.normals.slice();
+              const iClone = cachedSnap.cumulativeMesh.indices.slice();
+              const eClone = cachedSnap.cumulativeMesh.edgeVertices ? cachedSnap.cumulativeMesh.edgeVertices.slice() : undefined;
+
+              let safeMapping: MeshSubshapeMapping | undefined = undefined;
+              if (cachedSnap.cumulativeMesh.mapping) {
+                safeMapping = {
+                  ...cachedSnap.cumulativeMesh.mapping,
+                  triangleToFaceIndex: cachedSnap.cumulativeMesh.mapping.triangleToFaceIndex.slice(),
+                  meshEdgeToBRepEdgeIndex: cachedSnap.cumulativeMesh.mapping.meshEdgeToBRepEdgeIndex.slice(),
+                  meshVertexToBRepVertexIndex: cachedSnap.cumulativeMesh.mapping.meshVertexToBRepVertexIndex.slice(),
+                };
+              }
 
               const safeMeshResult: MeshResult = {
-                ...cachedSnap.mesh,
+                ...cachedSnap.cumulativeMesh,
                 vertices: vClone,
                 normals: nClone,
                 indices: iClone,
                 edgeVertices: eClone,
                 edges: eClone,
+                mapping: safeMapping,
               };
 
               const kernelResult: KernelResult = {
@@ -1110,6 +1473,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 featureResults,
                 bodies,
                 diagnostics: allDiagnostics,
+                mapping: safeMapping,
               };
 
               const transferBuffers: Transferable[] = [vClone.buffer, nClone.buffer, iClone.buffer];
@@ -1131,19 +1495,19 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
         // 2. 增量重算評估 (Incremental Evaluation)
         let evalStartIndex = 0;
-        if (dirtyFromIndex > 0 && dirtyFromIndex < operations.length) {
-          const prevOp = operations[dirtyFromIndex - 1];
+        if (dirtyOpIndex !== null && dirtyOpIndex > 0 && dirtyOpIndex < operations.length) {
+          const prevOp = operations[dirtyOpIndex - 1];
           if (prevOp && prevOp.featureId && snapshotStore.has(prevOp.featureId)) {
             const prevSnap = snapshotStore.get(prevOp.featureId)!;
-            if (prevSnap.shape && !prevSnap.shape.IsNull()) {
+            if (prevSnap.cumulativeBody && !prevSnap.cumulativeBody.IsNull()) {
               if (currentSolid) {
                 safeDelete(currentSolid);
                 currentSolid = null;
               }
-              const copyMaker = new occ.BRepBuilderAPI_Copy_2(prevSnap.shape, true, false);
+              const copyMaker = new occ.BRepBuilderAPI_Copy_2(prevSnap.cumulativeBody, true, false);
               currentSolid = copyMaker.Shape();
               safeDelete(copyMaker);
-              evalStartIndex = dirtyFromIndex;
+              evalStartIndex = dirtyOpIndex;
             }
           }
         }
@@ -1153,43 +1517,43 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             safeDelete(currentSolid);
             currentSolid = null;
           }
-          for (const [id, shape] of featureSolidCache.entries()) {
-            safeDelete(shape);
+          featureEvaluationCache.clear((shape) => safeDelete(shape));
+          for (const snap of snapshotStore.values()) {
+            if (snap.cumulativeBody) {
+              safeDelete(snap.cumulativeBody);
+            }
           }
           snapshotStore.clear();
-          featureSolidCache.clear();
         } else {
           for (let k = evalStartIndex; k < operations.length; k++) {
             const opId = operations[k].featureId;
             if (opId) {
               if (snapshotStore.has(opId)) {
                 const snap = snapshotStore.get(opId)!;
-                safeDelete(snap.shape);
+                if (snap.cumulativeBody) {
+                  safeDelete(snap.cumulativeBody);
+                }
                 snapshotStore.delete(opId);
               }
-              if (featureSolidCache.has(opId)) {
-                const shape = featureSolidCache.get(opId)!;
-                safeDelete(shape);
-                featureSolidCache.delete(opId);
-              }
+              featureEvaluationCache.delete(opId, (shape) => safeDelete(shape));
             }
           }
         }
 
         const allDiagnostics: KernelDiagnostic[] = [];
-        const featureResults: Record<string, FeatureResult> = {};
+        const featureResults: Record<string, FeatureEvaluationResult> = {};
 
         for (let i = 0; i < evalStartIndex; i++) {
           const op = operations[i];
           if (op.featureId && snapshotStore.has(op.featureId)) {
             const snap = snapshotStore.get(op.featureId)!;
             featureResults[op.featureId] = snap.featureResult;
-            if (snap.mesh.diagnostics) {
-              allDiagnostics.push(...snap.mesh.diagnostics);
+            if (snap.cumulativeMesh.diagnostics) {
+              allDiagnostics.push(...snap.cumulativeMesh.diagnostics);
             }
-            if (snap.shape && !snap.shape.IsNull()) {
-              cacheShapeClone(op.featureId, snap.shape, occ, featureSolidCache);
-            }
+            // 語意分離關鍵 (Architecture Contract v1):
+            // 嚴禁將整顆零件的累計實體快照 snap.cumulativeBody 覆蓋回 featureEvaluationCache！
+            // 前序未受影響特徵自身的獨立 toolShape 已在 featureEvaluationCache 中妥善保留。
           }
         }
 
@@ -1449,192 +1813,308 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               op.type === 'CIRCULAR_PATTERN' ||
               op.type === 'MIRROR_3D'
             ) {
-              let sourceSolid: any = null;
-              let shouldDeleteSourceSolid = false;
-              if (op.targetFeatureIds && op.targetFeatureIds.length > 0) {
-                const sources: any[] = [];
+              // Architecture Contract v1: Feature Result 語意隔離
+              // 嚴禁以快取中的全域累積實體 (currentSolid) 進行複製。
+              // 必須精準取得目標特徵的純粹幾何 toolShape，並依其原始性質 (JOIN / CUT) 套用布林運算。
+              if (!op.targetFeatureIds || op.targetFeatureIds.length === 0) {
+                featureDiag.push({
+                  level: 'error',
+                  message: `Pattern/Mirror 特徵 '${op.featureId || op.type}' 執行失敗：未指定目標特徵 (targetFeatureIds 為空)。`,
+                  featureId: op.featureId,
+                });
+                success = false;
+              } else {
+                interface TargetToolItem {
+                  id: string;
+                  toolShape: any;
+                  isCut: boolean;
+                }
+                const targetTools: TargetToolItem[] = [];
+
                 for (const tid of op.targetFeatureIds) {
-                  if (featureSolidCache.has(tid)) {
-                    sources.push(featureSolidCache.get(tid));
+                  const toolShape = featureEvaluationCache.getToolShape(tid);
+                  if (toolShape && !toolShape.IsNull()) {
+                    const targetOp = operations.find((o) => o.featureId === tid);
+                    const isCut = targetOp
+                      ? targetOp.operation === 'CUT' ||
+                        targetOp.type === 'CUT_EXTRUDE' ||
+                        targetOp.type === 'REVOLVE_CUT'
+                      : op.operation === 'CUT';
+                    targetTools.push({
+                      id: tid,
+                      toolShape,
+                      isCut,
+                    });
+                  } else {
+                    featureDiag.push({
+                      level: 'warning',
+                      message: `目標特徵 '${tid}' 無法在快取中找到有效的獨立 toolShape (可能為修飾特徵或尚未生成)。`,
+                      featureId: op.featureId,
+                    });
                   }
                 }
-                if (sources.length === 1) {
-                  sourceSolid = sources[0];
-                } else if (sources.length > 1) {
-                  const builder = new occ.BRep_Builder();
-                  const compound = new occ.TopoDS_Compound();
-                  builder.MakeCompound(compound);
-                  for (const s of sources) {
-                    builder.Add(compound, s);
-                  }
-                  safeDelete(builder);
-                  sourceSolid = compound;
-                  shouldDeleteSourceSolid = true;
-                }
-              }
-              if (!sourceSolid || sourceSolid.IsNull()) {
-                sourceSolid = currentSolid;
-                shouldDeleteSourceSolid = false;
-              }
 
-              if (!sourceSolid || sourceSolid.IsNull()) {
-                throw new Error(`Pattern/Mirror feature '${op.featureId || op.type}' has no valid target solid.`);
-              }
+                if (targetTools.length === 0) {
+                  featureDiag.push({
+                    level: 'error',
+                    message: `Pattern/Mirror 特徵 '${op.featureId || op.type}' 執行失敗：所有目標特徵皆無可用的 toolShape。`,
+                    featureId: op.featureId,
+                  });
+                  success = false;
+                } else {
+                  if (op.type === 'LINEAR_PATTERN') {
+                    const pat = op.patternLinear;
+                    if (!pat) {
+                      throw new Error(`Linear Pattern requires patternLinear configuration`);
+                    }
+                    const dir1 = pat.dir1 || { x: 1, y: 0, z: 0 };
+                    const count1 = typeof pat.count1 === 'number' && pat.count1 > 0 ? pat.count1 : 1;
+                    const spacing1 = typeof pat.spacing1 === 'number' ? pat.spacing1 : 0;
 
-              if (op.type === 'LINEAR_PATTERN') {
-                const pat = op.patternLinear;
-                if (pat) {
-                  const dir1 = pat.dir1 || { x: 1, y: 0, z: 0 };
-                  const count1 = typeof pat.count1 === 'number' && pat.count1 > 0 ? pat.count1 : 1;
-                  const spacing1 = typeof pat.spacing1 === 'number' ? pat.spacing1 : 0;
+                    const dir2 = pat.dir2 || { x: 0, y: 1, z: 0 };
+                    const count2 = typeof pat.count2 === 'number' && pat.count2 > 0 ? pat.count2 : 1;
+                    const spacing2 = typeof pat.spacing2 === 'number' ? pat.spacing2 : 0;
 
-                  const dir2 = pat.dir2 || { x: 0, y: 1, z: 0 };
-                  const count2 = typeof pat.count2 === 'number' && pat.count2 > 0 ? pat.count2 : 1;
-                  const spacing2 = typeof pat.spacing2 === 'number' ? pat.spacing2 : 0;
+                    for (let pIdx = 0; pIdx < count1; pIdx++) {
+                      for (let qIdx = 0; qIdx < count2; qIdx++) {
+                        if (pIdx === 0 && qIdx === 0) continue;
 
-                  for (let pIdx = 0; pIdx < count1; pIdx++) {
-                    for (let qIdx = 0; qIdx < count2; qIdx++) {
-                      if (pIdx === 0 && qIdx === 0) continue;
+                        const dx = pIdx * spacing1 * dir1.x + qIdx * spacing2 * (dir2?.x || 0);
+                        const dy = pIdx * spacing1 * dir1.y + qIdx * spacing2 * (dir2?.y || 0);
+                        const dz = pIdx * spacing1 * dir1.z + qIdx * spacing2 * (dir2?.z || 0);
 
-                      const dx = pIdx * spacing1 * dir1.x + qIdx * spacing2 * (dir2?.x || 0);
-                      const dy = pIdx * spacing1 * dir1.y + qIdx * spacing2 * (dir2?.y || 0);
-                      const dz = pIdx * spacing1 * dir1.z + qIdx * spacing2 * (dir2?.z || 0);
+                        const vec = new occ.gp_Vec_4(dx, dy, dz);
+                        const trsf = new occ.gp_Trsf_1();
+                        setTranslationVec(trsf, vec);
 
-                      const vec = new occ.gp_Vec_4(dx, dy, dz);
-                      const trsf = new occ.gp_Trsf_1();
-                      setTranslationVec(trsf, vec);
+                        for (const tool of targetTools) {
+                          const xform = new occ.BRepBuilderAPI_Transform_2(tool.toolShape, trsf, true);
+                          const transformedCopy = xform.Shape();
 
-                      const xform = new occ.BRepBuilderAPI_Transform_2(sourceSolid, trsf, true);
-                      const transformedCopy = xform.Shape();
-
-                      if (currentSolid === null) {
-                        currentSolid = transformedCopy;
-                      } else {
-                        const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, transformedCopy);
-                        fuse.Build();
-                        if (fuse.IsDone()) {
-                          const newSolid = fuse.Shape();
-                          safeDelete(currentSolid);
-                          currentSolid = newSolid;
+                          if (tool.isCut) {
+                            if (currentSolid !== null) {
+                              const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, transformedCopy);
+                              cut.Build();
+                              if (cut.IsDone()) {
+                                const newSolid = cut.Shape();
+                                safeDelete(currentSolid);
+                                currentSolid = newSolid;
+                              } else {
+                                safeDelete(cut);
+                                safeDelete(transformedCopy);
+                                safeDelete(xform);
+                                safeDelete(trsf);
+                                safeDelete(vec);
+                                throw new Error(`Boolean Cut failed during linear pattern of ${tool.id}`);
+                              }
+                              safeDelete(cut);
+                            }
+                          } else {
+                            if (currentSolid === null) {
+                              currentSolid = transformedCopy;
+                            } else {
+                              const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, transformedCopy);
+                              fuse.Build();
+                              if (fuse.IsDone()) {
+                                const newSolid = fuse.Shape();
+                                safeDelete(currentSolid);
+                                currentSolid = newSolid;
+                              } else {
+                                safeDelete(fuse);
+                                safeDelete(transformedCopy);
+                                safeDelete(xform);
+                                safeDelete(trsf);
+                                safeDelete(vec);
+                                throw new Error(`Boolean Fuse failed during linear pattern of ${tool.id}`);
+                              }
+                              safeDelete(fuse);
+                            }
+                          }
+                          safeDelete(transformedCopy);
+                          safeDelete(xform);
                         }
-                        safeDelete(fuse);
+
+                        safeDelete(trsf);
+                        safeDelete(vec);
+                      }
+                    }
+                    success = true;
+                  } else if (op.type === 'CIRCULAR_PATTERN') {
+                    const pat = op.patternCircular;
+                    if (!pat) {
+                      throw new Error(`Circular Pattern requires patternCircular configuration`);
+                    }
+                    const axisOrigin = pat.axis?.origin || { x: 0, y: 0, z: 0 };
+                    const axisDirVec = pat.axis?.direction || { x: 0, y: 0, z: 1 };
+                    const count = typeof pat.count === 'number' && pat.count > 0 ? pat.count : 1;
+                    let totalAngle =
+                      typeof pat.totalAngle === 'number' && !isNaN(pat.totalAngle)
+                        ? pat.totalAngle
+                        : 2 * Math.PI;
+
+                    if (totalAngle > 2 * Math.PI + 0.1) {
+                      totalAngle = (totalAngle * Math.PI) / 180;
+                    }
+
+                    const equalSpacing = pat.equalSpacing !== false;
+
+                    let deltaTheta = 0;
+                    if (equalSpacing) {
+                      const isFullCircle = Math.abs(totalAngle - 2 * Math.PI) < 1e-4;
+                      if (isFullCircle) {
+                        deltaTheta = totalAngle / count;
+                      } else {
+                        deltaTheta = count > 1 ? totalAngle / (count - 1) : totalAngle;
+                      }
+                    } else {
+                      deltaTheta = totalAngle;
+                    }
+
+                    const axPnt = new occ.gp_Pnt_3(axisOrigin.x, axisOrigin.y, axisOrigin.z);
+                    const axDir = new occ.gp_Dir_4(axisDirVec.x, axisDirVec.y, axisDirVec.z);
+                    const rotAxis = new occ.gp_Ax1_2(axPnt, axDir);
+
+                    for (let k = 1; k < count; k++) {
+                      const angle = k * deltaTheta;
+                      const trsf = new occ.gp_Trsf_1();
+                      setRotationAx1(trsf, rotAxis, angle);
+
+                      for (const tool of targetTools) {
+                        const xform = new occ.BRepBuilderAPI_Transform_2(tool.toolShape, trsf, true);
+                        const transformedCopy = xform.Shape();
+
+                        if (tool.isCut) {
+                          if (currentSolid !== null) {
+                            const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, transformedCopy);
+                            cut.Build();
+                            if (cut.IsDone()) {
+                              const newSolid = cut.Shape();
+                              safeDelete(currentSolid);
+                              currentSolid = newSolid;
+                            } else {
+                              safeDelete(cut);
+                              safeDelete(transformedCopy);
+                              safeDelete(xform);
+                              safeDelete(trsf);
+                              safeDelete(rotAxis);
+                              safeDelete(axDir);
+                              safeDelete(axPnt);
+                              throw new Error(`Boolean Cut failed during circular pattern of ${tool.id}`);
+                            }
+                            safeDelete(cut);
+                          }
+                        } else {
+                          if (currentSolid === null) {
+                            currentSolid = transformedCopy;
+                          } else {
+                            const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, transformedCopy);
+                            fuse.Build();
+                            if (fuse.IsDone()) {
+                              const newSolid = fuse.Shape();
+                              safeDelete(currentSolid);
+                              currentSolid = newSolid;
+                            } else {
+                              safeDelete(fuse);
+                              safeDelete(transformedCopy);
+                              safeDelete(xform);
+                              safeDelete(trsf);
+                              safeDelete(rotAxis);
+                              safeDelete(axDir);
+                              safeDelete(axPnt);
+                              throw new Error(`Boolean Fuse failed during circular pattern of ${tool.id}`);
+                            }
+                            safeDelete(fuse);
+                          }
+                        }
                         safeDelete(transformedCopy);
+                        safeDelete(xform);
                       }
 
-                      safeDelete(xform);
                       safeDelete(trsf);
-                      safeDelete(vec);
                     }
-                  }
-                }
-              } else if (op.type === 'CIRCULAR_PATTERN') {
-                const pat = op.patternCircular;
-                if (pat) {
-                  const axisOrigin = pat.axis?.origin || { x: 0, y: 0, z: 0 };
-                  const axisDirVec = pat.axis?.direction || { x: 0, y: 0, z: 1 };
-                  const count = typeof pat.count === 'number' && pat.count > 0 ? pat.count : 1;
-                  let totalAngle =
-                    typeof pat.totalAngle === 'number' && !isNaN(pat.totalAngle)
-                      ? pat.totalAngle
-                      : 2 * Math.PI;
 
-                  if (totalAngle > 2 * Math.PI + 0.1) {
-                    totalAngle = (totalAngle * Math.PI) / 180;
-                  }
-
-                  const equalSpacing = pat.equalSpacing !== false;
-
-                  let deltaTheta = 0;
-                  if (equalSpacing) {
-                    const isFullCircle = Math.abs(totalAngle - 2 * Math.PI) < 1e-4;
-                    if (isFullCircle) {
-                      deltaTheta = totalAngle / count;
-                    } else {
-                      deltaTheta = count > 1 ? totalAngle / (count - 1) : totalAngle;
+                    safeDelete(rotAxis);
+                    safeDelete(axDir);
+                    safeDelete(axPnt);
+                    success = true;
+                  } else if (op.type === 'MIRROR_3D') {
+                    const plane = op.mirrorPlane;
+                    if (!plane) {
+                      throw new Error(`Mirror 3D requires mirrorPlane configuration`);
                     }
-                  } else {
-                    deltaTheta = totalAngle;
-                  }
+                    const origin = plane.origin || { x: 0, y: 0, z: 0 };
+                    const normal = plane.normal || { x: 0, y: 0, z: 1 };
 
-                  const axPnt = new occ.gp_Pnt_3(axisOrigin.x, axisOrigin.y, axisOrigin.z);
-                  const axDir = new occ.gp_Dir_4(axisDirVec.x, axisDirVec.y, axisDirVec.z);
-                  const rotAxis = new occ.gp_Ax1_2(axPnt, axDir);
+                    const pnt = new occ.gp_Pnt_3(origin.x, origin.y, origin.z);
+                    const dir = new occ.gp_Dir_4(normal.x, normal.y, normal.z);
+                    const ax2 = new occ.gp_Ax2_3(pnt, dir);
 
-                  for (let k = 1; k < count; k++) {
-                    const angle = k * deltaTheta;
                     const trsf = new occ.gp_Trsf_1();
-                    setRotationAx1(trsf, rotAxis, angle);
+                    setMirrorAx2(trsf, ax2);
 
-                    const xform = new occ.BRepBuilderAPI_Transform_2(sourceSolid, trsf, true);
-                    const transformedCopy = xform.Shape();
+                    for (const tool of targetTools) {
+                      const xform = new occ.BRepBuilderAPI_Transform_2(tool.toolShape, trsf, true);
+                      const mirroredCopy = xform.Shape();
 
-                    if (currentSolid === null) {
-                      currentSolid = transformedCopy;
-                    } else {
-                      const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, transformedCopy);
-                      fuse.Build();
-                      if (fuse.IsDone()) {
-                        const newSolid = fuse.Shape();
-                        safeDelete(currentSolid);
-                        currentSolid = newSolid;
+                      if (tool.isCut) {
+                        if (currentSolid !== null) {
+                          const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, mirroredCopy);
+                          cut.Build();
+                          if (cut.IsDone()) {
+                            const newSolid = cut.Shape();
+                            safeDelete(currentSolid);
+                            currentSolid = newSolid;
+                          } else {
+                            safeDelete(cut);
+                            safeDelete(mirroredCopy);
+                            safeDelete(xform);
+                            safeDelete(trsf);
+                            safeDelete(ax2);
+                            safeDelete(dir);
+                            safeDelete(pnt);
+                            throw new Error(`Boolean Cut failed during mirror of ${tool.id}`);
+                          }
+                          safeDelete(cut);
+                        }
+                      } else {
+                        if (currentSolid === null) {
+                          currentSolid = mirroredCopy;
+                        } else {
+                          const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, mirroredCopy);
+                          fuse.Build();
+                          if (fuse.IsDone()) {
+                            const newSolid = fuse.Shape();
+                            safeDelete(currentSolid);
+                            currentSolid = newSolid;
+                          } else {
+                            safeDelete(fuse);
+                            safeDelete(mirroredCopy);
+                            safeDelete(xform);
+                            safeDelete(trsf);
+                            safeDelete(ax2);
+                            safeDelete(dir);
+                            safeDelete(pnt);
+                            throw new Error(`Boolean Fuse failed during mirror of ${tool.id}`);
+                          }
+                          safeDelete(fuse);
+                        }
                       }
-                      safeDelete(fuse);
-                      safeDelete(transformedCopy);
+                      safeDelete(mirroredCopy);
+                      safeDelete(xform);
                     }
 
-                    safeDelete(xform);
                     safeDelete(trsf);
+                    safeDelete(ax2);
+                    safeDelete(dir);
+                    safeDelete(pnt);
+                    success = true;
                   }
-
-                  safeDelete(rotAxis);
-                  safeDelete(axDir);
-                  safeDelete(axPnt);
-                }
-              } else if (op.type === 'MIRROR_3D') {
-                const plane = op.mirrorPlane;
-                if (plane) {
-                  const origin = plane.origin || { x: 0, y: 0, z: 0 };
-                  const normal = plane.normal || { x: 0, y: 0, z: 1 };
-
-                  const pnt = new occ.gp_Pnt_3(origin.x, origin.y, origin.z);
-                  const dir = new occ.gp_Dir_4(normal.x, normal.y, normal.z);
-                  const ax2 = new occ.gp_Ax2_3(pnt, dir);
-
-                  const trsf = new occ.gp_Trsf_1();
-                  setMirrorAx2(trsf, ax2);
-
-                  const xform = new occ.BRepBuilderAPI_Transform_2(sourceSolid, trsf, true);
-                  const mirroredCopy = xform.Shape();
-
-                  if (currentSolid === null) {
-                    currentSolid = mirroredCopy;
-                  } else {
-                    const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, mirroredCopy);
-                    fuse.Build();
-                    if (fuse.IsDone()) {
-                      const newSolid = fuse.Shape();
-                      safeDelete(currentSolid);
-                      currentSolid = newSolid;
-                    }
-                    safeDelete(fuse);
-                    safeDelete(mirroredCopy);
-                  }
-
-                  safeDelete(xform);
-                  safeDelete(trsf);
-                  safeDelete(ax2);
-                  safeDelete(dir);
-                  safeDelete(pnt);
                 }
               }
 
-              if (shouldDeleteSourceSolid && sourceSolid) {
-                safeDelete(sourceSolid);
-              }
-
-              if (op.featureId && currentSolid) {
-                cacheShapeClone(op.featureId, currentSolid, occ, featureSolidCache);
-              }
+              // 語意邊界 (Architecture Contract v1):
+              // Pattern/Mirror 成果已布林融合至 currentSolid。
+              // 嚴禁將整顆零件的 currentSolid 當成該特徵的 toolShape 存入 featureEvaluationCache。
               success = true;
             } else if (op.type === 'FILLET_3D') {
               if (!currentSolid || currentSolid.IsNull()) {
@@ -1645,68 +2125,118 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 typeof op.fillet3D?.radius === 'number' && !isNaN(op.fillet3D.radius)
                   ? op.fillet3D.radius
                   : 1.0;
-              const mode = op.fillet3D?.edgeSelectionMode || 'all';
 
-              const fillet =
-                typeof occ.BRepFilletAPI_MakeFillet_1 === 'function'
-                  ? new occ.BRepFilletAPI_MakeFillet_1(currentSolid, 0)
-                  : new occ.BRepFilletAPI_MakeFillet(currentSolid, 0);
+              if (radius <= 0) {
+                throw new Error(`Fillet 3D radius must be greater than 0, got ${radius}`);
+              }
 
-              const exp = new occ.TopExp_Explorer_2(
+              const edgeRefs = op.fillet3D?.edgeRefs || [];
+              const prevOpId = i > 0 ? operations[i - 1].featureId : 'base';
+              const currentGeneration = i;
+              const topologyMap = extractTopologyMap(
                 currentSolid,
-                occ.TopAbs_ShapeEnum.TopAbs_EDGE,
-                occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+                occ,
+                prevOpId,
+                'main-body',
+                currentGeneration
               );
 
-              let addedCount = 0;
-              while (exp.More()) {
-                const edgeShape = exp.Current();
-                const edge = occ.TopoDS.Edge_1(edgeShape);
+              const validOccEdges: any[] = [];
+              let unresolvedCount = 0;
 
-                let shouldAdd = false;
-                if (mode === 'all') {
-                  shouldAdd = true;
-                } else {
-                  const dir = getEdgeDirection(edge, occ);
-                  if (mode === 'vertical' && dir === 'vertical') {
-                    shouldAdd = true;
-                  } else if (mode === 'horizontal' && dir === 'horizontal') {
-                    shouldAdd = true;
-                  }
-                }
-
-                if (shouldAdd) {
-                  if (typeof fillet.Add_2 === 'function') {
-                    fillet.Add_2(radius, edge);
+              for (const ref of edgeRefs) {
+                const res = resolveTopoReferenceToOCC(ref, topologyMap, occ, currentSolid);
+                if (
+                  res.status === 'resolved' &&
+                  res.occShape &&
+                  (typeof res.occShape.IsNull !== 'function' || !res.occShape.IsNull())
+                ) {
+                  if (occ.BRep_Tool.Degenerated(res.occShape)) {
+                    unresolvedCount++;
+                    featureDiag.push({
+                      level: 'warning',
+                      message: `邊線 ${ref.persistentId} 為退化邊，已跳過 Fillet 3D 運算。`,
+                      featureId: op.featureId,
+                    });
+                    safeDelete(res.occShape);
                   } else {
-                    fillet.Add(radius, edge);
+                    validOccEdges.push(res.occShape);
                   }
-                  addedCount++;
-                }
-
-                safeDelete(edge);
-                exp.Next();
-              }
-              safeDelete(exp);
-
-              if (addedCount > 0) {
-                fillet.Build();
-                if (fillet.IsDone()) {
-                  const newSolid = fillet.Shape();
-                  safeDelete(currentSolid);
-                  currentSolid = newSolid;
                 } else {
-                  safeDelete(fillet);
-                  throw new Error(`Fillet operation failed to build`);
+                  unresolvedCount++;
+                  featureDiag.push({
+                    level: 'warning',
+                    message:
+                      res.error ||
+                      `邊線拓撲參照 ${ref.persistentId} 解析失敗 (${res.status})。`,
+                    featureId: op.featureId,
+                  });
                 }
               }
 
-              safeDelete(fillet);
-
-              if (op.featureId && currentSolid) {
-                cacheShapeClone(op.featureId, currentSolid, occ, featureSolidCache);
+              if (unresolvedCount > 0 && edgeRefs.length > 0) {
+                featureDiag.push({
+                  level: 'warning',
+                  message: `有 ${unresolvedCount} 條邊線拓撲解析失敗或已遺失 (共 ${edgeRefs.length} 條邊)`,
+                  featureId: op.featureId,
+                });
               }
-              success = true;
+
+              if (validOccEdges.length === 0) {
+                featureDiag.push({
+                  level: 'error',
+                  message: `Fillet 3D 特徵執行失敗：沒有任何有效的邊線可供圓角運算 (已傳入 ${edgeRefs.length} 條參照)`,
+                  featureId: op.featureId,
+                });
+                success = false;
+              } else {
+                let fillet: any = null;
+                try {
+                  fillet =
+                    typeof occ.BRepFilletAPI_MakeFillet_1 === 'function'
+                      ? new occ.BRepFilletAPI_MakeFillet_1(currentSolid, 0)
+                      : new occ.BRepFilletAPI_MakeFillet(currentSolid, 0);
+
+                  for (const edge of validOccEdges) {
+                    if (typeof fillet.Add_2 === 'function') {
+                      fillet.Add_2(radius, edge);
+                    } else {
+                      fillet.Add(radius, edge);
+                    }
+                  }
+
+                  fillet.Build();
+                  if (fillet.IsDone()) {
+                    const newSolid = fillet.Shape();
+                    safeDelete(currentSolid);
+                    currentSolid = newSolid;
+                    success = true;
+                  } else {
+                    featureDiag.push({
+                      level: 'error',
+                      message: `Fillet operation failed to build shape with radius ${radius}`,
+                      featureId: op.featureId,
+                    });
+                    success = false;
+                  }
+                } catch (filletErr: any) {
+                  featureDiag.push({
+                    level: 'error',
+                    message: `Fillet operation threw error: ${filletErr?.message || filletErr}`,
+                    featureId: op.featureId,
+                  });
+                  success = false;
+                } finally {
+                  for (const edge of validOccEdges) {
+                    safeDelete(edge);
+                  }
+                  safeDelete(fillet);
+                }
+              }
+
+              // 語意邊界 (Architecture Contract v1):
+              // Fillet 為修飾特徵，成果已反映於 currentSolid。
+              // 嚴禁將整顆零件的 currentSolid 當成該特徵的 toolShape 存入 featureEvaluationCache。
             } else if (op.type === 'CHAMFER_3D') {
               if (!currentSolid || currentSolid.IsNull()) {
                 throw new Error(`Chamfer 3D requires an existing base solid`);
@@ -1716,68 +2246,118 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 typeof op.chamfer3D?.distance === 'number' && !isNaN(op.chamfer3D.distance)
                   ? op.chamfer3D.distance
                   : 1.0;
-              const mode = op.chamfer3D?.edgeSelectionMode || 'all';
 
-              const chamfer =
-                typeof occ.BRepFilletAPI_MakeChamfer_1 === 'function'
-                  ? new occ.BRepFilletAPI_MakeChamfer_1(currentSolid)
-                  : new occ.BRepFilletAPI_MakeChamfer(currentSolid);
+              if (distance <= 0) {
+                throw new Error(`Chamfer 3D distance must be greater than 0, got ${distance}`);
+              }
 
-              const exp = new occ.TopExp_Explorer_2(
+              const edgeRefs = op.chamfer3D?.edgeRefs || [];
+              const prevOpId = i > 0 ? operations[i - 1].featureId : 'base';
+              const currentGeneration = i;
+              const topologyMap = extractTopologyMap(
                 currentSolid,
-                occ.TopAbs_ShapeEnum.TopAbs_EDGE,
-                occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+                occ,
+                prevOpId,
+                'main-body',
+                currentGeneration
               );
 
-              let addedCount = 0;
-              while (exp.More()) {
-                const edgeShape = exp.Current();
-                const edge = occ.TopoDS.Edge_1(edgeShape);
+              const validOccEdges: any[] = [];
+              let unresolvedCount = 0;
 
-                let shouldAdd = false;
-                if (mode === 'all') {
-                  shouldAdd = true;
-                } else {
-                  const dir = getEdgeDirection(edge, occ);
-                  if (mode === 'vertical' && dir === 'vertical') {
-                    shouldAdd = true;
-                  } else if (mode === 'horizontal' && dir === 'horizontal') {
-                    shouldAdd = true;
-                  }
-                }
-
-                if (shouldAdd) {
-                  if (typeof chamfer.Add_2 === 'function') {
-                    chamfer.Add_2(distance, edge);
+              for (const ref of edgeRefs) {
+                const res = resolveTopoReferenceToOCC(ref, topologyMap, occ, currentSolid);
+                if (
+                  res.status === 'resolved' &&
+                  res.occShape &&
+                  (typeof res.occShape.IsNull !== 'function' || !res.occShape.IsNull())
+                ) {
+                  if (occ.BRep_Tool.Degenerated(res.occShape)) {
+                    unresolvedCount++;
+                    featureDiag.push({
+                      level: 'warning',
+                      message: `邊線 ${ref.persistentId} 為退化邊，已跳過 Chamfer 3D 運算。`,
+                      featureId: op.featureId,
+                    });
+                    safeDelete(res.occShape);
                   } else {
-                    chamfer.Add(distance, edge);
+                    validOccEdges.push(res.occShape);
                   }
-                  addedCount++;
-                }
-
-                safeDelete(edge);
-                exp.Next();
-              }
-              safeDelete(exp);
-
-              if (addedCount > 0) {
-                chamfer.Build();
-                if (chamfer.IsDone()) {
-                  const newSolid = chamfer.Shape();
-                  safeDelete(currentSolid);
-                  currentSolid = newSolid;
                 } else {
-                  safeDelete(chamfer);
-                  throw new Error(`Chamfer operation failed to build`);
+                  unresolvedCount++;
+                  featureDiag.push({
+                    level: 'warning',
+                    message:
+                      res.error ||
+                      `邊線拓撲參照 ${ref.persistentId} 解析失敗 (${res.status})。`,
+                    featureId: op.featureId,
+                  });
                 }
               }
 
-              safeDelete(chamfer);
-
-              if (op.featureId && currentSolid) {
-                cacheShapeClone(op.featureId, currentSolid, occ, featureSolidCache);
+              if (unresolvedCount > 0 && edgeRefs.length > 0) {
+                featureDiag.push({
+                  level: 'warning',
+                  message: `有 ${unresolvedCount} 條邊線拓撲解析失敗或已遺失 (共 ${edgeRefs.length} 條邊)`,
+                  featureId: op.featureId,
+                });
               }
-              success = true;
+
+              if (validOccEdges.length === 0) {
+                featureDiag.push({
+                  level: 'error',
+                  message: `Chamfer 3D 特徵執行失敗：沒有任何有效的邊線可供倒角運算 (已傳入 ${edgeRefs.length} 條參照)`,
+                  featureId: op.featureId,
+                });
+                success = false;
+              } else {
+                let chamfer: any = null;
+                try {
+                  chamfer =
+                    typeof occ.BRepFilletAPI_MakeChamfer_1 === 'function'
+                      ? new occ.BRepFilletAPI_MakeChamfer_1(currentSolid)
+                      : new occ.BRepFilletAPI_MakeChamfer(currentSolid);
+
+                  for (const edge of validOccEdges) {
+                    if (typeof chamfer.Add_2 === 'function') {
+                      chamfer.Add_2(distance, edge);
+                    } else {
+                      chamfer.Add(distance, edge);
+                    }
+                  }
+
+                  chamfer.Build();
+                  if (chamfer.IsDone()) {
+                    const newSolid = chamfer.Shape();
+                    safeDelete(currentSolid);
+                    currentSolid = newSolid;
+                    success = true;
+                  } else {
+                    featureDiag.push({
+                      level: 'error',
+                      message: `Chamfer operation failed to build shape with distance ${distance}`,
+                      featureId: op.featureId,
+                    });
+                    success = false;
+                  }
+                } catch (chamferErr: any) {
+                  featureDiag.push({
+                    level: 'error',
+                    message: `Chamfer operation threw error: ${chamferErr?.message || chamferErr}`,
+                    featureId: op.featureId,
+                  });
+                  success = false;
+                } finally {
+                  for (const edge of validOccEdges) {
+                    safeDelete(edge);
+                  }
+                  safeDelete(chamfer);
+                }
+              }
+
+              // 語意邊界 (Architecture Contract v1):
+              // Chamfer 為修飾特徵，成果已反映於 currentSolid。
+              // 嚴禁將整顆零件的 currentSolid 當成該特徵的 toolShape 存入 featureEvaluationCache。
             } else if (op.type === 'SHELL_3D') {
               if (!currentSolid || currentSolid.IsNull()) {
                 throw new Error(`Shell 3D requires an existing base solid`);
@@ -1786,134 +2366,161 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               const rawThickness =
                 typeof op.shell3D?.thickness === 'number' && !isNaN(op.shell3D.thickness)
                   ? op.shell3D.thickness
-                  : 1.0;
+                  : 1.5;
+              if (rawThickness <= 0) {
+                throw new Error(`Shell 3D thickness must be greater than 0, got ${rawThickness}`);
+              }
               const isInside = op.shell3D?.direction !== 'outside';
               const offset = isInside ? -Math.abs(rawThickness) : Math.abs(rawThickness);
 
-              const closingFaces = new occ.TopTools_ListOfShape_1();
-
-              const expFace = new occ.TopExp_Explorer_2(
+              const removedFaceRefs = op.shell3D?.removedFaceRefs || [];
+              const prevOpId = i > 0 ? operations[i - 1].featureId : 'base';
+              const currentGeneration = i;
+              const topologyMap = extractTopologyMap(
                 currentSolid,
-                occ.TopAbs_ShapeEnum.TopAbs_FACE,
-                occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+                occ,
+                prevOpId,
+                'main-body',
+                currentGeneration
               );
 
-              let highestFace: any = null;
-              let maxZ = -Infinity;
+              const validOccFaces: any[] = [];
+              let unresolvedCount = 0;
 
-              while (expFace.More()) {
-                const faceShape = expFace.Current();
-                const face = occ.TopoDS.Face_1(faceShape);
-
-                const vExp = new occ.TopExp_Explorer_2(
-                  face,
-                  occ.TopAbs_ShapeEnum.TopAbs_VERTEX,
-                  occ.TopAbs_ShapeEnum.TopAbs_SHAPE
-                );
-
-                let zSum = 0;
-                let vCount = 0;
-                while (vExp.More()) {
-                  const v = occ.TopoDS.Vertex_1(vExp.Current());
-                  const pnt = occ.BRep_Tool.Pnt(v);
-                  zSum += pnt.Z();
-                  vCount++;
-                  safeDelete(pnt);
-                  safeDelete(v);
-                  vExp.Next();
-                }
-                safeDelete(vExp);
-
-                const avgZ = vCount > 0 ? zSum / vCount : 0;
-                if (avgZ > maxZ) {
-                  maxZ = avgZ;
-                  if (highestFace) {
-                    safeDelete(highestFace);
-                  }
-                  highestFace = face;
+              for (const ref of removedFaceRefs) {
+                const res = resolveTopoReferenceToOCC(ref, topologyMap, occ, currentSolid);
+                if (
+                  res.status === 'resolved' &&
+                  res.occShape &&
+                  (typeof res.occShape.IsNull !== 'function' || !res.occShape.IsNull())
+                ) {
+                  validOccFaces.push(res.occShape);
                 } else {
-                  safeDelete(face);
+                  unresolvedCount++;
+                  featureDiag.push({
+                    level: 'warning',
+                    message:
+                      res.error ||
+                      `表面拓撲參照 ${ref.persistentId} 解析失敗 (${res.status})。`,
+                    featureId: op.featureId,
+                  });
                 }
-
-                expFace.Next();
-              }
-              safeDelete(expFace);
-
-              if (highestFace) {
-                closingFaces.Append_1(highestFace);
-                safeDelete(highestFace);
               }
 
-              let hollow: any = null;
-              if (typeof occ.BRepOffsetAPI_MakeThickSolid_ByJoin === 'function') {
-                hollow = new occ.BRepOffsetAPI_MakeThickSolid_ByJoin(
-                  currentSolid,
-                  closingFaces,
-                  offset,
-                  1e-4,
-                  0,
-                  false,
-                  false,
-                  0,
-                  false
-                );
-              } else if (typeof occ.BRepOffsetAPI_MakeThickSolid_1 === 'function') {
-                hollow = new occ.BRepOffsetAPI_MakeThickSolid_1();
-                hollow.MakeThickSolidByJoin(
-                  currentSolid,
-                  closingFaces,
-                  offset,
-                  1e-4,
-                  0,
-                  false,
-                  false,
-                  0,
-                  false
-                );
-              } else if (typeof occ.BRepOffsetAPI_MakeThickSolid_2 === 'function') {
-                hollow = new occ.BRepOffsetAPI_MakeThickSolid_2(
-                  currentSolid,
-                  closingFaces,
-                  offset,
-                  1e-4
-                );
+              if (unresolvedCount > 0 && removedFaceRefs.length > 0) {
+                featureDiag.push({
+                  level: 'warning',
+                  message: `有 ${unresolvedCount} 個表面拓撲解析失敗或已遺失 (共 ${removedFaceRefs.length} 個表面)`,
+                  featureId: op.featureId,
+                });
+              }
+
+              if (removedFaceRefs.length > 0 && validOccFaces.length === 0) {
+                featureDiag.push({
+                  level: 'error',
+                  message: `Shell 3D 特徵執行失敗：指定移除之表面拓撲解析失敗，無有效表面可供薄殼運算 (已傳入 ${removedFaceRefs.length} 個參照)`,
+                  featureId: op.featureId,
+                });
+                success = false;
               } else {
-                hollow = new occ.BRepOffsetAPI_MakeThickSolid();
-                if (typeof hollow.MakeThickSolidByJoin === 'function') {
-                  hollow.MakeThickSolidByJoin(
-                    currentSolid,
-                    closingFaces,
-                    offset,
-                    1e-4,
-                    0,
-                    false,
-                    false,
-                    0,
-                    false
-                  );
+                const closingFaces = new occ.TopTools_ListOfShape_1();
+                for (const face of validOccFaces) {
+                  if (typeof closingFaces.Append_1 === 'function') {
+                    closingFaces.Append_1(face);
+                  } else {
+                    closingFaces.Append(face);
+                  }
                 }
-              }
 
-              if (hollow) {
-                hollow.Build();
-                if (hollow.IsDone()) {
-                  const newSolid = hollow.Shape();
-                  safeDelete(currentSolid);
-                  currentSolid = newSolid;
-                } else {
-                  safeDelete(hollow);
+                let hollow: any = null;
+                try {
+                  if (typeof occ.BRepOffsetAPI_MakeThickSolid_ByJoin === 'function') {
+                    hollow = new occ.BRepOffsetAPI_MakeThickSolid_ByJoin(
+                      currentSolid,
+                      closingFaces,
+                      offset,
+                      1e-4,
+                      0,
+                      false,
+                      false,
+                      0,
+                      false
+                    );
+                  } else if (typeof occ.BRepOffsetAPI_MakeThickSolid_1 === 'function') {
+                    hollow = new occ.BRepOffsetAPI_MakeThickSolid_1();
+                    hollow.MakeThickSolidByJoin(
+                      currentSolid,
+                      closingFaces,
+                      offset,
+                      1e-4,
+                      0,
+                      false,
+                      false,
+                      0,
+                      false
+                    );
+                  } else if (typeof occ.BRepOffsetAPI_MakeThickSolid_2 === 'function') {
+                    hollow = new occ.BRepOffsetAPI_MakeThickSolid_2(
+                      currentSolid,
+                      closingFaces,
+                      offset,
+                      1e-4
+                    );
+                  } else {
+                    hollow = new occ.BRepOffsetAPI_MakeThickSolid();
+                    if (typeof hollow.MakeThickSolidByJoin === 'function') {
+                      hollow.MakeThickSolidByJoin(
+                        currentSolid,
+                        closingFaces,
+                        offset,
+                        1e-4,
+                        0,
+                        false,
+                        false,
+                        0,
+                        false
+                      );
+                    }
+                  }
+
+                  if (hollow) {
+                    hollow.Build();
+                    if (hollow.IsDone()) {
+                      const newSolid = hollow.Shape();
+                      safeDelete(currentSolid);
+                      currentSolid = newSolid;
+                      success = true;
+                    } else {
+                      featureDiag.push({
+                        level: 'error',
+                        message: `Shell operation failed to build thick solid with thickness ${rawThickness}`,
+                        featureId: op.featureId,
+                      });
+                      success = false;
+                    }
+                  }
+                } catch (shellErr: any) {
+                  featureDiag.push({
+                    level: 'error',
+                    message: `Shell operation threw error: ${shellErr?.message || shellErr}`,
+                    featureId: op.featureId,
+                  });
+                  success = false;
+                } finally {
+                  for (const face of validOccFaces) {
+                    safeDelete(face);
+                  }
                   safeDelete(closingFaces);
-                  throw new Error(`Shell operation failed to build thick solid`);
+                  safeDelete(hollow);
                 }
-                safeDelete(hollow);
               }
 
-              safeDelete(closingFaces);
-
-              if (op.featureId && currentSolid) {
-                cacheShapeClone(op.featureId, currentSolid, occ, featureSolidCache);
+              // 語意邊界 (Architecture Contract v1):
+              // Shell 為修飾特徵，成果已反映於 currentSolid。
+              // 嚴禁將整顆零件的 currentSolid 當成該特徵的 toolShape 存入 featureEvaluationCache。
+              if (success) {
+                hasAnySuccess = true;
               }
-              success = true;
             }
 
             if (success) {
@@ -1927,35 +2534,68 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               message: errorMessage,
               featureId: op.featureId,
             });
-            allDiagnostics.push(...featureDiag);
             success = false;
           }
 
-          const fRes: FeatureResult = {
+          if (featureDiag.length > 0) {
+            allDiagnostics.push(...featureDiag);
+          }
+
+          const isGenerative =
+            op.type === 'EXTRUDE' ||
+            op.type === 'CUT_EXTRUDE' ||
+            op.type === 'REVOLVE' ||
+            op.type === 'REVOLVE_CUT' ||
+            op.type === 'SWEEP' ||
+            op.type === 'LOFT';
+
+          const fRes: FeatureEvaluationResult = {
             featureId: op.featureId,
             success,
-            createdBodyIds: success ? ['main-body'] : [],
+            createdBodyIds: success && isGenerative && op.operation !== 'CUT' ? ['main-body'] : [],
             modifiedBodyIds: success ? ['main-body'] : [],
             diagnostics: featureDiag,
             error: errorMessage,
             executionTimeMs: performance.now() - tStart,
+            // 語意契約欄位 (Architecture Contract v1):
+            // 明確標記工具體與結果實體參照，嚴禁將整顆零件的 currentSolid 當作單一特徵自身產物
+            toolShape: isGenerative ? op.type : undefined,
+            resultBody: success ? 'main-body' : undefined,
           };
 
           if (op.featureId) {
             featureResults[op.featureId] = fRes;
 
-            // 存入快照快取 (snapshotStore)
+            // 更新 FeatureEvaluationCache 中該特徵的評估結果資訊 (維持 toolShape 與 fRes 一致)
+            const existingEntry = featureEvaluationCache.get(op.featureId);
+            if (existingEntry) {
+              existingEntry.result = fRes;
+            } else {
+              featureEvaluationCache.set(op.featureId, {
+                featureId: op.featureId,
+                toolShape: undefined,
+                result: fRes,
+              });
+            }
+
+            // 存入歷史回放實體快照 (snapshotStore)
+            // 保存「執行至此特徵後整顆零件的累計 currentSolid 快照」，專供歷史重播與回退優化使用
             if (success && currentSolid && !currentSolid.IsNull()) {
               const copyMaker = new occ.BRepBuilderAPI_Copy_2(currentSolid, true, false);
               const shapeCopy = copyMaker.Shape();
               safeDelete(copyMaker);
 
-              const meshCopy = tessellateSolid(shapeCopy, occ);
+              const meshCopy = tessellateSolid(shapeCopy, occ, {
+                bodyId: 'main-body',
+                generation: i + 1,
+                featureId: op.featureId,
+              });
 
               snapshotStore.set(op.featureId, {
                 featureId: op.featureId,
-                shape: shapeCopy,
-                mesh: meshCopy,
+                stepIndex: i,
+                cumulativeBody: shapeCopy,
+                cumulativeMesh: meshCopy,
                 featureResult: fRes,
               });
             }
@@ -1966,7 +2606,12 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         let bodies: BodyResult[] = [];
 
         if (currentSolid && !currentSolid.IsNull()) {
-          meshResult = tessellateSolid(currentSolid, occ);
+          const lastOp = operations.length > 0 ? operations[operations.length - 1] : null;
+          meshResult = tessellateSolid(currentSolid, occ, {
+            bodyId: 'main-body',
+            generation: operations.length,
+            featureId: lastOp ? lastOp.featureId : 'final',
+          });
           meshResult.diagnostics = allDiagnostics;
 
           let boundingBox: BodyResult['boundingBox'] = undefined;
@@ -2010,6 +2655,16 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         const iClone = meshResult.indices.slice();
         const eClone = meshResult.edgeVertices ? meshResult.edgeVertices.slice() : undefined;
 
+        let safeMapping: MeshSubshapeMapping | undefined = undefined;
+        if (meshResult.mapping) {
+          safeMapping = {
+            ...meshResult.mapping,
+            triangleToFaceIndex: meshResult.mapping.triangleToFaceIndex.slice(),
+            meshEdgeToBRepEdgeIndex: meshResult.mapping.meshEdgeToBRepEdgeIndex.slice(),
+            meshVertexToBRepVertexIndex: meshResult.mapping.meshVertexToBRepVertexIndex.slice(),
+          };
+        }
+
         const safeMeshResult: MeshResult = {
           ...meshResult,
           vertices: vClone,
@@ -2017,6 +2672,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           indices: iClone,
           edgeVertices: eClone,
           edges: eClone,
+          mapping: safeMapping,
         };
 
         const kernelResult: KernelResult = {
@@ -2026,6 +2682,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           featureResults,
           bodies,
           diagnostics: allDiagnostics,
+          mapping: safeMapping,
         };
 
         const transferBuffers: Transferable[] = [vClone.buffer, nClone.buffer, iClone.buffer];

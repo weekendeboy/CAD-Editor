@@ -106,12 +106,42 @@ export function computeSignatureSimilarity(
 
 /**
  * 解析單一拓撲參照體，將其對應至當前 B-Rep 拓撲地圖中的子形狀索引
+ * 嚴格遵循 Persistent Topology Resolution 語意，不進行 heuristic 猜測
  */
 export function resolveTopoReference(
   targetRef: TopoReference,
-  currentTopologyMap: TopologyMap,
-  minConfidenceThreshold: number = 0.65
+  currentTopologyMap: TopologyMap
 ): TopoResolutionResult {
+  // 1. validate bodyId
+  if (targetRef.bodyId !== currentTopologyMap.bodyId) {
+    return {
+      status: 'body_mismatch',
+      targetRef,
+      candidates: [],
+      kind: targetRef.subShapeType,
+      generation: currentTopologyMap.version || 1,
+      message: `Body mismatch: reference bodyId is ${targetRef.bodyId}, but map bodyId is ${currentTopologyMap.bodyId}.`,
+    };
+  }
+
+  // 2. validate generation
+  // targetRef.generation vs currentTopologyMap.version ? Wait, let's use the property that represents generation on map.
+  // Note: TopologyMap has a 'version' which we assume means generation here. Wait, extractTopologyMap doesn't put generation in TopologyMap root, let me check. 
+  // Wait, in extractTopologyMap, it is passed generation, but it sets version: Date.now(). Let me fix extractTopologyMap later or handle it here.
+  // For now, let's assume currentTopologyMap will have generation.
+  const mapGeneration = (currentTopologyMap as any).generation ?? 1; // We will update TopologyExtractor to include generation
+  if (targetRef.generation !== mapGeneration) {
+    return {
+      status: 'stale_generation',
+      targetRef,
+      candidates: [],
+      kind: targetRef.subShapeType,
+      generation: mapGeneration,
+      message: `Generation mismatch: reference generation is ${targetRef.generation}, but map generation is ${mapGeneration}.`,
+    };
+  }
+
+  // 3. lookup persistentId and verify kind
   let pool: TopoReference[] = [];
   if (targetRef.subShapeType === 'FACE') {
     pool = currentTopologyMap.faces;
@@ -120,75 +150,80 @@ export function resolveTopoReference(
   } else if (targetRef.subShapeType === 'VERTEX') {
     pool = currentTopologyMap.vertices;
   } else {
-    pool = [...currentTopologyMap.faces, ...currentTopologyMap.edges, ...currentTopologyMap.vertices];
+    return {
+      status: 'kind_mismatch',
+      targetRef,
+      candidates: [],
+      kind: targetRef.subShapeType,
+      generation: mapGeneration,
+      message: `Unsupported subShapeType: ${targetRef.subShapeType}`,
+    };
   }
 
   if (!pool || pool.length === 0) {
     return {
+      status: 'unresolved',
       targetRef,
-      resolvedIndex: -1,
-      confidence: 0,
-      status: 'lost',
+      candidates: [],
+      kind: targetRef.subShapeType,
+      generation: mapGeneration,
       message: 'Topology candidate pool is empty.',
     };
   }
 
-  // 第一階段：精確 ID 匹配 (Exact Match)
-  const exactIndex = pool.findIndex((c) => c.persistentId === targetRef.persistentId);
-  if (exactIndex !== -1) {
+  const exactCandidates = pool
+    .map((candidate, index) => ({ candidate, index }))
+    .filter(item => item.candidate.persistentId === targetRef.persistentId);
+
+  if (exactCandidates.length === 0) {
     return {
+      status: 'unresolved',
       targetRef,
-      resolvedIndex: exactIndex,
-      confidence: 1.0,
-      status: 'exact',
+      candidates: [],
+      kind: targetRef.subShapeType,
+      generation: mapGeneration,
+      message: `No candidate found with persistentId ${targetRef.persistentId}.`,
     };
   }
 
-  // 第二階段：啟發式幾何特徵評分 (Heuristic Scored Match)
-  const scoredCandidates = pool.map((candidate, index) => {
-    const score = computeSignatureSimilarity(targetRef.signature, candidate.signature, targetRef.subShapeType);
-    return { index, candidate, score };
+  // 4. verify signature / topology identity
+  const validCandidates = exactCandidates.filter(item => {
+    // If the system's signature check requires exact match or high confidence:
+    const score = computeSignatureSimilarity(targetRef.signature, item.candidate.signature, targetRef.subShapeType);
+    return score >= 0.95; // strict threshold for signature match
   });
 
-  scoredCandidates.sort((a, b) => b.score - a.score);
-
-  const top1 = scoredCandidates[0];
-  const top2 = scoredCandidates[1];
-
-  if (!top1 || top1.score < minConfidenceThreshold) {
+  if (validCandidates.length === 0) {
     return {
+      status: 'signature_mismatch',
       targetRef,
-      resolvedIndex: top1 ? top1.index : -1,
-      confidence: top1 ? top1.score : 0,
-      status: 'lost',
-      message: 'All candidates fell below the confidence threshold.',
+      candidates: exactCandidates.map(c => c.candidate),
+      kind: targetRef.subShapeType,
+      generation: mapGeneration,
+      message: `Candidates found by persistentId, but signature mismatched.`,
     };
   }
 
-  if (top1.score >= 0.95) {
+  // 5. 唯一候選？
+  if (validCandidates.length === 1) {
     return {
+      status: 'resolved',
       targetRef,
-      resolvedIndex: top1.index,
-      confidence: top1.score,
-      status: 'matched',
-    };
-  }
-
-  if (top2 && top1.score - top2.score <= 0.15 && top2.score >= minConfidenceThreshold) {
-    return {
-      targetRef,
-      resolvedIndex: top1.index,
-      confidence: top1.score,
-      status: 'ambiguous',
-      message: `Ambiguous match: top score (${top1.score.toFixed(2)}) is close to second score (${top2.score.toFixed(2)}).`,
+      candidates: validCandidates.map(c => c.candidate),
+      resolvedPersistentId: validCandidates[0].candidate.persistentId,
+      resolvedIndex: validCandidates[0].index,
+      kind: targetRef.subShapeType,
+      generation: mapGeneration,
     };
   }
 
   return {
+    status: 'ambiguous',
     targetRef,
-    resolvedIndex: top1.index,
-    confidence: top1.score,
-    status: 'matched',
+    candidates: validCandidates.map(c => c.candidate),
+    kind: targetRef.subShapeType,
+    generation: mapGeneration,
+    message: `Multiple candidates (${validCandidates.length}) found for persistentId ${targetRef.persistentId}.`,
   };
 }
 

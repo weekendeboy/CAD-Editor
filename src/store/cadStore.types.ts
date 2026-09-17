@@ -5,6 +5,9 @@ import {
   BodyResult,
   FeatureResult,
   MeshResult,
+  RuntimeBRepFaceRef,
+  MeshSubshapeMapping,
+  MeshSelection,
 } from '../core/3d/SolidEngine.types';
 
 export interface ExtrudePreviewState {
@@ -85,7 +88,15 @@ export interface CADActions {
   toggleFeatureVisibility: (featureId: string) => void;
   createSketchOnPlane: (planeId: string) => string; // 依附於指定基準面建立新草圖，回傳草圖 ID 並設為 activeSketchId
   createSketchOnFacePlane: (plane: CustomPlane) => string; // 依附於實體表面建立新草圖
-  setSelectedFaceInfo: (face: { point: Point3D; normal: Point3D } | null) => void;
+  setSelectedFaceInfo: (
+    face: {
+      point: Point3D;
+      normal: Point3D;
+      triangleIndex?: number;
+      faceRef?: RuntimeBRepFaceRef;
+    } | null
+  ) => void;
+  setSelectedMeshSelection: (selection: MeshSelection | null) => void;
 
   // 3D 特徵管理
   addExtrudeFeature: (feature: Omit<ExtrudeFeature, 'id' | 'type'>) => void;
@@ -207,7 +218,13 @@ export interface CADState extends CADActions {
   activeSketchId: string | null;
   selectedEntityIds: string[];
   selectedFeatureId: string | null;
-  selectedFaceInfo: { point: Point3D; normal: Point3D } | null;
+  selectedFaceInfo: {
+    point: Point3D;
+    normal: Point3D;
+    triangleIndex?: number;
+    faceRef?: RuntimeBRepFaceRef;
+  } | null;
+  selectedMeshSelection: MeshSelection | null;
   osnapEnabled: boolean;
   orthoEnabled: boolean;
   showProfiles: boolean;

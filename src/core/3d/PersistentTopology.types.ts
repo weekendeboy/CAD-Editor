@@ -44,6 +44,7 @@ export interface TopoReference {
 
 export interface TopologyMap {
   bodyId: string;
+  generation: number;
   faces: TopoReference[];
   edges: TopoReference[];
   vertices: TopoReference[];
@@ -51,10 +52,22 @@ export interface TopologyMap {
   version: number;
 }
 
+export type ResolutionStatus = 
+  | 'resolved'
+  | 'ambiguous'
+  | 'unresolved'
+  | 'stale_generation'
+  | 'body_mismatch'
+  | 'kind_mismatch'
+  | 'signature_mismatch';
+
 export interface TopoResolutionResult {
+  status: ResolutionStatus;
   targetRef: TopoReference;
-  resolvedIndex: number; // 在當前 OCC B-Rep 中的 subshape 索引
-  confidence: number;    // 匹配信心度 (0.0 ~ 1.0)
-  status: 'exact' | 'matched' | 'ambiguous' | 'lost';
+  candidates: TopoReference[];
+  resolvedPersistentId?: string;
+  resolvedIndex?: number; // 在當前 OCC B-Rep 中的 subshape 索引
+  kind: TopoSubShapeType;
+  generation: number;
   message?: string;
 }

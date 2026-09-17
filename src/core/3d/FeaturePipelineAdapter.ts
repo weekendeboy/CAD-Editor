@@ -61,25 +61,57 @@ export function mapVector2DTo3D(vec: Point2D, plane: CustomPlane): Vector3D {
 }
 
 /**
- * 將特徵樹轉譯為 Worker 執行的標準作業清單 (FeatureEvalOp[])
+ * 編譯後的特徵執行計畫 (Architecture Contract v1)
  */
-export function buildFeatureEvalOps(
+export interface CompiledFeaturePlan {
+  /**
+   * 欲傳入 OCC Worker 的純粹幾何操作序列 (FeatureEvalOp[])
+   */
+  operations: FeatureEvalOp[];
+
+  /**
+   * History Index (CADDocument.featureTree[]) → Operation Index (FeatureEvalOp[])
+   * 若該 History Feature 不產生 Operation (如 SKETCH, DATUM_PLANE, 未定義輪廓等)，對應值為 null。
+   * 陣列長度嚴格等於 featureTree.length。
+   */
+  historyToOpIndex: Array<number | null>;
+
+  /**
+   * Feature ID → Operation Index (FeatureEvalOp[])
+   */
+  featureIdToOpIndex: Record<string, number>;
+
+  /**
+   * 第一個需要重新執行的 Operation Index。
+   * null 表示沒有需要執行的 3D Operation（如僅為回退棒移動、全命中快取、或僅末端草圖被編輯）。
+   */
+  dirtyOpIndex: number | null;
+}
+
+/**
+ * 將特徵樹編譯為結構化執行計畫 (CompiledFeaturePlan)
+ * 嚴格維護 History Index 與 Operation Index 邊界
+ */
+export function compileFeaturePlan(
   featureTree: CADFeature[],
   rollbackIndex: number,
-  planesMap: Record<string, CustomPlane> = {}
-): FeatureEvalOp[] {
+  planesMap: Record<string, CustomPlane> = {},
+  dirtyFromHistoryIndex?: number | null,
+  dirtyFeatureId?: string | null
+): CompiledFeaturePlan {
   if (!featureTree || !Array.isArray(featureTree) || featureTree.length === 0) {
-    return [];
+    return {
+      operations: [],
+      historyToOpIndex: [],
+      featureIdToOpIndex: {},
+      dirtyOpIndex: null,
+    };
   }
 
   const clampedIndex =
     typeof rollbackIndex === 'number'
       ? Math.max(0, Math.min(rollbackIndex, featureTree.length))
       : featureTree.length;
-
-  const validFeatures = featureTree
-    .slice(0, clampedIndex)
-    .filter((f): f is CADFeature => Boolean(f && !f.suppressed));
 
   const sketchMap = new Map<string, SketchFeature>();
   const planeCache = new Map<string, CustomPlane>();
@@ -99,8 +131,11 @@ export function buildFeatureEvalOps(
     }
   }
 
-  // 第一階段：基準面與草圖對照表建構
-  for (const feature of validFeatures) {
+  // 第一階段：基準面與草圖對照表建構（僅限 active features）
+  for (let h = 0; h < clampedIndex; h++) {
+    const feature = featureTree[h];
+    if (!feature || feature.suppressed) continue;
+
     try {
       switch (feature.type) {
         case 'DATUM_PLANE': {
@@ -132,9 +167,17 @@ export function buildFeatureEvalOps(
   }
 
   const ops: FeatureEvalOp[] = [];
+  const historyToOpIndex: Array<number | null> = new Array(featureTree.length).fill(null);
+  const featureIdToOpIndex: Record<string, number> = {};
 
-  // 第二階段：依序走訪特徵產生運算指令
-  for (const feature of validFeatures) {
+  // 第二階段：依序走訪特徵產生運算指令，並建立精確 Mapping
+  for (let h = 0; h < clampedIndex; h++) {
+    const feature = featureTree[h];
+    if (!feature || feature.suppressed) {
+      continue;
+    }
+
+    const prevOpsLen = ops.length;
     try {
       if (feature.type === 'EXTRUDE') {
         const extrudeFeature = feature as ExtrudeFeature;
@@ -470,7 +513,54 @@ export function buildFeatureEvalOps(
     } catch (err) {
       console.warn(`FeaturePipelineAdapter: Error processing feature ${feature.id} (${feature.type}):`, err);
     }
+
+    // 若此特徵成功產生 3D Operation
+    if (ops.length > prevOpsLen) {
+      const opIndex = prevOpsLen;
+      historyToOpIndex[h] = opIndex;
+      featureIdToOpIndex[feature.id] = opIndex;
+    }
   }
 
-  return ops;
+  // 第三階段：Architecture Contract v1 — 精確推導 dirtyOpIndex
+  let dirtyOpIndex: number | null = null;
+  if (typeof dirtyFromHistoryIndex === 'number' && dirtyFromHistoryIndex >= 0) {
+    for (let h = Math.max(0, dirtyFromHistoryIndex); h < clampedIndex; h++) {
+      const opIdx = historyToOpIndex[h];
+      if (opIdx !== null && opIdx !== undefined) {
+        dirtyOpIndex = opIdx;
+        break;
+      }
+    }
+  } else if (dirtyFeatureId) {
+    const dirtyH = featureTree.findIndex((f) => f.id === dirtyFeatureId);
+    if (dirtyH >= 0) {
+      for (let h = Math.max(0, dirtyH); h < clampedIndex; h++) {
+        const opIdx = historyToOpIndex[h];
+        if (opIdx !== null && opIdx !== undefined) {
+          dirtyOpIndex = opIdx;
+          break;
+        }
+      }
+    }
+  }
+
+  return {
+    operations: ops,
+    historyToOpIndex,
+    featureIdToOpIndex,
+    dirtyOpIndex,
+  };
+}
+
+/**
+ * 將特徵樹轉譯為 Worker 執行的標準作業清單 (FeatureEvalOp[])
+ * 向下相容函式：委派給 compileFeaturePlan 並取出 operations
+ */
+export function buildFeatureEvalOps(
+  featureTree: CADFeature[],
+  rollbackIndex: number,
+  planesMap: Record<string, CustomPlane> = {}
+): FeatureEvalOp[] {
+  return compileFeaturePlan(featureTree, rollbackIndex, planesMap).operations;
 }

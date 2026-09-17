@@ -5,7 +5,155 @@ import type {
   TopologyMap,
   Vector3D,
   BoundingBox3D,
+  TopoResolutionResult,
+  ResolutionStatus,
 } from './PersistentTopology.types';
+import { resolveTopoReference } from './TopologyMapper';
+
+export interface OCCSubShapeResolution {
+  status: ResolutionStatus;
+  resolution: TopoResolutionResult;
+  occShape?: any; // TopoDS_Shape / TopoDS_Edge (Worker-internal only!)
+  error?: string;
+}
+
+/**
+ * 結合拓撲映射解析與 OCC 子形狀提取 (Worker 內部專用)
+ */
+export function resolveTopoReferenceToOCC(
+  ref: TopoReference,
+  topologyMap: TopologyMap,
+  occ: any,
+  solid: any
+): OCCSubShapeResolution {
+  const resolution = resolveTopoReference(ref, topologyMap);
+  if (resolution.status !== 'resolved') {
+    return {
+      status: resolution.status,
+      resolution,
+      error: resolution.message || `Failed to resolve topology reference ${ref.persistentId} (status: ${resolution.status})`,
+    };
+  }
+
+  const occShape = resolveOCCSubShape(solid, occ, resolution);
+  const isNull =
+    !occShape ||
+    (typeof occShape.IsNull === 'function' && occShape.IsNull());
+  if (isNull) {
+    return {
+      status: 'unresolved',
+      resolution: {
+        ...resolution,
+        status: 'unresolved',
+        message: `Resolved index ${resolution.resolvedIndex} but failed to extract OCC subshape from solid.`,
+      },
+      error: `Failed to extract OCC subshape for ${ref.persistentId}`,
+    };
+  }
+
+  return {
+    status: 'resolved',
+    resolution,
+    occShape,
+  };
+}
+
+/**
+ * 將解析成功的 TopoResolutionResult 轉換為實際的 OCC TopoDS_Shape
+ * 警告：回傳的 OCC 物件只能在 Worker 中使用，且應注意記憶體管理
+ */
+export function resolveOCCSubShape(
+  shape: any,
+  occ: any,
+  resolution: TopoResolutionResult
+): any {
+  if (resolution.status !== 'resolved' || resolution.resolvedIndex === undefined) {
+    return null;
+  }
+
+  let shapeEnum: any;
+  if (resolution.kind === 'FACE') {
+    shapeEnum = occ.TopAbs_ShapeEnum.TopAbs_FACE;
+  } else if (resolution.kind === 'EDGE') {
+    shapeEnum = occ.TopAbs_ShapeEnum.TopAbs_EDGE;
+  } else if (resolution.kind === 'VERTEX') {
+    shapeEnum = occ.TopAbs_ShapeEnum.TopAbs_VERTEX;
+  } else {
+    return null;
+  }
+
+  let explorer: any = null;
+  const hashSet = new Set<number>();
+  let targetShape: any = null;
+
+  try {
+    explorer = new occ.TopExp_Explorer_2(
+      shape,
+      shapeEnum,
+      occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+    );
+
+    let index = 0;
+    while (explorer.More()) {
+      let currentSubShape: any = null;
+      let shouldSkip = false;
+      let hashCode = index;
+
+      if (resolution.kind === 'FACE') {
+        currentSubShape = occ.TopoDS.Face_1(explorer.Current());
+        // Face 萃取目前沒有 skip / hash check
+      } else if (resolution.kind === 'EDGE') {
+        currentSubShape = occ.TopoDS.Edge_1(explorer.Current());
+        if (occ.BRep_Tool.Degenerated(currentSubShape)) {
+          shouldSkip = true;
+        } else {
+          hashCode = typeof currentSubShape.HashCode === 'function'
+            ? currentSubShape.HashCode(0x7fffffff)
+            : typeof currentSubShape.HashCode_1 === 'function'
+            ? currentSubShape.HashCode_1(0x7fffffff)
+            : index;
+          if (hashSet.has(hashCode)) {
+            shouldSkip = true;
+          }
+        }
+      } else if (resolution.kind === 'VERTEX') {
+        currentSubShape = occ.TopoDS.Vertex_1(explorer.Current());
+        hashCode = typeof currentSubShape.HashCode === 'function'
+          ? currentSubShape.HashCode(0x7fffffff)
+          : typeof currentSubShape.HashCode_1 === 'function'
+          ? currentSubShape.HashCode_1(0x7fffffff)
+          : index;
+        if (hashSet.has(hashCode)) {
+          shouldSkip = true;
+        }
+      }
+
+      if (shouldSkip) {
+        safeDelete(currentSubShape);
+        explorer.Next();
+        continue;
+      }
+
+      hashSet.add(hashCode);
+
+      if (index === resolution.resolvedIndex) {
+        // We found the target. We need to create a copy of the wrapper or just return it.
+        // Wait, currentSubShape is the wrapper. We shouldn't delete it since we're returning it.
+        targetShape = currentSubShape;
+        break;
+      } else {
+        safeDelete(currentSubShape);
+      }
+
+      index++;
+      explorer.Next();
+    }
+  } finally {
+    safeDelete(explorer);
+  }
+
+  return targetShape;
+}
 
 /**
  * 數值四捨五入以消除浮點微震
@@ -424,6 +572,7 @@ export function extractTopologyMap(
 
   return {
     bodyId,
+    generation,
     faces,
     edges,
     vertices,

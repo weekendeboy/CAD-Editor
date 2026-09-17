@@ -17,7 +17,8 @@ export interface RegenPlan {
   brokenDependencies: Map<string, string[]>; // 遺失父依賴的特徵映射
   hasCycle: boolean;                        // 是否存在循環引用
   cycleNodes: string[];                     // 參與循環引用的特徵 ID 清單
-  dirtyFromIndex: number;                   // 首個需要重新評估的「歷史索引」（-1 表示無需重算）
+  dirtyFromHistoryIndex: number;            // 首個需要重新評估的「歷史索引」CADDocument.featureTree[] (-1 表示無需重算)
+  dirtyFromIndex: number;                   // 向下相容別名 (= dirtyFromHistoryIndex)
   isPureRollback: boolean;                  // 是否僅為回退棒移動（前序特徵完全乾淨且有效）
   reusableFeatureIds: string[];             // 可直接複用上一次快取結果的特徵 ID 清單
 }
@@ -136,10 +137,65 @@ export function validateFeatureDependencies(features: RuntimeCADFeature[]): Map<
 }
 
 /**
- * 從指定修改的特徵開始，利用 DAG 遞迴標記所有下游子特徵為髒 (isDirty = true)
+ * 判斷特徵是否為讀取/修改 3D Solid Body (B-Rep 母體) 的實體特徵。
+ * 基準面 (DATUM_PLANE) 與 2D 草圖 (SKETCH) 屬於幾何/參考圖元，不是 Body-modifying Feature。
  */
-export function markDownstreamDirty(features: RuntimeCADFeature[], modifiedFeatureId: string): RuntimeCADFeature[] {
+export function isBodyModifyingFeature(
+  feature: RuntimeCADFeature | CADFeature | { type: string } | null | undefined
+): boolean {
+  if (!feature || !feature.type) return false;
+  switch (feature.type) {
+    case 'EXTRUDE':
+    case 'CUT_EXTRUDE':
+    case 'REVOLVE':
+    case 'REVOLVE_CUT':
+    case 'FILLET_3D':
+    case 'CHAMFER_3D':
+    case 'SHELL_3D':
+    case 'LINEAR_PATTERN':
+    case 'CIRCULAR_PATTERN':
+    case 'MIRROR_3D':
+    case 'SWEEP':
+    case 'LOFT':
+      return true;
+    case 'SKETCH':
+    case 'DATUM_PLANE':
+    default:
+      return false;
+  }
+}
+
+/**
+ * 【P3 架構升級】Dual-Track Dirty Propagation (顯式 DAG 相依 + 隱式 3D Body 實體歷程相依)
+ * 
+ * 1. Explicit Dependency Track:
+ *    透過 feature.dependencies[] 沿著 DAG 向下游子特徵遞迴傳播 isDirty。
+ * 2. Implicit Body History Track:
+ *    在 Parametric CAD (Single-Body 歷程) 中，任何 3D Body-modifying Feature (如 Cut, Extrude)
+ *    一旦變更，將使該歷史索引之後所有讀取/修改該實體的後續 3D 特徵 (如 Fillet, Chamfer, Shell) 的實體狀態失效。
+ *    因此後續所有 Body-modifying Features 亦必須自動被標記為 isDirty。
+ * 3. 混合交互傳播：
+ *    受隱式實體歷程影響變髒的 3D 特徵，其下游顯式相依特徵 (例如依賴於倒角後面的後續草圖/參考) 亦會同步被標記為髒。
+ */
+export function markDownstreamDirty(
+  features: RuntimeCADFeature[],
+  modifiedFeatureId: string
+): RuntimeCADFeature[] {
+  if (!features || !Array.isArray(features) || features.length === 0) {
+    return [];
+  }
+
+  // 1. 建立快速查找表與 Explicit 相鄰表 (Parent -> Children)
+  const idToIndex = new Map<string, number>();
+  const idToFeature = new Map<string, RuntimeCADFeature>();
   const childrenMap = new Map<string, string[]>();
+
+  for (let i = 0; i < features.length; i++) {
+    const f = features[i];
+    idToIndex.set(f.id, i);
+    idToFeature.set(f.id, f);
+  }
+
   for (const f of features) {
     const deps = getDirectDependencies(f);
     for (const depId of deps) {
@@ -153,21 +209,65 @@ export function markDownstreamDirty(features: RuntimeCADFeature[], modifiedFeatu
   }
 
   const affectedIds = new Set<string>();
-  const queue: string[] = [modifiedFeatureId];
-  affectedIds.add(modifiedFeatureId);
+  const queue: string[] = [];
 
-  // BFS 遍歷所有受影響的子特徵
+  const markDirty = (id: string) => {
+    if (!affectedIds.has(id)) {
+      affectedIds.add(id);
+      queue.push(id);
+    }
+  };
+
+  // 種子節點 1: modifiedFeatureId (若傳入且存在於特徵清單中)
+  if (modifiedFeatureId && idToFeature.has(modifiedFeatureId)) {
+    markDirty(modifiedFeatureId);
+  }
+
+  // 種子節點 2: features 中原本已被標記為 isDirty 的特徵 (例如 updateFeature 或 broken dependency)
+  for (const f of features) {
+    if (f.isDirty) {
+      markDirty(f.id);
+    }
+  }
+
+  // 2. 雙軌傳播演算法 (O(N + E))
+  let earliestBodyIndex = Infinity;
+  let scannedFromIndex = Infinity;
+
   while (queue.length > 0) {
     const currId = queue.shift()!;
+    const currFeat = idToFeature.get(currId);
+    const currIdx = idToIndex.get(currId);
+
+    // 軌道 A: 顯式相依傳播 (Parent -> Children)
     const children = childrenMap.get(currId) || [];
     for (const childId of children) {
-      if (!affectedIds.has(childId)) {
-        affectedIds.add(childId);
-        queue.push(childId);
+      markDirty(childId);
+    }
+
+    // 若此髒特徵會修改/產出實體，記錄其在歷史順序中的最早位置
+    if (currFeat && isBodyModifyingFeature(currFeat) && currIdx !== undefined) {
+      if (currIdx < earliestBodyIndex) {
+        earliestBodyIndex = currIdx;
+      }
+    }
+
+    // 軌道 B: 隱式實體歷程傳播 (Single-Body Cumulative Solid Invalidation)
+    // 若發現了更早的受波及實體特徵，將其歷史後續所有實體修改特徵全部標記為髒
+    if (earliestBodyIndex < scannedFromIndex) {
+      const scanStart = earliestBodyIndex + 1;
+      const scanEnd = Math.min(scannedFromIndex, features.length);
+      scannedFromIndex = earliestBodyIndex;
+      for (let i = scanStart; i < scanEnd; i++) {
+        const nextFeat = features[i];
+        if (isBodyModifyingFeature(nextFeat)) {
+          markDirty(nextFeat.id);
+        }
       }
     }
   }
 
+  // 3. 回傳新狀態陣列，保證純函數與不可變性
   return features.map((f) => {
     if (affectedIds.has(f.id)) {
       return {
@@ -211,20 +311,22 @@ export function getRegenPlan(
     }
   }
 
-  let dirtyFromIndex = -1;
+  let dirtyFromHistoryIndex = -1;
   let isPureRollback = false;
   let reusableFeatureIds: string[] = [];
   let dirtyFeatures: RuntimeCADFeature[] = [];
 
   if (firstDirtyIdx === -1) {
     // 全數乾淨：純粹是把回退棒往上拉
-    dirtyFromIndex = -1;
+    dirtyFromHistoryIndex = -1;
     isPureRollback = true;
     reusableFeatureIds = evalSequence.map((f) => f.id);
     dirtyFeatures = [];
   } else {
     // 增量重算：從第一顆髒掉的特徵開始，後續「全部」都要重新 Evaluate
-    dirtyFromIndex = firstDirtyIdx;
+    const firstDirtyFeat = evalSequence[firstDirtyIdx];
+    // Architecture Contract: History Index 代表 CADDocument.featureTree[] 中的絕對索引
+    dirtyFromHistoryIndex = features.findIndex((f) => f.id === firstDirtyFeat.id);
     isPureRollback = false;
     reusableFeatureIds = evalSequence.slice(0, firstDirtyIdx).map((f) => f.id);
     dirtyFeatures = evalSequence.slice(firstDirtyIdx); 
@@ -236,7 +338,8 @@ export function getRegenPlan(
     brokenDependencies,
     hasCycle,
     cycleNodes,
-    dirtyFromIndex,
+    dirtyFromHistoryIndex,
+    dirtyFromIndex: dirtyFromHistoryIndex,
     isPureRollback,
     reusableFeatureIds,
   };

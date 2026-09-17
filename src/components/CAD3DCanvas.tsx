@@ -24,6 +24,8 @@ import {
 import { solidEngine } from '../core/3d/SolidEngine';
 import { buildFeatureEvalOps } from '../core/3d/FeaturePipelineAdapter';
 import { createPlaneFromFaceNormal } from '../core/3d/DatumPlaneEngine';
+import { resolveTriangleToFace } from '../core/3d/MeshSubshapeResolver';
+import type { RuntimeBRepFaceRef, MeshSubshapeMapping } from '../core/3d/SolidEngine.types';
 import { ExtrudePreviewRenderer } from './ExtrudePreviewRenderer';
 import { RevolvePreviewRenderer } from './RevolvePreviewRenderer';
 import { Sketch3DRenderer } from './Sketch3DRenderer';
@@ -261,6 +263,8 @@ const DatumPlaneMesh: React.FC<DatumPlaneMeshProps> = ({
 export interface SelectedFaceState {
   point: THREE.Vector3;
   normal: THREE.Vector3;
+  triangleIndex?: number;
+  faceRef?: RuntimeBRepFaceRef;
 }
 
 interface CumulativePartMeshProps {
@@ -276,6 +280,7 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect })
   const document = useCADStore((state) => state.document);
   const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
+  const [mapping, setMapping] = useState<MeshSubshapeMapping | null>(null);
 
   const featureTree = document?.featureTree ?? [];
   const rollbackIndex = document?.rollbackIndex ?? 0;
@@ -347,9 +352,12 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect })
             if (prev) prev.dispose();
             return null;
           });
+          setMapping(null);
           setLoading(false);
           return;
         }
+
+        setMapping(meshData.mapping || null);
 
         const geom = new THREE.BufferGeometry();
         geom.setAttribute('position', new THREE.BufferAttribute(meshData.vertices, 3));
@@ -420,7 +428,22 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect })
                   .clone()
                   .transformDirection(e.object.matrixWorld)
                   .normalize();
-                onFaceSelect({ point: hitPoint, normal: worldNormal });
+
+                const triangleIndex = e.faceIndex;
+                let faceRef: RuntimeBRepFaceRef | undefined = undefined;
+                if (typeof triangleIndex === 'number' && mapping) {
+                  const resolved = resolveTriangleToFace(mapping, triangleIndex);
+                  if (resolved.status === 'exact' && resolved.faceRef) {
+                    faceRef = resolved.faceRef;
+                  }
+                }
+
+                onFaceSelect({
+                  point: hitPoint,
+                  normal: worldNormal,
+                  triangleIndex,
+                  faceRef,
+                });
               }
             }}
           />
@@ -886,7 +909,17 @@ const CanvasContent: React.FC = () => {
           useCADStore.getState().setSelectedFaceInfo({
             point: { x: face.point.x, y: face.point.y, z: face.point.z },
             normal: { x: face.normal.x, y: face.normal.y, z: face.normal.z },
+            triangleIndex: face.triangleIndex,
+            faceRef: face.faceRef,
           });
+          if (face.faceRef && typeof face.triangleIndex === 'number') {
+            useCADStore.getState().setSelectedMeshSelection({
+              kind: 'face',
+              triangleIndex: face.triangleIndex,
+              faceRef: face.faceRef,
+              generation: 1,
+            });
+          }
         }}
       />
 
@@ -948,9 +981,14 @@ const CAD3DCanvas: React.FC = () => {
           >
             <div className="flex items-center gap-2 text-xs font-mono text-amber-300">
               <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse inline-block" />
-              <span className="font-semibold">已選取模型表面</span>
+              <span className="font-semibold">
+                {selectedFaceInfo.faceRef
+                  ? `B-Rep Face #${selectedFaceInfo.faceRef.faceIndex} (${selectedFaceInfo.faceRef.surfaceType || 'plane'})`
+                  : '已選取模型表面'}
+              </span>
               <span className="text-slate-400 hidden md:inline">
-                (法向量: [{selectedFaceInfo.normal.x.toFixed(2)}, {selectedFaceInfo.normal.y.toFixed(2)}, {selectedFaceInfo.normal.z.toFixed(2)}])
+                (法向量: [{selectedFaceInfo.normal.x.toFixed(2)}, {selectedFaceInfo.normal.y.toFixed(2)}, {selectedFaceInfo.normal.z.toFixed(2)}]
+                {typeof selectedFaceInfo.triangleIndex === 'number' && ` | Tri #${selectedFaceInfo.triangleIndex}`})
               </span>
             </div>
             <button
