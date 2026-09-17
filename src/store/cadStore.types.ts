@@ -41,6 +41,20 @@ export type OsnapMode =
 
 export type OsnapSettings = Record<OsnapMode, boolean>;
 
+export interface SketchSession {
+  isActive: boolean;
+  sketchId: string | null;
+  initialEntities: CADEntity2D[];
+  initialConstraints: Constraint[];
+  initialDimensions: any[];
+  initialProfiles: any[];
+  draftEntities: CADEntity2D[];
+  draftConstraints: Constraint[];
+  draftDimensions: any[];
+  draftProfiles: any[];
+  isDirty: boolean;
+}
+
 export type CADTool =
   | 'SELECT'
   | 'LINE'
@@ -151,6 +165,11 @@ export interface CADActions {
   selectEntity: (id: string) => void;
   setSelectedEntityIds: (ids: string[]) => void;
   clearSelection: () => void;
+
+  // 草圖編輯 Session 生命週期 (Sketch Session Lifecycle)
+  enterSketchSession: (sketchId: string) => void;
+  commitSketchSession: () => Promise<void>;
+  cancelSketchSession: () => void;
 
   // 2D 圖元編輯 Actions
   addEntity: (entity: CADEntity2D) => void;
@@ -272,6 +291,9 @@ export interface CADState extends CADActions {
   // 圖層狀態與管理
   activeLayerId: string;
   isLayerModalOpen: boolean;
+
+  // 草圖編輯 Session 狀態 (解耦 2D 與 3D 運算管線)
+  sketchSession: SketchSession;
 
   // 3D 實體背景投影邊線（提供 2D 草圖鎖點與投影幾何參考）
   projectedEntities: CADEntity2D[];

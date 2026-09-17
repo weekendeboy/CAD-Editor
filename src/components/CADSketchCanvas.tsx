@@ -125,6 +125,7 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
   const {
     currentTool,
     activeSketchId,
+    sketchSession,
     document,
     selectedEntityIds,
     osnapEnabled,
@@ -160,8 +161,14 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
     (id: string, e: React.MouseEvent) => {
       // 若當前正處於旋轉特徵對話框中或點選旋轉軸模式 (Pick Revolve Axis)
       if (revolvePreview?.isOpen || isPickingRevolveAxis) {
-        const activeSketch = document.featureTree?.find((f) => f.id === activeSketchId);
-        const clickedEntity = (activeSketch as any)?.entities?.find((ent: any) => ent.id === id);
+        const isSession =
+          sketchSession.isActive && sketchSession.sketchId === activeSketchId;
+        const activeEntities = isSession
+          ? sketchSession.draftEntities
+          : ((
+              document.featureTree?.find((f) => f.id === activeSketchId) as any
+            )?.entities || []);
+        const clickedEntity = activeEntities.find((ent: any) => ent.id === id);
         if (clickedEntity && clickedEntity.type === 'line') {
           e.stopPropagation();
           setRevolveAxisEntityId(id);
@@ -190,6 +197,7 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
       setIsPickingRevolveAxis,
       document.featureTree,
       activeSketchId,
+      sketchSession,
       setViewMode,
     ]
   );
@@ -433,10 +441,15 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
     if (e) {
       e.stopPropagation();
     }
-    const sketch = document.featureTree.find(
-      (f) => f.id === activeSketchId && f.type === 'SKETCH'
-    ) as SketchFeature | undefined;
-    const constraints = sketch?.constraints || [];
+    const isSession =
+      sketchSession.isActive && sketchSession.sketchId === activeSketchId;
+    const sketch = isSession
+      ? null
+      : (document.featureTree.find(
+          (f) => f.id === activeSketchId && f.type === 'SKETCH'
+        ) as SketchFeature | undefined);
+    const entities = isSession ? sketchSession.draftEntities : (sketch?.entities || []);
+    const constraints = isSession ? sketchSession.draftConstraints : (sketch?.constraints || []);
     const linkedConstraint = dim.constraintId ? constraints.find((c) => c.id === dim.constraintId) : undefined;
     
     let initialVal = 0;
@@ -449,7 +462,7 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
       } else {
         let r = 0;
         if (dim.entityIds && dim.entityIds.length > 0) {
-          const ent = sketch?.entities.find((e) => e.id === dim.entityIds![0]);
+          const ent = entities.find((e) => e.id === dim.entityIds![0]);
           if (ent && (ent.type === 'circle' || ent.type === 'arc')) {
             r = ent.radius;
           }
@@ -484,9 +497,9 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
       } else if (dim.points && dim.points.length >= 2) {
         let p1 = dim.points[0];
         let p2 = dim.points[1];
-        if (dim.entityIds && dim.entityIds.length >= 2 && sketch) {
-          const e1 = sketch.entities.find((e) => e.id === dim.entityIds![0]) || useCADStore.getState().projectedEntities.find((e) => e.id === dim.entityIds![0]);
-          const e2 = sketch.entities.find((e) => e.id === dim.entityIds![1]) || useCADStore.getState().projectedEntities.find((e) => e.id === dim.entityIds![1]);
+        if (dim.entityIds && dim.entityIds.length >= 2) {
+          const e1 = entities.find((e) => e.id === dim.entityIds![0]) || useCADStore.getState().projectedEntities.find((e) => e.id === dim.entityIds![0]);
+          const e2 = entities.find((e) => e.id === dim.entityIds![1]) || useCADStore.getState().projectedEntities.find((e) => e.id === dim.entityIds![1]);
           const idx1 = dim.pointIndices?.[0] ?? 0;
           const idx2 = dim.pointIndices?.[1] ?? 0;
           const getPt = (ent: CADEntity2D, idx: number) => {
@@ -519,7 +532,7 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
       screenPos: screenPt,
       currentValue: Number(initialVal.toFixed(2)).toString(),
     });
-  }, [document, activeSketchId, worldToScreen]);
+  }, [document, activeSketchId, sketchSession, worldToScreen]);
 
   const handleConfirmEdit = () => {
     if (!editingDimension) return;
@@ -618,7 +631,17 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
   let currentConstraints: any[] = [];
   let currentDimensions: any[] = [];
   let currentSolverState: any = 'UnderDefined';
-  if (activeSketchId) {
+  if (sketchSession.isActive && sketchSession.sketchId === activeSketchId) {
+    rawEntities = sketchSession.draftEntities;
+    currentConstraints = sketchSession.draftConstraints;
+    currentDimensions = sketchSession.draftDimensions;
+    currentProfiles = sketchSession.draftProfiles || [];
+    // 如果有對應的 sketch，仍保留預設 solverState
+    const sketch = document.featureTree.find(
+      (f) => f.id === activeSketchId && f.type === 'SKETCH'
+    ) as SketchFeature | undefined;
+    currentSolverState = sketch?.solverState || 'UnderDefined';
+  } else if (activeSketchId) {
     const sketch = document.featureTree.find(
       (f) => f.id === activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;

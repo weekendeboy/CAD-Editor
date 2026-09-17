@@ -30,6 +30,7 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
   mode,
   onClose,
 }) => {
+
   const { 
     document, 
     activeSketchId, 
@@ -51,6 +52,13 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
   const [selectedAxisId, setSelectedAxisId] = useState('');
   const [angleDeg, setAngleDeg] = useState<number>(360);
   const [reversed, setReversed] = useState<boolean>(false);
+
+  const targetSketch = sketches.find((s) => s.id === selectedSketchId);
+  const computedProfiles = React.useMemo(() => {
+    if (!targetSketch) return [];
+    if (targetSketch.profiles && targetSketch.profiles.length > 0) return targetSketch.profiles;
+    return findClosedProfiles(targetSketch.entities, targetSketch.constraints);
+  }, [targetSketch]);
 
   // 當彈窗開啟或 mode 切換時，初始化預設表單狀態與名稱
   useEffect(() => {
@@ -85,7 +93,6 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
   }, [isOpen, mode, activeSketchId, document?.featureTree]);
 
   // 當選取的目標草圖變更時，自動切換旋轉軸線選取
-  const targetSketch = sketches.find((s) => s.id === selectedSketchId);
   const lineEntities = (targetSketch?.entities || []).filter(
     (e): e is LineEntity => e.type === 'line'
   );
@@ -169,7 +176,7 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
 
   if (!isOpen) return null;
 
-  const sketchProfileCount = targetSketch?.profiles?.length || 0;
+  const sketchProfileCount = computedProfiles.length;
   const isBoss = mode === 'REVOLVE';
   const currentAxisLine = lineEntities.find((l) => l.id === selectedAxisId);
 
@@ -181,9 +188,7 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
     const validAngleDeg = Math.max(0.1, Math.min(360, Number(angleDeg) || 360));
     const angleRad = ((validAngleDeg * Math.PI) / 180) * (reversed ? -1 : 1);
 
-    const profileIds = targetSketch?.profiles
-      ? targetSketch.profiles.map((p) => p.id)
-      : [];
+    const profileIds = computedProfiles.map((p) => p.id);
 
     if (mode === 'REVOLVE') {
       const newFeature: RevolveFeature = {

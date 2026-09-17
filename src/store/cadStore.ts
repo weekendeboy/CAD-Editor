@@ -61,7 +61,7 @@ import { executeTrim } from "../core/2d/TrimManager";
 import {
   solveConstraints,
   analyzeSketchDOF,
-} from "../core/solver/ConstraintSolver";
+} from "../core/solver/NumericalConstraintSolver";
 import { solidEngine } from "../core/3d/SolidEngine";
 
 // [NOTE] 保留原有的輔助函式 findCustomPlane, createInitialDocument, checkDAGOrderValid, markSketchDirtyInDoc
@@ -288,6 +288,21 @@ export const useCADStore = create<CADState>()(
     lastRadius: 10,
 
     projectedEntities: [],
+
+    // 草圖編輯 Session 狀態 (解耦 2D 與 3D 運算管線)
+    sketchSession: {
+      isActive: true,
+      sketchId: "sketch-1",
+      initialEntities: [],
+      initialConstraints: [],
+      initialDimensions: [],
+      draftEntities: [],
+      draftConstraints: [],
+      draftDimensions: [],
+            initialProfiles: [],
+            draftProfiles: [],
+      isDirty: false,
+    },
 
     // ==========================================
     // 4. RuntimeState (運行時狀態)
@@ -1250,7 +1265,134 @@ export const useCADStore = create<CADState>()(
 
     setViewMode: (mode) => set({ viewMode: mode }),
     setTool: (tool) => set({ currentTool: tool }),
-    setActiveSketch: (sketchId) => set({ activeSketchId: sketchId }),
+    setActiveSketch: (sketchId) => {
+      if (sketchId) {
+        get().enterSketchSession(sketchId);
+      } else {
+        get().cancelSketchSession();
+        set({ activeSketchId: null });
+      }
+    },
+
+    enterSketchSession: (sketchId: string) => {
+      set((state) => {
+        const sketch = state.document.featureTree.find(
+          (f) => f.id === sketchId && f.type === "SKETCH",
+        ) as SketchFeature | undefined;
+
+        if (!sketch) return;
+
+        const entitiesClone = JSON.parse(JSON.stringify(sketch.entities || []));
+        const constraintsClone = JSON.parse(
+          JSON.stringify(sketch.constraints || []),
+        );
+        const dimensionsClone = JSON.parse(
+          JSON.stringify(sketch.dimensions || []),
+        );
+        const profilesClone = JSON.parse(
+          JSON.stringify(sketch.profiles || []),
+        );
+
+        state.sketchSession = {
+          isActive: true,
+          sketchId: sketchId,
+          initialEntities: entitiesClone,
+          initialConstraints: constraintsClone,
+          initialDimensions: dimensionsClone,
+          initialProfiles: JSON.parse(JSON.stringify(profilesClone)),
+          draftEntities: JSON.parse(JSON.stringify(entitiesClone)),
+          draftConstraints: JSON.parse(JSON.stringify(constraintsClone)),
+          draftDimensions: JSON.parse(JSON.stringify(dimensionsClone)),
+          draftProfiles: JSON.parse(JSON.stringify(profilesClone)),
+          isDirty: false,
+        };
+        state.activeSketchId = sketchId;
+        state.viewMode = "2D";
+      });
+    },
+
+    commitSketchSession: async () => {
+      const session = get().sketchSession;
+      if (!session.isActive || !session.sketchId) return;
+
+      const targetSketchId = session.sketchId;
+      const isDirty = session.isDirty;
+
+      if (isDirty) {
+        set((state) => {
+          const sketch = state.document.featureTree.find(
+            (f) => f.id === targetSketchId && f.type === "SKETCH",
+          ) as SketchFeature | undefined;
+
+          if (sketch) {
+            sketch.entities = session.draftEntities;
+            sketch.constraints = session.draftConstraints;
+            sketch.dimensions = session.draftDimensions;
+            sketch.profiles = session.draftProfiles;
+            applyConstraintsToSketch(sketch);
+
+            const docDirty = markSketchDirtyInDoc(
+              state.document,
+              targetSketchId,
+            );
+            const undoState = pushUndoState(get());
+            state.undoStack = undoState.undoStack;
+            state.redoStack = undoState.redoStack;
+            state.document = docDirty;
+          }
+
+          state.sketchSession = {
+            isActive: false,
+            sketchId: null,
+            initialEntities: [],
+            initialConstraints: [],
+            initialDimensions: [],
+            draftEntities: [],
+            draftConstraints: [],
+            draftDimensions: [],
+            initialProfiles: [],
+            draftProfiles: [],
+            isDirty: false,
+          };
+        });
+
+        await get().regenerateFeatureTree();
+      } else {
+        set((state) => {
+          state.sketchSession = {
+            isActive: false,
+            sketchId: null,
+            initialEntities: [],
+            initialConstraints: [],
+            initialDimensions: [],
+            draftEntities: [],
+            draftConstraints: [],
+            draftDimensions: [],
+            initialProfiles: [],
+            draftProfiles: [],
+            isDirty: false,
+          };
+        });
+      }
+    },
+
+    cancelSketchSession: () => {
+      set((state) => {
+        state.sketchSession = {
+          isActive: false,
+          sketchId: null,
+          initialEntities: [],
+          initialConstraints: [],
+          initialDimensions: [],
+          draftEntities: [],
+          draftConstraints: [],
+          draftDimensions: [],
+            initialProfiles: [],
+            draftProfiles: [],
+          isDirty: false,
+        };
+      });
+    },
 
     selectEntity: (id) =>
       set((state) => {
@@ -1452,6 +1594,7 @@ export const useCADStore = create<CADState>()(
     // ------------------------------------------
 
     addEntity: (sketchIdOrEntity: any, entity?: any) => {
+      let isSessionEdit = false;
       set((state) => {
         const targetSketchId =
           typeof sketchIdOrEntity === "string"
@@ -1476,6 +1619,33 @@ export const useCADStore = create<CADState>()(
             actualEntity.isConstruction ?? targetLayerId === "CONSTRUCTION",
         };
 
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === targetSketchId
+        ) {
+          isSessionEdit = true;
+          const dummySketch: SketchFeature = {
+            id: targetSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities, newEntity],
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyConstraintsToSketch(dummySketch);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          return;
+        }
+
         insertEntityIntoSketch(state.document, targetSketchId, newEntity);
         const docDirty = markSketchDirtyInDoc(state.document, targetSketchId);
 
@@ -1484,11 +1654,60 @@ export const useCADStore = create<CADState>()(
         state.redoStack = undoState.redoStack;
         Object.assign(state, { document: docDirty });
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
     importDxfData: (entities, layers) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!entities || entities.length === 0 || !state.activeSketchId) {
+          return;
+        }
+
+        const preparedEntities: CADEntity2D[] = entities.map((e) => ({
+          ...e,
+          state: "UnderDefined",
+        }));
+
+        if (layers) {
+          const mergedLayers = { ...state.document.layers };
+          for (const [key, layer] of Object.entries(layers)) {
+            if (!mergedLayers[key]) {
+              mergedLayers[key] = layer;
+            }
+          }
+          state.document.layers = mergedLayers;
+        }
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [
+              ...state.sketchSession.draftEntities,
+              ...preparedEntities,
+            ],
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyConstraintsToSketch(dummySketch);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          state.selectedEntityIds = [];
           return;
         }
 
@@ -1498,29 +1717,14 @@ export const useCADStore = create<CADState>()(
 
         if (!sketch) return;
 
-        const preparedEntities: CADEntity2D[] = entities.map((e) => ({
-          ...e,
-          state: "UnderDefined",
-        }));
-
         const updatedSketch: SketchFeature = {
           ...sketch,
           entities: [...sketch.entities, ...preparedEntities],
         };
         applyConstraintsToSketch(updatedSketch);
 
-        const mergedLayers = { ...state.document.layers };
-        if (layers) {
-          for (const [key, layer] of Object.entries(layers)) {
-            if (!mergedLayers[key]) {
-              mergedLayers[key] = layer;
-            }
-          }
-        }
-
         const updatedDocument: CADDocument = {
           ...state.document,
-          layers: mergedLayers,
           featureTree: state.document.featureTree.map((f) =>
             f.id === state.activeSketchId ? updatedSketch : f,
           ),
@@ -1536,13 +1740,52 @@ export const useCADStore = create<CADState>()(
         state.redoStack = undoState.redoStack;
         Object.assign(state, { document: docDirty, selectedEntityIds: [] });
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
     importEntities: (entities) => get().importDxfData(entities, {}),
 
     removeEntity: (id) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: state.sketchSession.draftEntities.filter(
+              (e) => e.id !== id,
+            ),
+            constraints: state.sketchSession.draftConstraints.filter(
+              (c) => !c.entityIds.includes(id),
+            ),
+            dimensions: state.sketchSession.draftDimensions.filter(
+              (d) => !(d.entityIds && d.entityIds.includes(id)),
+            ),
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyConstraintsToSketch(dummySketch);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          state.selectedEntityIds = state.selectedEntityIds.filter(
+            (entityId) => entityId !== id,
+          );
+          return;
+        }
 
         removeEntityFromSketch(state.document, state.activeSketchId, id);
         const docDirty = markSketchDirtyInDoc(
@@ -1557,14 +1800,45 @@ export const useCADStore = create<CADState>()(
         state.selectedEntityIds = state.selectedEntityIds.filter(
           (entityId) => entityId !== id,
         );
-        state.document = docDirty;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     updateEntity: (id, updates) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: state.sketchSession.draftEntities.map((e) =>
+              e.id === id ? ({ ...e, ...updates } as CADEntity2D) : e,
+            ),
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyConstraintsToSketch(dummySketch);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -1591,14 +1865,46 @@ export const useCADStore = create<CADState>()(
         state.undoStack = undoState.undoStack;
         state.redoStack = undoState.redoStack;
         state.document = docDirty;
-        state.document = docDirty;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     updateEntities: (newEntities) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId || !newEntities || newEntities.length === 0) {
+          return;
+        }
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const entityMap = new Map(newEntities.map((e) => [e.id, e]));
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: state.sketchSession.draftEntities.map(
+              (e) => entityMap.get(e.id) || e,
+            ),
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyConstraintsToSketch(dummySketch);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
           return;
         }
 
@@ -1621,14 +1927,31 @@ export const useCADStore = create<CADState>()(
         state.undoStack = undoState.undoStack;
         state.redoStack = undoState.redoStack;
         state.document = docDirty;
-        state.document = docDirty;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     toggleConstruction: (entityId: string) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const existing = state.sketchSession.draftEntities.find(
+            (e) => e.id === entityId,
+          );
+          if (existing) {
+            existing.isConstruction = !existing.isConstruction;
+            state.sketchSession.isDirty = true;
+          }
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -1659,12 +1982,42 @@ export const useCADStore = create<CADState>()(
         state.redoStack = undoState.redoStack;
         state.document = docDirty;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     addConstraint: (constraint) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: [...state.sketchSession.draftConstraints, constraint],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyConstraintsToSketch(dummySketch);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          return;
+        }
 
         addConstraintToSketch(state.document, state.activeSketchId, constraint);
         const docDirty = markSketchDirtyInDoc(
@@ -1677,18 +2030,15 @@ export const useCADStore = create<CADState>()(
         state.redoStack = undoState.redoStack;
         state.document = docDirty;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     addDimension: (dimension, constraint) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
-
-        const sketch = state.document.featureTree.find(
-          (f) => f.id === state.activeSketchId && f.type === "SKETCH",
-        ) as SketchFeature | undefined;
-
-        if (!sketch) return;
 
         let actualConstraint = { ...constraint };
         if (dimension.type === "linear") {
@@ -1715,6 +2065,89 @@ export const useCADStore = create<CADState>()(
             }
           }
         }
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const referencedProjEntities = (actualConstraint.entityIds || [])
+            .map((id) => state.projectedEntities.find((p) => p.id === id))
+            .filter(Boolean) as CADEntity2D[];
+
+          let initialEntities = [...state.sketchSession.draftEntities];
+          for (const pEnt of referencedProjEntities) {
+            if (!initialEntities.some((e) => e.id === pEnt.id)) {
+              initialEntities.push({
+                ...pEnt,
+                isProjected: true,
+                isConstruction: true,
+                state: "FullyDefined",
+                color: "#f59e0b",
+              });
+            }
+          }
+
+          const testConstraints = [
+            ...state.sketchSession.draftConstraints,
+            actualConstraint,
+          ];
+          const solverResult = solveConstraints(
+            initialEntities,
+            testConstraints,
+          );
+          const dofState = analyzeSketchDOF(
+            solverResult.entities,
+            testConstraints,
+          );
+
+          let finalDimension = dimension;
+          if (dofState.state === "OverDefined") {
+            finalDimension = {
+              ...dimension,
+              isReference: true,
+              constraintId: undefined,
+              entityIds: actualConstraint.entityIds,
+              pointIndices: actualConstraint.pointIndices,
+            };
+            state.sketchSession.draftDimensions.push(finalDimension);
+          } else {
+            finalDimension = {
+              ...dimension,
+              entityIds: actualConstraint.entityIds,
+              pointIndices: actualConstraint.pointIndices,
+            };
+            state.sketchSession.draftDimensions.push(finalDimension);
+            state.sketchSession.draftConstraints.push(actualConstraint);
+          }
+
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: initialEntities,
+            constraints: state.sketchSession.draftConstraints,
+            dimensions: state.sketchSession.draftDimensions,
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyConstraintsToSketch(dummySketch);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          return;
+        }
+
+        const sketch = state.document.featureTree.find(
+          (f) => f.id === state.activeSketchId && f.type === "SKETCH",
+        ) as SketchFeature | undefined;
+
+        if (!sketch) return;
 
         const referencedProjEntities = (actualConstraint.entityIds || [])
           .map((id) => state.projectedEntities.find((p) => p.id === id))
@@ -1808,11 +2241,27 @@ export const useCADStore = create<CADState>()(
         state.redoStack = undoState.redoStack;
         Object.assign(state, { document: docDirty });
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
     updateDimensionPosition: (dimensionId, newPosition) =>
       set((state) => {
         if (!state.activeSketchId) return state;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          state.sketchSession.draftDimensions =
+            state.sketchSession.draftDimensions.map((dim) =>
+              dim.id === dimensionId
+                ? { ...dim, textPosition: newPosition }
+                : dim,
+            );
+          state.sketchSession.isDirty = true;
+          return;
+        }
 
         const updatedDocument: CADDocument = {
           ...state.document,
@@ -1848,6 +2297,19 @@ export const useCADStore = create<CADState>()(
       set((state) => {
         if (!state.activeSketchId) return state;
 
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          state.sketchSession.draftDimensions =
+            state.sketchSession.draftDimensions.map((dim) =>
+              dim.id === dimensionId
+                ? { ...dim, textPosition: newPosition }
+                : dim,
+            );
+          return;
+        }
+
         const updatedDocument: CADDocument = {
           ...state.document,
           featureTree: state.document.featureTree.map((f) => {
@@ -1876,8 +2338,42 @@ export const useCADStore = create<CADState>()(
         };
       }),
     removeConstraint: (constraintId) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: state.sketchSession.draftConstraints.filter(
+              (c) => c.id !== constraintId,
+            ),
+            dimensions: state.sketchSession.draftDimensions.map((d) =>
+              d.constraintId === constraintId
+                ? { ...d, constraintId: undefined }
+                : d,
+            ),
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyConstraintsToSketch(dummySketch);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          return;
+        }
 
         removeConstraintFromSketch(
           state.document,
@@ -1894,12 +2390,55 @@ export const useCADStore = create<CADState>()(
         state.redoStack = undoState.redoStack;
         state.document = docDirty;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     removeDimension: (dimensionId) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const targetDim = state.sketchSession.draftDimensions.find(
+            (d) => d.id === dimensionId,
+          );
+          const linkedConstraintId = targetDim?.constraintId;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: linkedConstraintId
+              ? state.sketchSession.draftConstraints.filter(
+                  (c) => c.id !== linkedConstraintId,
+                )
+              : state.sketchSession.draftConstraints,
+            dimensions: state.sketchSession.draftDimensions.filter(
+              (d) => d.id !== dimensionId,
+            ),
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyConstraintsToSketch(dummySketch);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          state.selectedEntityIds = state.selectedEntityIds.filter(
+            (id) => id !== dimensionId,
+          );
+          return;
+        }
 
         removeDimensionFromSketch(
           state.document,
@@ -1919,12 +2458,158 @@ export const useCADStore = create<CADState>()(
           (id) => id !== dimensionId,
         );
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     updateConstraintValue: (constraintId, value) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const linkedDim = state.sketchSession.draftDimensions.find(
+            (d) => d.constraintId === constraintId,
+          );
+          const isDiameter = linkedDim ? !!linkedDim.isDiameter : false;
+          const finalConstraintValue =
+            linkedDim && linkedDim.type === "radial"
+              ? isDiameter
+                ? value / 2
+                : value
+              : value;
+
+          const updatedConstraints = state.sketchSession.draftConstraints.map(
+            (c) => {
+              if (c.id === constraintId) {
+                return {
+                  ...c,
+                  value: finalConstraintValue,
+                  targetVal: Math.abs(finalConstraintValue),
+                };
+              }
+              return c;
+            },
+          );
+
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: updatedConstraints,
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyConstraintsToSketch(dummySketch);
+
+          if (dummySketch.dimensions) {
+            dummySketch.dimensions = dummySketch.dimensions.map((dim) => {
+              if (dim.constraintId === constraintId) {
+                const constraint = updatedConstraints.find(
+                  (c) => c.id === constraintId,
+                );
+                if (constraint) {
+                  if (dim.type === "radial") {
+                    if (constraint.entityIds.length === 1) {
+                      const entity = dummySketch.entities.find(
+                        (e) => e.id === constraint.entityIds[0],
+                      );
+                      if (
+                        entity &&
+                        (entity.type === "circle" || entity.type === "arc")
+                      ) {
+                        const center = { ...entity.center };
+                        const origP0 = dim.points[0];
+                        const origP1 = dim.points[1] || {
+                          x: origP0.x + 10,
+                          y: origP0.y,
+                        };
+                        const dx = origP1.x - origP0.x;
+                        const dy = origP1.y - origP0.y;
+                        const len = Math.hypot(dx, dy);
+                        const dir =
+                          len > 1e-6
+                            ? { x: dx / len, y: dy / len }
+                            : { x: 1, y: 0 };
+                        const newEdge = {
+                          x: center.x + dir.x * entity.radius,
+                          y: center.y + dir.y * entity.radius,
+                        };
+                        return {
+                          ...dim,
+                          points: [center, newEdge],
+                        };
+                      }
+                    }
+                  } else if (dim.type === "linear") {
+                    if (constraint.entityIds.length === 1) {
+                      const entity = dummySketch.entities.find(
+                        (e) => e.id === constraint.entityIds[0],
+                      );
+                      if (entity && entity.type === "line") {
+                        return {
+                          ...dim,
+                          points: [{ ...entity.start }, { ...entity.end }],
+                        };
+                      }
+                    } else if (constraint.entityIds.length >= 2) {
+                      const id1 = constraint.entityIds[0];
+                      const id2 = constraint.entityIds[1];
+                      const idx1 = constraint.pointIndices?.[0] ?? 0;
+                      const idx2 = constraint.pointIndices?.[1] ?? 0;
+                      const e1 = dummySketch.entities.find((e) => e.id === id1);
+                      const e2 = dummySketch.entities.find((e) => e.id === id2);
+                      if (e1 && e2) {
+                        const getPoint = (
+                          entity: CADEntity2D,
+                          index: number,
+                        ) => {
+                          if (entity.type === "line") {
+                            return index === 1 ? entity.end : entity.start;
+                          } else if (
+                            entity.type === "circle" ||
+                            entity.type === "arc"
+                          ) {
+                            return entity.center;
+                          } else if (entity.type === "polyline") {
+                            return entity.points[index] || entity.points[0];
+                          }
+                          return null;
+                        };
+                        const pt1 = getPoint(e1, idx1);
+                        const pt2 = getPoint(e2, idx2);
+                        if (pt1 && pt2) {
+                          return {
+                            ...dim,
+                            points: [{ ...pt1 }, { ...pt2 }],
+                          };
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              return dim;
+            });
+          }
+
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2084,26 +2769,54 @@ export const useCADStore = create<CADState>()(
         state.redoStack = undoState.redoStack;
         Object.assign(state, { document: docDirty });
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
     updateDimensionValue: (dimensionId, newValue) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
         const safeValue = Math.abs(newValue);
         if (isNaN(safeValue) || safeValue <= 0) return;
 
-        const sketch = state.document.featureTree.find(
-          (f) => f.id === state.activeSketchId && f.type === "SKETCH",
-        ) as SketchFeature | undefined;
+        const isSession =
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId;
+        isSessionEdit = isSession;
 
-        if (!sketch) return;
+        const currentEntities = isSession
+          ? state.sketchSession.draftEntities
+          : (
+              state.document.featureTree.find(
+                (f) => f.id === state.activeSketchId && f.type === "SKETCH",
+              ) as SketchFeature | undefined
+            )?.entities;
 
-        const targetDim = sketch.dimensions?.find((d) => d.id === dimensionId);
+        const currentConstraints = isSession
+          ? state.sketchSession.draftConstraints
+          : (
+              state.document.featureTree.find(
+                (f) => f.id === state.activeSketchId && f.type === "SKETCH",
+              ) as SketchFeature | undefined
+            )?.constraints;
+
+        const currentDimensions = isSession
+          ? state.sketchSession.draftDimensions
+          : (
+              state.document.featureTree.find(
+                (f) => f.id === state.activeSketchId && f.type === "SKETCH",
+              ) as SketchFeature | undefined
+            )?.dimensions;
+
+        if (!currentEntities || !currentConstraints) return;
+
+        const targetDim = currentDimensions?.find((d) => d.id === dimensionId);
         if (!targetDim) return;
 
         let targetConstraintId = targetDim.constraintId;
         let targetConstraint = targetConstraintId
-          ? sketch.constraints.find((c) => c.id === targetConstraintId)
+          ? currentConstraints.find((c) => c.id === targetConstraintId)
           : undefined;
 
         if (
@@ -2111,7 +2824,7 @@ export const useCADStore = create<CADState>()(
           targetDim.entityIds &&
           targetDim.entityIds.length > 0
         ) {
-          targetConstraint = sketch.constraints.find((c) => {
+          targetConstraint = currentConstraints.find((c) => {
             if (targetDim.entityIds?.length === 1 && c.entityIds.length === 1) {
               return c.entityIds[0] === targetDim.entityIds[0];
             }
@@ -2137,7 +2850,7 @@ export const useCADStore = create<CADState>()(
         let updatedConstraints: Constraint[];
 
         if (targetConstraint) {
-          updatedConstraints = sketch.constraints.map((c) => {
+          updatedConstraints = currentConstraints.map((c) => {
             if (c.id === targetConstraint!.id) {
               return {
                 ...c,
@@ -2173,7 +2886,7 @@ export const useCADStore = create<CADState>()(
             value: finalConstraintVal,
             targetVal: finalConstraintVal,
           };
-          updatedConstraints = [...sketch.constraints, newConstraint];
+          updatedConstraints = [...currentConstraints, newConstraint];
         }
 
         const allConstraintEntityIds = [
@@ -2185,7 +2898,7 @@ export const useCADStore = create<CADState>()(
           .map((id) => state.projectedEntities.find((p) => p.id === id))
           .filter(Boolean) as CADEntity2D[];
 
-        let workingSketchEntities = [...sketch.entities];
+        let workingSketchEntities = [...currentEntities];
         for (const pEnt of referencedProjEntities) {
           if (!workingSketchEntities.some((e) => e.id === pEnt.id)) {
             workingSketchEntities.push({
@@ -2199,9 +2912,17 @@ export const useCADStore = create<CADState>()(
         }
 
         const updatedSketchTemp: SketchFeature = {
-          ...sketch,
+          id: state.activeSketchId,
+          name: "Sketch",
+          type: "SKETCH",
+          plane: DatumFrontPlane,
+          dependencies: [],
+          suppressed: false,
           entities: workingSketchEntities,
           constraints: updatedConstraints,
+          dimensions: currentDimensions || [],
+          profiles: [],
+          solverState: "UnderDefined",
         };
         applyConstraintsToSketch(updatedSketchTemp);
 
@@ -2223,7 +2944,7 @@ export const useCADStore = create<CADState>()(
           return null;
         };
 
-        const updatedDimensions = (sketch.dimensions || []).map((dim) => {
+        const updatedDimensions = (currentDimensions || []).map((dim) => {
           const isTarget = dim.id === dimensionId;
           const currentCId =
             dim.constraintId || (isTarget ? targetConstraintId : undefined);
@@ -2336,8 +3057,24 @@ export const useCADStore = create<CADState>()(
           };
         });
 
+        if (isSession) {
+          state.sketchSession.draftEntities = updatedEntities;
+          state.sketchSession.draftConstraints = updatedConstraints;
+          state.sketchSession.draftDimensions = updatedDimensions;
+          state.sketchSession.isDirty = true;
+          return;
+        }
+
+        const sketch = state.document.featureTree.find(
+          (f) => f.id === state.activeSketchId && f.type === "SKETCH",
+        ) as SketchFeature | undefined;
+
+        if (!sketch) return;
+
         const updatedSketch: SketchFeature = {
-          ...updatedSketchTemp,
+          ...sketch,
+          entities: updatedEntities,
+          constraints: updatedConstraints,
           dimensions: updatedDimensions,
         };
 
@@ -2358,7 +3095,9 @@ export const useCADStore = create<CADState>()(
         state.redoStack = undoState.redoStack;
         Object.assign(state, { document: docDirty });
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
     dragVertexStart: () =>
       set((state) => {
@@ -2372,6 +3111,83 @@ export const useCADStore = create<CADState>()(
     dragVertexLive: (entityId, pointIndex, newPos) =>
       set((state) => {
         if (!state.activeSketchId) return state;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          const existingEntity = state.sketchSession.draftEntities.find(
+            (e) => e.id === entityId,
+          );
+          if (!existingEntity) return state;
+
+          const updatedEntity = JSON.parse(
+            JSON.stringify(existingEntity),
+          ) as CADEntity2D;
+
+          if (updatedEntity.type === "line") {
+            if (pointIndex === 0) updatedEntity.start = newPos;
+            else if (pointIndex === 1) updatedEntity.end = newPos;
+          } else if (updatedEntity.type === "circle") {
+            if (pointIndex === 0) {
+              updatedEntity.center = newPos;
+            } else if (pointIndex === 1) {
+              updatedEntity.radius = Math.hypot(
+                newPos.x - updatedEntity.center.x,
+                newPos.y - updatedEntity.center.y,
+              );
+            }
+          } else if (updatedEntity.type === "arc") {
+            if (pointIndex === 0) {
+              const dx = newPos.x - updatedEntity.center.x;
+              const dy = newPos.y - updatedEntity.center.y;
+              updatedEntity.startAngle = Math.atan2(dy, dx);
+              updatedEntity.radius = Math.hypot(dx, dy);
+            } else if (pointIndex === 1) {
+              const dx = newPos.x - updatedEntity.center.x;
+              const dy = newPos.y - updatedEntity.center.y;
+              updatedEntity.endAngle = Math.atan2(dy, dx);
+              updatedEntity.radius = Math.hypot(dx, dy);
+            } else if (pointIndex === 2) {
+              updatedEntity.center = newPos;
+            }
+          } else if (updatedEntity.type === "polyline") {
+            if (updatedEntity.points[pointIndex]) {
+              updatedEntity.points[pointIndex] = newPos;
+            }
+          }
+
+          const newEntities = state.sketchSession.draftEntities.map((e) =>
+            e.id === entityId ? updatedEntity : e,
+          );
+
+          const tempFixConstraint = {
+            id: "temp-drag-fix",
+            type: "fix" as const,
+            entityIds: [entityId],
+            pointIndices: [pointIndex],
+          };
+
+          const solvedTempSketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: newEntities,
+            constraints: [
+              ...state.sketchSession.draftConstraints,
+              tempFixConstraint,
+            ],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyConstraintsToSketch(solvedTempSketch);
+          state.sketchSession.draftEntities = solvedTempSketch.entities;
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2429,12 +3245,6 @@ export const useCADStore = create<CADState>()(
           pointIndices: [pointIndex],
         };
 
-        const tempSketch: SketchFeature = {
-          ...sketch,
-          entities: newEntities,
-          constraints: [...sketch.constraints, tempFixConstraint],
-        };
-
         const solvedTempSketch: SketchFeature = {
           ...sketch,
           entities: newEntities,
@@ -2455,6 +3265,30 @@ export const useCADStore = create<CADState>()(
     dragVertexCommit: () =>
       set((state) => {
         if (!state.activeSketchId) return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyConstraintsToSketch(dummySketch);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.isDirty = true;
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2481,9 +3315,73 @@ export const useCADStore = create<CADState>()(
           document: docDirty,
         });
       }),
-    trimEntity: (entityId, clickPoint) =>
+    trimEntity: (entityId, clickPoint) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const trimResult = executeTrim(
+            entityId,
+            clickPoint,
+            state.sketchSession.draftEntities,
+          );
+          if (!trimResult) return;
+
+          const { toRemoveIds, toAddEntities } = trimResult;
+          const toRemoveSet = new Set(toRemoveIds);
+
+          const remainingConstraints =
+            state.sketchSession.draftConstraints.filter(
+              (c) => !c.entityIds.some((id) => toRemoveSet.has(id)),
+            );
+          const removedConstraintIds = new Set(
+            state.sketchSession.draftConstraints
+              .filter((c) => c.entityIds.some((id) => toRemoveSet.has(id)))
+              .map((c) => c.id),
+          );
+          const remainingDimensions =
+            state.sketchSession.draftDimensions.filter(
+              (d) =>
+                !d.constraintId || !removedConstraintIds.has(d.constraintId),
+            );
+
+          const updatedEntities = [
+            ...state.sketchSession.draftEntities.filter(
+              (e) => !toRemoveSet.has(e.id),
+            ),
+            ...toAddEntities,
+          ];
+
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: updatedEntities,
+            constraints: remainingConstraints,
+            dimensions: remainingDimensions,
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyConstraintsToSketch(dummySketch);
+
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          state.selectedEntityIds = state.selectedEntityIds.filter(
+            (id) => !toRemoveSet.has(id),
+          );
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2514,13 +3412,6 @@ export const useCADStore = create<CADState>()(
           ...toAddEntities,
         ];
 
-        const tempSketch: SketchFeature = {
-          ...sketch,
-          entities: updatedEntities,
-          constraints: remainingConstraints,
-          dimensions: remainingDimensions,
-        };
-
         const updatedSketch: SketchFeature = {
           ...sketch,
           entities: updatedEntities,
@@ -2550,10 +3441,42 @@ export const useCADStore = create<CADState>()(
             (id) => !toRemoveSet.has(id),
           ),
         });
-      }),
+      });
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
+    },
     extendEntity: (entityId, clickPoint) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyExtendToSketch(dummySketch, entityId, clickPoint);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2572,12 +3495,45 @@ export const useCADStore = create<CADState>()(
         state.redoStack = undoState.redoStack;
         state.document = docDirty;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     applyFillet: (entityId1, entityId2, radius) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyFilletToSketch(dummySketch, entityId1, entityId2, radius);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          state.selectedEntityIds = state.selectedEntityIds.filter(
+            (id) => id !== entityId1 && id !== entityId2,
+          );
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2599,12 +3555,45 @@ export const useCADStore = create<CADState>()(
           (id) => id !== entityId1 && id !== entityId2,
         );
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     applyChamfer: (entityId1, entityId2, distance) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyChamferToSketch(dummySketch, entityId1, entityId2, distance);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          state.selectedEntityIds = state.selectedEntityIds.filter(
+            (id) => id !== entityId1 && id !== entityId2,
+          );
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2626,12 +3615,42 @@ export const useCADStore = create<CADState>()(
           (id) => id !== entityId1 && id !== entityId2,
         );
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     offsetEntity: (entityId, distance, sidePoint) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyOffsetToSketch(dummySketch, entityId, distance, sidePoint);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2650,12 +3669,42 @@ export const useCADStore = create<CADState>()(
         state.redoStack = undoState.redoStack;
         state.document = docDirty;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     mirrorEntities: (sourceEntityIds, p1, p2) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyMirrorToSketch(dummySketch, sourceEntityIds, p1, p2);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2674,13 +3723,44 @@ export const useCADStore = create<CADState>()(
         state.redoStack = undoState.redoStack;
         state.document = docDirty;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     moveEntities: (entityIds, basePoint, targetPoint) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId || !entityIds || entityIds.length === 0)
           return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyMoveToSketch(dummySketch, entityIds, basePoint, targetPoint);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          state.selectedEntityIds = entityIds;
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2700,13 +3780,49 @@ export const useCADStore = create<CADState>()(
         state.document = docDirty;
         state.selectedEntityIds = entityIds;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     copyEntities: (entityIds, basePoint, targetPoint) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId || !entityIds || entityIds.length === 0)
           return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const prevEntityCount = state.sketchSession.draftEntities.length;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyCopyToSketch(dummySketch, entityIds, basePoint, targetPoint);
+          const newEntities = dummySketch.entities.slice(prevEntityCount);
+          const newEntityIds = newEntities.map((e) => e.id);
+
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          state.selectedEntityIds =
+            newEntityIds.length > 0 ? newEntityIds : state.selectedEntityIds;
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2731,10 +3847,13 @@ export const useCADStore = create<CADState>()(
         state.selectedEntityIds =
           newEntityIds.length > 0 ? newEntityIds : state.selectedEntityIds;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     scaleEntities: (entityIds, basePoint, factor) => {
+      let isSessionEdit = false;
       set((state) => {
         if (
           !state.activeSketchId ||
@@ -2743,6 +3862,34 @@ export const useCADStore = create<CADState>()(
           factor <= 0
         )
           return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyScaleToSketch(dummySketch, entityIds, basePoint, factor);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          state.selectedEntityIds = entityIds;
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2762,13 +3909,44 @@ export const useCADStore = create<CADState>()(
         state.document = docDirty;
         state.selectedEntityIds = entityIds;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     rotateEntities: (entityIds, basePoint, angleRad) => {
+      let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId || !entityIds || entityIds.length === 0)
           return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyRotateToSketch(dummySketch, entityIds, basePoint, angleRad);
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          state.selectedEntityIds = entityIds;
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2788,10 +3966,13 @@ export const useCADStore = create<CADState>()(
         state.document = docDirty;
         state.selectedEntityIds = entityIds;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     circularArrayEntities: (entityIds, centerPoint, items, fillAngleDeg) => {
+      let isSessionEdit = false;
       set((state) => {
         if (
           !state.activeSketchId ||
@@ -2800,6 +3981,44 @@ export const useCADStore = create<CADState>()(
           items <= 1
         )
           return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const prevCount = state.sketchSession.draftEntities.length;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyCircularArrayToSketch(
+            dummySketch,
+            entityIds,
+            centerPoint,
+            items,
+            fillAngleDeg,
+          );
+          const newEntities = dummySketch.entities.slice(prevCount);
+          const newEntityIds = newEntities.map((e) => e.id);
+
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          state.selectedEntityIds = newEntityIds;
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2829,10 +4048,13 @@ export const useCADStore = create<CADState>()(
         state.document = docDirty;
         state.selectedEntityIds = newEntityIds;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     rectArrayEntities: (entityIds, cols, rows, colSpacing, rowSpacing) => {
+      let isSessionEdit = false;
       set((state) => {
         if (
           !state.activeSketchId ||
@@ -2843,6 +4065,45 @@ export const useCADStore = create<CADState>()(
           (cols === 1 && rows === 1)
         )
           return;
+
+        if (
+          state.sketchSession.isActive &&
+          state.sketchSession.sketchId === state.activeSketchId
+        ) {
+          isSessionEdit = true;
+          const prevCount = state.sketchSession.draftEntities.length;
+          const dummySketch: SketchFeature = {
+            id: state.activeSketchId,
+            name: "Draft",
+            type: "SKETCH",
+            plane: DatumFrontPlane,
+            dependencies: [],
+            suppressed: false,
+            entities: [...state.sketchSession.draftEntities],
+            constraints: [...state.sketchSession.draftConstraints],
+            dimensions: [...state.sketchSession.draftDimensions],
+            profiles: [],
+            solverState: "UnderDefined",
+          };
+          applyRectArrayToSketch(
+            dummySketch,
+            entityIds,
+            cols,
+            rows,
+            colSpacing,
+            rowSpacing,
+          );
+          const newEntities = dummySketch.entities.slice(prevCount);
+          const newEntityIds = newEntities.map((e) => e.id);
+
+          state.sketchSession.draftEntities = dummySketch.entities;
+          state.sketchSession.draftProfiles = dummySketch.profiles || [];
+          state.sketchSession.draftConstraints = dummySketch.constraints;
+          state.sketchSession.draftDimensions = dummySketch.dimensions || [];
+          state.sketchSession.isDirty = true;
+          state.selectedEntityIds = newEntityIds;
+          return;
+        }
 
         const sketch = state.document.featureTree.find(
           (f) => f.id === state.activeSketchId && f.type === "SKETCH",
@@ -2873,7 +4134,9 @@ export const useCADStore = create<CADState>()(
         state.document = docDirty;
         state.selectedEntityIds = newEntityIds;
       });
-      get().regenerateFeatureTree();
+      if (!isSessionEdit) {
+        get().regenerateFeatureTree();
+      }
     },
 
     toggleOsnap: () => set((state) => ({ osnapEnabled: !state.osnapEnabled })),

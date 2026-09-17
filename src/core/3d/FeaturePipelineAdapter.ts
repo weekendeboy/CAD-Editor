@@ -183,12 +183,18 @@ export function compileFeaturePlan(
         const extrudeFeature = feature as ExtrudeFeature;
         const sketch = sketchMap.get(extrudeFeature.sketchId);
 
-        if (sketch && sketch.profiles && sketch.profiles.length > 0) {
+        
+        let availableProfiles = sketch ? sketch.profiles : [];
+        if (sketch && (!availableProfiles || availableProfiles.length === 0)) {
+          availableProfiles = findClosedProfiles(sketch.entities, sketch.constraints);
+        }
+        if (sketch && availableProfiles && availableProfiles.length > 0) {
+
           const profileIds = extrudeFeature.profileIds;
           const profiles =
             profileIds && profileIds.length > 0
-              ? sketch.profiles.filter((p) => profileIds.includes(p.id))
-              : sketch.profiles;
+              ? availableProfiles.filter((p) => profileIds.includes(p.id))
+              : availableProfiles;
 
           if (profiles.length > 0) {
             ops.push({
@@ -206,12 +212,18 @@ export function compileFeaturePlan(
         const cutFeature = feature as CutExtrudeFeature;
         const sketch = sketchMap.get(cutFeature.sketchId);
 
-        if (sketch && sketch.profiles && sketch.profiles.length > 0) {
+        
+        let availableProfiles = sketch ? sketch.profiles : [];
+        if (sketch && (!availableProfiles || availableProfiles.length === 0)) {
+          availableProfiles = findClosedProfiles(sketch.entities, sketch.constraints);
+        }
+        if (sketch && availableProfiles && availableProfiles.length > 0) {
+
           const profileIds = cutFeature.profileIds;
           const profiles =
             profileIds && profileIds.length > 0
-              ? sketch.profiles.filter((p) => profileIds.includes(p.id))
-              : sketch.profiles;
+              ? availableProfiles.filter((p) => profileIds.includes(p.id))
+              : availableProfiles;
 
           if (profiles.length > 0) {
             ops.push({
@@ -230,7 +242,13 @@ export function compileFeaturePlan(
         const revFeature = feature as RevolveFeature | RevolveCutFeature;
         const sk = sketchMap.get(revFeature.sketchId);
 
-        if (sk && sk.profiles && sk.profiles.length > 0) {
+        
+        let availableProfiles = sk ? sk.profiles : [];
+        if (sk && (!availableProfiles || availableProfiles.length === 0)) {
+          availableProfiles = findClosedProfiles(sk.entities, sk.constraints);
+        }
+        if (sk && availableProfiles && availableProfiles.length > 0) {
+
           const plane = sk.plane;
           let axisLine: LineEntity | undefined;
 
@@ -283,8 +301,8 @@ export function compileFeaturePlan(
           const profileIds = revFeature.profileIds;
           const targetProfiles =
             profileIds && profileIds.length > 0
-              ? sk.profiles.filter((p) => profileIds.includes(p.id))
-              : sk.profiles;
+              ? availableProfiles.filter((p) => profileIds.includes(p.id))
+              : availableProfiles;
 
           if (targetProfiles.length > 0) {
             ops.push({
@@ -441,9 +459,15 @@ export function compileFeaturePlan(
 
           for (const skId of feat.sketchIds) {
             const sk = sketchMap.get(skId);
-            if (sk && sk.profiles && sk.profiles.length > 0) {
+            
+        let availableProfiles = sk ? sk.profiles : [];
+        if (sk && (!availableProfiles || availableProfiles.length === 0)) {
+          availableProfiles = findClosedProfiles(sk.entities, sk.constraints);
+        }
+        if (sk && availableProfiles && availableProfiles.length > 0) {
+
               sections.push({
-                profiles: sk.profiles,
+                profiles: availableProfiles,
                 plane: sk.plane,
               });
             }

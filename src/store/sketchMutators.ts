@@ -11,7 +11,7 @@ import {
   CADBlockDefinition,
   Point2D,
 } from '../types/cad';
-import { solveConstraints, analyzeSketchDOF } from '../core/solver/ConstraintSolver';
+import { solveConstraints, analyzeSketchDOF } from '../core/solver/NumericalConstraintSolver';
 import { findClosedProfiles } from '../core/2d/TopologyEngine';
 import { createFillet } from '../core/2d/FilletManager';
 import { createChamfer } from '../core/2d/ChamferManager';
@@ -818,7 +818,7 @@ export function applyRotateToSketch(
 
   // 2. 約束防護處理：
   // 【關鍵防護】：旋轉操作會破壞原有的正交約束，自動移除與被選取圖元綁定的 horizontal 與 vertical 約束，
-  // 避免 ConstraintSolver 產生 OverDefined 或無法收斂的錯誤。
+  // 避免 NumericalConstraintSolver 產生 OverDefined 或無法收斂的錯誤。
   // 同時移除固定 (fix) 約束與跨越邊界 (boundary) 約束。
   const updatedConstraints: Constraint[] = [];
   for (const c of sketch.constraints || []) {
@@ -989,7 +989,7 @@ export function applyCircularArrayToSketch(
  * 2. 每次疊加平移向量：ΔX = i * Col Spacing，ΔY = j * Row Spacing。
  * 3. 執行深拷貝 (Deep Clone) 來源圖元，並套用上述平移向量。
  * 4. 為新產生的圖元配置全新的 UUID。
- * 【關鍵防護】：複製過程中絕對禁止複製來源圖元的 Constraints 與 Dimensions，以免造成求解器 (ConstraintSolver) 過載或 OverDefined 錯誤。
+ * 【關鍵防護】：複製過程中絕對禁止複製來源圖元的 Constraints 與 Dimensions，以免造成求解器 (NumericalConstraintSolver) 過載或 OverDefined 錯誤。
  */
 export function applyRectArrayToSketch(
   sketch: SketchFeature,

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useCADStore } from '../store/cadStore';
+import { findClosedProfiles } from '../core/2d/TopologyEngine';
 import { SketchFeature, ExtrudeFeature, CutExtrudeFeature } from '../types/cad';
 import {
   Box,
@@ -25,6 +26,7 @@ export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
   mode,
   onClose,
 }) => {
+
   const {
     document,
     activeSketchId,
@@ -45,6 +47,13 @@ export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
   const [depth, setDepth] = useState<number>(20);
   const [direction, setDirection] = useState<'normal' | 'reversed' | 'mid-plane'>('normal');
   const [throughAll, setThroughAll] = useState(false);
+
+  const targetSketch = sketches.find((s) => s.id === selectedSketchId);
+  const computedProfiles = React.useMemo(() => {
+    if (!targetSketch) return [];
+    if (targetSketch.profiles && targetSketch.profiles.length > 0) return targetSketch.profiles;
+    return findClosedProfiles(targetSketch.entities, targetSketch.constraints);
+  }, [targetSketch]);
 
   const isBoss = mode === 'EXTRUDE';
 
@@ -113,8 +122,7 @@ export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
 
   if (!isOpen) return null;
 
-  const targetSketch = sketches.find((s) => s.id === selectedSketchId);
-  const sketchProfileCount = targetSketch?.profiles?.length || 0;
+  const sketchProfileCount = computedProfiles.length;
 
   // 切換正向/反向
   const toggleDirectionFlip = () => {
@@ -131,9 +139,7 @@ export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
     e.preventDefault();
     if (!selectedSketchId) return;
 
-    const profileIds = targetSketch?.profiles
-      ? targetSketch.profiles.map((p) => p.id)
-      : [];
+    const profileIds = computedProfiles.map((p) => p.id);
 
     const parsedDepth = Math.max(0.1, Number(depth) || 20);
 

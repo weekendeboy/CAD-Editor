@@ -1,6 +1,6 @@
 import { CADEntity2D, Point2D, Constraint } from '../../types/cad';
 import { calculate3PointArc, normalizeAngle } from './GeometryMath';
-import { solveConstraints } from '../solver/ConstraintSolver';
+import { solveConstraints } from '../solver/NumericalConstraintSolver';
 
 export type GripType =
   | 'line_start'

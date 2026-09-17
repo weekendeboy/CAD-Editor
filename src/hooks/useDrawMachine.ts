@@ -262,6 +262,7 @@ function getTrimPreviewSegment(
 export function useDrawMachine() {
   const currentTool = useCADStore((state) => state.currentTool);
   const activeSketchId = useCADStore((state) => state.activeSketchId);
+  const sketchSession = useCADStore((state) => state.sketchSession);
   const document = useCADStore((state) => state.document);
   const osnapEnabled = useCADStore((state) => state.osnapEnabled);
   const osnapSettings = useCADStore((state) => state.osnapSettings);
@@ -544,7 +545,9 @@ export function useDrawMachine() {
 
   // 取得目前草圖內的 entities
   let currentEntities: CADEntity2D[] = [];
-  if (activeSketchId) {
+  if (sketchSession.isActive && sketchSession.sketchId === activeSketchId) {
+    currentEntities = sketchSession.draftEntities;
+  } else if (activeSketchId) {
     const sketch = document.featureTree.find(
       (f) => f.id === activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;

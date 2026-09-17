@@ -33,7 +33,7 @@ export class PlanarGraph {
    * Adds a node at the specified coordinates.
    * If a node already exists within the tolerance distance (default 1e-3), returns the existing node.
    */
-  public addNode(point: Point2D, tolerance: number = 1e-3, customId?: string): GraphNode {
+  public addNode(point: Point2D, tolerance: number = 0.02, customId?: string): GraphNode {
     if (customId && this.nodes.has(customId)) {
       return this.nodes.get(customId)!;
     }
@@ -67,7 +67,7 @@ export class PlanarGraph {
     p1: Point2D,
     p2: Point2D,
     entityId: string,
-    tolerance: number = 1e-3,
+    tolerance: number = 0.02,
     node1Id?: string,
     node2Id?: string
   ): void {
@@ -125,7 +125,7 @@ export class PlanarGraph {
     startAngle: number,
     endAngle: number,
     entityId: string,
-    tolerance: number = 1e-3,
+    tolerance: number = 0.02,
     node1Id?: string,
     node2Id?: string
   ): void {
@@ -202,7 +202,7 @@ export class PlanarGraph {
   public static buildFromEntities(
     entities: CADEntity2D[],
     constraints: Constraint[] = [],
-    tolerance: number = 1e-3
+    tolerance: number = 0.02
   ): PlanarGraph {
     const graph = new PlanarGraph();
 

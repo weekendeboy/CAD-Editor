@@ -26,6 +26,7 @@ import { solidEngine } from './core/3d/SolidEngine';
 import { triggerFileExport, has3DSolidFeatures } from './lib/export3D';
 import { createPlaneFromFaceNormal } from './core/3d/DatumPlaneEngine';
 import { computeEntitiesBoundingBox } from './core/2d/ViewportTransform';
+import { canApplyConstraint } from './core/solver/ConstraintValidator';
 import {
   MousePointer2,
   Pencil,
@@ -149,6 +150,9 @@ export default function App() {
     setOsnapModalOpen,
     document,
     activeSketchId,
+    sketchSession,
+    commitSketchSession,
+    cancelSketchSession,
     selectedEntityIds,
     addConstraint,
     toggleConstruction,
@@ -181,68 +185,19 @@ export default function App() {
     (f) => f.id === activeSketchId && f.type === 'SKETCH'
   ) as SketchFeature | undefined;
 
+  const currentEntities =
+    sketchSession.isActive && sketchSession.sketchId === activeSketchId
+      ? sketchSession.draftEntities
+      : activeSketch?.entities || [];
+
   const solverState = activeSketch?.solverState || 'UnderDefined';
 
   // 選取實體提取相容虛擬原點 (Virtual Origin Compatible)
   const hasOrigin = selectedEntityIds.includes('origin');
   const realSelectedEntities =
-    activeSketch?.entities.filter((e) => selectedEntityIds.includes(e.id)) || [];
+    currentEntities.filter((e) => selectedEntityIds.includes(e.id)) || [];
   const totalSelectedCount = selectedEntityIds.length;
   const isAnySelectedConstruction = realSelectedEntities.some((e) => e.isConstruction);
-
-  // 約束適用性布林判定 (Constraint Applicability)
-  // 1. 水平 / 垂直 (Horizontal / Vertical)
-  const canApplyHorizontalVertical =
-    (totalSelectedCount === 1 && realSelectedEntities[0]?.type === 'line') ||
-    (totalSelectedCount === 2 && hasOrigin && realSelectedEntities.length === 1) ||
-    (totalSelectedCount === 2 &&
-      realSelectedEntities.length === 2 &&
-      realSelectedEntities.every((e) => e.type === 'circle' || e.type === 'arc')) ||
-    (totalSelectedCount === 2 &&
-      realSelectedEntities.length === 2 &&
-      realSelectedEntities.some((e) => e.type === 'circle' || e.type === 'arc') &&
-      realSelectedEntities.some((e) => e.type === 'line'));
-
-  // 2. 重合 / 同心 (Coincident / Concentric)
-  const canApplyCoincident =
-    totalSelectedCount === 2 &&
-    (hasOrigin ? realSelectedEntities.length === 1 : realSelectedEntities.length === 2);
-
-  // 3. 相切 (Tangent)
-  const isLineAndCurve =
-    realSelectedEntities.length === 2 &&
-    ((realSelectedEntities[0].type === 'line' &&
-      (realSelectedEntities[1].type === 'circle' || realSelectedEntities[1].type === 'arc')) ||
-      ((realSelectedEntities[0].type === 'circle' || realSelectedEntities[0].type === 'arc') &&
-        realSelectedEntities[1].type === 'line'));
-
-  const isBothCurves =
-    realSelectedEntities.length === 2 &&
-    (realSelectedEntities[0].type === 'circle' || realSelectedEntities[0].type === 'arc') &&
-    (realSelectedEntities[1].type === 'circle' || realSelectedEntities[1].type === 'arc');
-
-  const canApplyTangent =
-    totalSelectedCount === 2 &&
-    !hasOrigin &&
-    realSelectedEntities.length === 2 &&
-    (isLineAndCurve || isBothCurves);
-
-  // 4. 等半徑 (Equal Radius)
-  const canApplyEqualRadius =
-    totalSelectedCount === 2 &&
-    !hasOrigin &&
-    realSelectedEntities.length === 2 &&
-    realSelectedEntities.every((e) => e.type === 'circle' || e.type === 'arc');
-
-  // 5. 平行 / 垂直 / 等長 (Parallel / Perpendicular / Equal Length)
-  const isBothLines =
-    totalSelectedCount === 2 &&
-    !hasOrigin &&
-    realSelectedEntities.length === 2 &&
-    realSelectedEntities.every((e) => e.type === 'line');
-
-  // 6. 固定約束 (Fix)
-  const canApplyFix = totalSelectedCount === 1 && !hasOrigin;
 
   const handleToggleConstruction = () => {
     realSelectedEntities.forEach((entity) => toggleConstruction(entity.id));
@@ -896,7 +851,7 @@ export default function App() {
                   <div className="w-px h-5 bg-neutral-800 mx-1" />
 
                   {/* 水平 / 垂直 (Horizontal / Vertical) */}
-                  {canApplyHorizontalVertical && (
+                  {canApplyConstraint('horizontal', realSelectedEntities, hasOrigin) && (
                     <>
                       <button
                         onClick={handleAddHorizontal}
@@ -916,7 +871,7 @@ export default function App() {
                   )}
 
                   {/* 重合 / 同心 (Coincident / Concentric) */}
-                  {canApplyCoincident && (
+                  {canApplyConstraint('coincident', realSelectedEntities, hasOrigin) && (
                     <button
                       onClick={handleAddCoincident}
                       className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
@@ -927,7 +882,7 @@ export default function App() {
                   )}
 
                   {/* 固定約束 (Fix) */}
-                  {canApplyFix && (
+                  {canApplyConstraint('fix', realSelectedEntities, hasOrigin) && (
                     <button
                       onClick={handleAddFix}
                       className="p-1.5 rounded text-neutral-400 hover:text-yellow-400 hover:bg-neutral-800 transition-colors"
@@ -938,7 +893,7 @@ export default function App() {
                   )}
 
                   {/* 平行 / 垂直 / 等長 (Parallel / Perpendicular / Equal Length) */}
-                  {isBothLines && (
+                  {canApplyConstraint('parallel', realSelectedEntities, hasOrigin) && (
                     <>
                       <button
                         onClick={handleAddParallel}
@@ -975,7 +930,7 @@ export default function App() {
                   )}
 
                   {/* 相切 (Tangent) */}
-                  {canApplyTangent && (
+                  {canApplyConstraint('tangent', realSelectedEntities, hasOrigin) && (
                     <button
                       onClick={handleAddTangent}
                       className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
@@ -989,7 +944,7 @@ export default function App() {
                   )}
 
                   {/* 等半徑 (Equal Radius) */}
-                  {canApplyEqualRadius && (
+                  {canApplyConstraint('equal_radius', realSelectedEntities, hasOrigin) && (
                     <button
                       onClick={handleAddEqualRadius}
                       className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
@@ -1159,20 +1114,45 @@ export default function App() {
             {viewMode === '2D' && activeSketch && (
               <div className="flex items-center gap-2 bg-amber-950/80 border border-amber-500/70 px-2.5 py-1 rounded text-xs text-amber-200 shadow-sm">
                 <Pencil size={12} className="text-amber-400" />
-                <span>草圖: <span className="font-semibold text-white">{activeSketch.name}</span></span>
+                <span>草圖: <span className="font-semibold text-white">{activeSketch.name}</span>{sketchSession.isDirty && <span className="text-amber-400 ml-1 font-bold">*</span>}</span>
                 <button
-                  onClick={() => setViewMode('3D')}
+                  onClick={() => {
+                    if (sketchSession.isActive) {
+                      commitSketchSession();
+                    } else {
+                      setViewMode('3D');
+                    }
+                  }}
                   className="ml-1.5 px-2 py-0.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded text-[11px] transition-colors shadow cursor-pointer active:scale-95"
-                  title="完成草圖繪製並返回 3D 視角"
+                  title="完成草圖繪製並寫回 3D 特徵樹 (Commit & Finish Sketch)"
                 >
                   完成並返回 3D
+                </button>
+                <button
+                  onClick={() => {
+                    if (sketchSession.isActive) {
+                      cancelSketchSession();
+                    } else {
+                      setViewMode('3D');
+                    }
+                  }}
+                  className="px-2 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-semibold rounded text-[11px] transition-colors shadow cursor-pointer active:scale-95"
+                  title="放棄草圖變更並退出 (Cancel Sketch Changes)"
+                >
+                  取消
                 </button>
               </div>
             )}
 
             {/* 2D/3D Toggle Button */}
             <button
-              onClick={() => useCADStore.getState().setViewMode(viewMode === '2D' ? '3D' : '2D')}
+              onClick={() => {
+                if (viewMode === '2D' && sketchSession.isActive) {
+                  commitSketchSession();
+                } else {
+                  useCADStore.getState().setViewMode(viewMode === '2D' ? '3D' : '2D');
+                }
+              }}
               className={`px-3 py-1 rounded text-xs font-semibold border transition-colors shadow-sm flex items-center gap-1.5 ${
                 viewMode === '3D'
                   ? 'bg-blue-600 hover:bg-blue-500 text-white border-blue-500'
@@ -1223,14 +1203,14 @@ export default function App() {
 
             {/* 長料/除料特徵群組 */}
             <button
-              onClick={() => setExtrudeModalConfig({ isOpen: true, mode: 'EXTRUDE' })}
+              onClick={() => { if (sketchSession.isActive) commitSketchSession(); setExtrudeModalConfig({ isOpen: true, mode: 'EXTRUDE' }); }}
               className="p-1.5 rounded transition-colors text-neutral-400 hover:text-blue-400 hover:bg-neutral-800"
               title="伸長長料 (Extrude Boss)"
             >
               <Box size={18} />
             </button>
             <button
-              onClick={() => setExtrudeModalConfig({ isOpen: true, mode: 'CUT_EXTRUDE' })}
+              onClick={() => { if (sketchSession.isActive) commitSketchSession(); setExtrudeModalConfig({ isOpen: true, mode: 'CUT_EXTRUDE' }); }}
               className="p-1.5 rounded transition-colors text-neutral-400 hover:text-amber-400 hover:bg-neutral-800"
               title="伸長除料 (Extrude Cut)"
             >
@@ -1242,14 +1222,14 @@ export default function App() {
 
             {/* 旋轉特徵群組 */}
             <button
-              onClick={() => setRevolveModalConfig({ isOpen: true, mode: 'REVOLVE' })}
+              onClick={() => { if (sketchSession.isActive) commitSketchSession(); setRevolveModalConfig({ isOpen: true, mode: 'REVOLVE' }); }}
               className="p-1.5 rounded transition-colors text-neutral-400 hover:text-purple-400 hover:bg-neutral-800"
               title="旋轉長料 (Revolve Boss)"
             >
               <RotateCw size={18} />
             </button>
             <button
-              onClick={() => setRevolveModalConfig({ isOpen: true, mode: 'REVOLVE_CUT' })}
+              onClick={() => { if (sketchSession.isActive) commitSketchSession(); setRevolveModalConfig({ isOpen: true, mode: 'REVOLVE_CUT' }); }}
               className="p-1.5 rounded transition-colors text-neutral-400 hover:text-rose-400 hover:bg-neutral-800"
               title="旋轉除料 (Revolve Cut)"
             >

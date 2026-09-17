@@ -247,7 +247,7 @@ function findInteriorRepresentativePoint(
 export function findClosedProfiles(
   entities: CADEntity2D[],
   constraintsOrTolerance?: Constraint[] | number,
-  tolerance: number = 1e-3
+  tolerance: number = 0.02
 ): SketchProfile[] {
   let constraints: Constraint[] = [];
   let tol = tolerance;
@@ -391,36 +391,18 @@ export function findClosedProfiles(
         });
       }
 
-      if (numOutgoing === 2) {
-        const edge0 = graph.edges.get(outgoing[0]);
-        const edge1 = graph.edges.get(outgoing[1]);
-        if (edge0 && edge1) {
-          if (edge0.entityId === currentEdge.entityId) {
-            currentEdge = edge1;
-          } else {
-            currentEdge = edge0;
-          }
-        } else {
-          break;
-        }
-      } else {
-        if (reverseIndex === -1) {
-          break;
-        }
-
-        let nextEdgeIndex = (reverseIndex - 1 + numOutgoing) % numOutgoing;
-        let nextEdgeId = outgoing[nextEdgeIndex];
-        let nextEdge = graph.edges.get(nextEdgeId);
-
-        // 嚴格禁止挑選到同實體的折返邊
-        if (nextEdge && nextEdge.entityId === currentEdge.entityId) {
-          nextEdgeIndex = (nextEdgeIndex - 1 + numOutgoing) % numOutgoing;
-          nextEdgeId = outgoing[nextEdgeIndex];
-          nextEdge = graph.edges.get(nextEdgeId);
-        }
-
-        currentEdge = nextEdge;
+      if (reverseIndex === -1) {
+        break;
       }
+
+      let nextEdgeIndex = (reverseIndex - 1 + numOutgoing) % numOutgoing;
+
+      if (nextEdgeIndex === reverseIndex) {
+        break;
+      }
+
+      let nextEdgeId = outgoing[nextEdgeIndex];
+      currentEdge = graph.edges.get(nextEdgeId);
 
       if (currentEdge && currentEdge.id === startEdgeId) {
         break;
