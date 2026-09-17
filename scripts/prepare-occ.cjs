@@ -17,10 +17,7 @@ if (fs.existsSync(srcJs)) {
 
 const wasmFile = fs.existsSync(srcWasm) ? srcWasm : path.join(occDir, 'opencascade.wasm.wasm');
 if (fs.existsSync(wasmFile)) {
-  if (wasmFile !== path.join(occDir, 'opencascade.wasm.wasm')) {
-    fs.copyFileSync(wasmFile, path.join(occDir, 'opencascade.wasm.wasm'));
-  }
-  const wasmBuffer = fs.readFileSync(path.join(occDir, 'opencascade.wasm.wasm'));
+  const wasmBuffer = fs.readFileSync(wasmFile);
   const totalSize = wasmBuffer.byteLength;
   const CHUNK_SIZE = 18 * 1024 * 1024; // 18MB per chunk (safely under Cloud Run 32MB limit)
   const numChunks = Math.ceil(totalSize / CHUNK_SIZE);
@@ -40,4 +37,11 @@ if (fs.existsSync(wasmFile)) {
     JSON.stringify({ totalSize, parts }, null, 2)
   );
   console.log(`Successfully generated ${parts.length} chunks and manifest.json`);
+  
+  // Clean up the monolithic file from public/occ if it exists to save space
+  const publicWasmPath = path.join(occDir, 'opencascade.wasm.wasm');
+  if (fs.existsSync(publicWasmPath)) {
+    fs.unlinkSync(publicWasmPath);
+    console.log(`Cleaned up redundant monolithic wasm file at ${publicWasmPath}`);
+  }
 }
