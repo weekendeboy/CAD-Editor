@@ -4,6 +4,7 @@
  */
 
 import { create } from 'zustand';
+import { immer } from 'zustand/middleware/immer';
 import { CADState } from './cadStore.types';
 import {
   CADDocument,
@@ -43,17 +44,14 @@ import {
   applyCircularArrayToSketch,
   applyRectArrayToSketch,
 } from './sketchMutators';
+import { getDirectDependencies, markDownstreamDirty, validateFeatureDependencies, getRegenPlan, applyRegenResults } from '../core/3d/FeatureRegenEngine';
+import { buildFeatureEvalOps } from '../core/3d/FeaturePipelineAdapter';
 import { executeTrim } from '../core/2d/TrimManager';
 import { solveConstraints, analyzeSketchDOF } from '../core/solver/ConstraintSolver';
-import {
-  getRegenPlan,
-  markDownstreamDirty,
-  applyRegenResults,
-  validateFeatureDependencies,
-  getDirectDependencies,
-} from '../core/3d/FeatureRegenEngine';
-import { buildFeatureEvalOps } from '../core/3d/FeaturePipelineAdapter';
 import { solidEngine } from '../core/3d/SolidEngine';
+
+// [NOTE] 保留原有的輔助函式 findCustomPlane, createInitialDocument, checkDAGOrderValid, markSketchDirtyInDoc
+// ... (保留這部分程式碼, 為了節省空間，這裡不顯示)
 
 /**
  * 依據 ID 尋找對應的 CustomPlane (包含特徵樹上的 DatumPlaneFeature/SketchFeature、doc.planes 以及預設 3 大基準面)
@@ -206,11 +204,12 @@ function markSketchDirtyInDoc(doc: CADDocument, sketchId: string): CADDocument {
   };
 }
 
-export const useCADStore = create<CADState>((set, get) => ({
-  // ==========================================
-  // 1. DocumentState (持久化文件狀態)
-  // ==========================================
-  document: createInitialDocument(),
+export const useCADStore = create<CADState>()(
+  immer((set, get) => ({
+    // ==========================================
+    // 1. DocumentState (持久化文件狀態)
+    // ==========================================
+    document: createInitialDocument(),
   undoStack: [],
   redoStack: [],
 
@@ -283,82 +282,68 @@ export const useCADStore = create<CADState>((set, get) => ({
     return get().featureResults[featureId];
   },
 
-  toggleShow3DEdges: () => set((state) => ({ show3DEdges: !state.show3DEdges })),
-  setProjectedEntities: (entities) => set({ projectedEntities: entities }),
-  setExtrudePreview: (preview) => set({ extrudePreview: preview }),
-  setRevolvePreview: (preview) => set({ revolvePreview: preview }),
-  setIsPickingRevolveAxis: (isPicking) => set({ isPickingRevolveAxis: isPicking }),
+  toggleShow3DEdges: () => set((state) => { state.show3DEdges = !state.show3DEdges; }),
+  setProjectedEntities: (entities) => set((state) => { state.projectedEntities = entities; }),
+  setExtrudePreview: (preview) => set((state) => { state.extrudePreview = preview; }),
+  setRevolvePreview: (preview) => set((state) => { state.revolvePreview = preview; }),
+  setIsPickingRevolveAxis: (isPicking) => set((state) => { state.isPickingRevolveAxis = isPicking; }),
   
-  setRevolveAxisEntityId: (axisId) => set((state) => ({
-    revolvePreview: state.revolvePreview ? { ...state.revolvePreview, axisEntityId: axisId } : null,
-  })),
-
-  setLayerModalOpen: (open) => set({ isLayerModalOpen: open }),
-  setOsnapModalOpen: (open) => set({ isOsnapModalOpen: open }),
+  setRevolveAxisEntityId: (axisId) => set((state) => {
+    if (state.revolvePreview) state.revolvePreview.axisEntityId = axisId;
+  }),
+  setLayerModalOpen: (open) => set((state) => { state.isLayerModalOpen = open; }),
+  setOsnapModalOpen: (open) => set((state) => { state.isOsnapModalOpen = open; }),
   
-  setArrayItems: (items) => set({ arrayItems: Math.max(2, Math.round(items)) }),
-  setArrayFillAngle: (angle) => set({ arrayFillAngle: angle }),
+  setArrayItems: (items) => set((state) => { state.arrayItems = Math.max(2, Math.round(items)); }),
+  setArrayFillAngle: (angle) => set((state) => { state.arrayFillAngle = angle; }),
 
-  setRectArrayCols: (cols) => set({ rectArrayCols: Math.max(1, Math.min(100, Math.round(cols))) }),
-  setRectArrayRows: (rows) => set({ rectArrayRows: Math.max(1, Math.min(100, Math.round(rows))) }),
-  setRectArrayColSpacing: (spacing) => set({ rectArrayColSpacing: spacing }),
-  setRectArrayRowSpacing: (spacing) => set({ rectArrayRowSpacing: spacing }),
+  setRectArrayCols: (cols) => set((state) => { state.rectArrayCols = Math.max(1, Math.min(100, Math.round(cols))); }),
+  setRectArrayRows: (rows) => set((state) => { state.rectArrayRows = Math.max(1, Math.min(100, Math.round(rows))); }),
+  setRectArrayColSpacing: (spacing) => set((state) => { state.rectArrayColSpacing = spacing; }),
+  setRectArrayRowSpacing: (spacing) => set((state) => { state.rectArrayRowSpacing = spacing; }),
 
-  setChamferDistance: (distance) => set({ chamferDistance: Math.max(0.1, distance) }),
+  setChamferDistance: (distance) => set((state) => { state.chamferDistance = Math.max(0.1, distance); }),
 
-  setPolygonSides: (sides) => set({ polygonSides: Math.max(3, Math.min(1024, Math.round(sides))) }),
-  setPolygonMethod: (method) => set({ polygonMethod: method }),
+  setPolygonSides: (sides) => set((state) => { state.polygonSides = Math.max(3, Math.min(1024, Math.round(sides))); }),
+  setPolygonMethod: (method) => set((state) => { state.polygonMethod = method; }),
 
-  setLastRadius: (r) => set({ lastRadius: Math.max(0.1, r) }),
+  setLastRadius: (r) => set((state) => { state.lastRadius = Math.max(0.1, r); }),
 
   // ------------------------------------------
   // 特徵與歷史邏輯 (Feature & History Actions)
   // ------------------------------------------
 
   setSelectedFeatureId: (id) => set((state) => {
-    if (!id) {
-      return { selectedFeatureId: null };
+    state.selectedFeatureId = id || null;
+    if (id) {
+      const feature = state.document.featureTree.find((f) => f.id === id);
+      if (feature && feature.type === 'SKETCH') {
+        state.activeSketchId = id;
+      }
     }
-    const feature = state.document.featureTree.find((f) => f.id === id);
-    if (feature && feature.type === 'SKETCH') {
-      return {
-        selectedFeatureId: id,
-        activeSketchId: id,
-      };
-    }
-    return { selectedFeatureId: id };
+  }),
+  addFeature: (feature) => set((state) => {
+      const currentRollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
+      
+      // 處理 Undo
+      const clonedDoc = JSON.parse(JSON.stringify(state.document));
+      state.undoStack.push(clonedDoc);
+      if (state.undoStack.length > 20) state.undoStack.shift();
+      state.redoStack = [];
+
+      const newFeatureWithDirty: CADFeature = { ...feature, isDirty: true };
+      state.document.featureTree.splice(currentRollback, 0, newFeatureWithDirty);
+      
+      state.document.featureTree = markDownstreamDirty(state.document.featureTree, feature.id);
+      state.document.rollbackIndex = currentRollback + 1;
+      
+      if (feature.type === 'SKETCH') {
+        state.activeSketchId = feature.id;
+      }
+      state.selectedFeatureId = feature.id;
   }),
 
-  addFeature: (feature) => {
-    const state = get();
-    const currentRollback = Math.max(0, Math.min(state.document.rollbackIndex, state.document.featureTree.length));
-    const tree = state.document.featureTree;
-    const newFeatureWithDirty: CADFeature = { ...feature, isDirty: true };
-    const newFeatureTree = [
-      ...tree.slice(0, currentRollback),
-      newFeatureWithDirty,
-      ...tree.slice(currentRollback),
-    ];
-    const dirtyTree = markDownstreamDirty(newFeatureTree, feature.id);
-    const newRollbackIndex = currentRollback + 1;
-    const nextActiveSketchId = feature.type === 'SKETCH' ? feature.id : state.activeSketchId;
-
-    set({
-      ...pushUndoState(state),
-      activeSketchId: nextActiveSketchId,
-      selectedFeatureId: feature.id,
-      document: {
-        ...state.document,
-        featureTree: dirtyTree,
-        rollbackIndex: newRollbackIndex,
-      },
-    });
-
-    get().regenerateFeatureTree();
-  },
-
-  removeFeature: (id) => {
-    const state = get();
+  removeFeature: (id) => set((state) => {
     const featureIndex = state.document.featureTree.findIndex((f) => f.id === id);
     if (featureIndex === -1) return;
 
@@ -392,22 +377,21 @@ export const useCADStore = create<CADState>((set, get) => ({
       ? (updatedTree.find((f) => f.type === 'SKETCH')?.id || null)
       : state.activeSketchId;
 
-    set({
-      ...pushUndoState(state),
-      document: {
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {document: {
         ...state.document,
         featureTree: updatedTree,
         rollbackIndex: newRollbackIndex,
       },
       selectedFeatureId: state.selectedFeatureId === id ? null : state.selectedFeatureId,
-      activeSketchId: nextActiveSketchId,
-    });
+      activeSketchId: nextActiveSketchId,});
 
-    get().regenerateFeatureTree();
-  },
 
-  updateFeature: (id, updates) => {
-    const state = get();
+    }),
+  updateFeature: (id, updates) => set((state) => {
     const exists = state.document.featureTree.some((f) => f.id === id);
     if (!exists) return;
 
@@ -429,20 +413,19 @@ export const useCADStore = create<CADState>((set, get) => ({
     const targetFeature = finalTree.find((f) => f.id === id);
     const nextActiveSketchId = (targetFeature && targetFeature.type === 'SKETCH') ? id : state.activeSketchId;
 
-    set({
-      ...pushUndoState(state),
-      activeSketchId: nextActiveSketchId,
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {activeSketchId: nextActiveSketchId,
       document: {
         ...state.document,
         featureTree: finalTree,
-      },
-    });
+      },});
 
-    get().regenerateFeatureTree();
-  },
 
-  toggleFeatureSuppression: (id) => {
-    const state = get();
+    }),
+  toggleFeatureSuppression: (id) => set((state) => {
     const feature = state.document.featureTree.find((f) => f.id === id);
     if (!feature) return;
 
@@ -457,18 +440,18 @@ export const useCADStore = create<CADState>((set, get) => ({
       ? (dirtyTree.find((f) => f.type === 'SKETCH' && !f.suppressed)?.id || null)
       : (feature.type === 'SKETCH' && !newSuppressed ? id : state.activeSketchId);
 
-    set({
-      ...pushUndoState(state),
-      activeSketchId: nextActiveSketchId,
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {activeSketchId: nextActiveSketchId,
       document: {
         ...state.document,
         featureTree: dirtyTree,
-      },
-    });
+      },});
 
-    get().regenerateFeatureTree();
-  },
 
+    }),
   renameFeature: (id, newName) => set((state) => {
     const trimmed = newName.trim();
     if (!trimmed) return state;
@@ -479,17 +462,20 @@ export const useCADStore = create<CADState>((set, get) => ({
       f.id === id ? { ...f, name: trimmed } : f
     );
 
-    return {
-      ...pushUndoState(state),
-      document: {
+    const undoState = pushUndoState(state);
+      state.undoStack = undoState.undoStack;
+      state.redoStack = undoState.redoStack;
+      if (Object.keys({document: {
         ...state.document,
         featureTree: updatedTree,
-      },
-    };
+      },}).length > 0) {
+        Object.assign(state, {document: {
+        ...state.document,
+        featureTree: updatedTree,
+      },});
+      }
   }),
-
-  reorderFeature: (sourceIndex, targetIndex) => {
-    const state = get();
+  reorderFeature: (sourceIndex, targetIndex) => set((state) => {
     const tree = [...state.document.featureTree];
     if (
       sourceIndex < 0 ||
@@ -512,19 +498,18 @@ export const useCADStore = create<CADState>((set, get) => ({
     const movedId = moved.id;
     const dirtyTree = markDownstreamDirty(tree, movedId);
 
-    set({
-      ...pushUndoState(state),
-      document: {
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {document: {
         ...state.document,
         featureTree: dirtyTree,
-      },
-    });
+      },});
 
-    get().regenerateFeatureTree();
-  },
 
-  setRollbackIndex: (index) => {
-    const state = get();
+    }),
+  setRollbackIndex: (index) => set((state) => {
     const clamped = Math.max(0, Math.min(index, state.document.featureTree.length));
     if (state.document.rollbackIndex === clamped) return;
 
@@ -546,9 +531,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       },
     });
 
-    get().regenerateFeatureTree();
-  },
-
+    }),
   regenerateFeatureTree: async () => {
     const state = get();
     const { featureTree, rollbackIndex, planes } = state.document;
@@ -720,8 +703,7 @@ export const useCADStore = create<CADState>((set, get) => ({
   // 基準面與特徵草圖連結 (Datum Plane & Face Sketch)
   // ------------------------------------------
 
-  addOffsetDatumPlane: (refPlaneId, distance, name) => {
-    const state = get();
+  addOffsetDatumPlane: (refPlaneId, distance, name) => { let retId = ""; set((state) => {
     const refPlane = findCustomPlane(state.document, refPlaneId) || DatumFrontPlane;
 
     const newFeatureId = `datum-plane-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
@@ -760,19 +742,16 @@ export const useCADStore = create<CADState>((set, get) => ({
       },
     };
 
-    set({
-      ...pushUndoState(state),
-      selectedFeatureId: newFeatureId,
-      document: updatedDocument,
-    });
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {selectedFeatureId: newFeatureId,
+      document: updatedDocument,});
 
-    get().regenerateFeatureTree();
 
-    return newFeatureId;
-  },
-
-  updateDatumPlaneOffset: (planeFeatureId, distance) => {
-    const state = get();
+    retId = newFeatureId; }); return retId; },
+  updateDatumPlaneOffset: (planeFeatureId, distance) => set((state) => {
     const tree = state.document.featureTree;
     const featureIndex = tree.findIndex((f) => f.id === planeFeatureId && f.type === 'DATUM_PLANE');
     if (featureIndex === -1) return;
@@ -832,14 +811,14 @@ export const useCADStore = create<CADState>((set, get) => ({
       },
     };
 
-    set({
-      ...pushUndoState(state),
-      document: updatedDocument,
-    });
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {document: updatedDocument,});
 
-    get().regenerateFeatureTree();
-  },
 
+    }),
   toggleFeatureVisibility: (featureId) => set((state) => {
     const feature = state.document.featureTree.find((f) => f.id === featureId);
     if (!feature) return state;
@@ -849,17 +828,20 @@ export const useCADStore = create<CADState>((set, get) => ({
       f.id === featureId ? { ...f, visible: newVisible } : f
     );
 
-    return {
-      ...pushUndoState(state),
-      document: {
+    const undoState = pushUndoState(state);
+      state.undoStack = undoState.undoStack;
+      state.redoStack = undoState.redoStack;
+      if (Object.keys({document: {
         ...state.document,
         featureTree: updatedTree,
-      },
-    };
+      },}).length > 0) {
+        Object.assign(state, {document: {
+        ...state.document,
+        featureTree: updatedTree,
+      },});
+      }
   }),
-
-  createSketchOnPlane: (planeId) => {
-    const state = get();
+  createSketchOnPlane: (planeId) => { let retId = ""; set((state) => {
     const targetPlane = findCustomPlane(state.document, planeId) || DatumFrontPlane;
 
     const newSketchId = crypto.randomUUID();
@@ -895,24 +877,21 @@ export const useCADStore = create<CADState>((set, get) => ({
       rollbackIndex: rollback + 1,
     };
 
-    set({
-      ...pushUndoState(state),
-      activeSketchId: newSketchId,
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {activeSketchId: newSketchId,
       selectedFeatureId: newSketchId,
       selectedEntityIds: [],
       document: updatedDocument,
-      viewMode: '2D',
-    });
+      viewMode: '2D',});
 
-    return newSketchId;
-  },
 
-  setSelectedFaceInfo: (face) => {
-    set({ selectedFaceInfo: face });
-  },
+    retId = newSketchId; }); return retId; },
+  setSelectedFaceInfo: (face) => set((state) => { state.selectedFaceInfo = face; }),
 
-  createSketchOnFacePlane: (plane: CustomPlane) => {
-    const state = get();
+  createSketchOnFacePlane: (plane: CustomPlane) => { let retId = ""; set((state) => {
     
     const newSketchId = crypto.randomUUID();
     const sketchCount = state.document.featureTree.filter((f) => f.type === 'SKETCH').length;
@@ -951,16 +930,18 @@ export const useCADStore = create<CADState>((set, get) => ({
       },
     };
 
-    set({
-      ...pushUndoState(state),
-      activeSketchId: newSketch.id,
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {activeSketchId: newSketch.id,
       selectedFeatureId: newSketch.id,
       selectedEntityIds: [],
       selectedFaceInfo: null,
       document: updatedDocument,
       viewMode: '2D',
-      currentTool: 'SELECT',
-    });
+      currentTool: 'SELECT',});
+
 
     if (typeof window !== 'undefined') {
       setTimeout(() => {
@@ -978,11 +959,8 @@ export const useCADStore = create<CADState>((set, get) => ({
       }, 50);
     }
 
-    return newSketchId;
-  },
-
-  addExtrudeFeature: (feature) => {
-    const state = get();
+    retId = newSketchId; }); return retId; },
+  addExtrudeFeature: (feature) => set((state) => {
     const newFeatureId = 'extrude-' + Date.now().toString();
     const newFeature: ExtrudeFeature = {
       ...feature,
@@ -1001,19 +979,19 @@ export const useCADStore = create<CADState>((set, get) => ({
     ];
     const dirtyTree = markDownstreamDirty(newFeatureTree, newFeatureId);
 
-    set({
-      ...pushUndoState(state),
-      selectedFeatureId: newFeature.id,
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {selectedFeatureId: newFeature.id,
       document: {
         ...state.document,
         featureTree: dirtyTree,
         rollbackIndex: currentRollback + 1,
-      },
-    });
+      },});
 
-    get().regenerateFeatureTree();
-  },
 
+    }),
   updateExtrudeFeature: (id, updates) => get().updateFeature(id, updates),
 
   // ------------------------------------------
@@ -1049,12 +1027,13 @@ export const useCADStore = create<CADState>((set, get) => ({
         [layer.id]: layer,
       },
     };
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-    };
+    const undoState = pushUndoState(state);
+      state.undoStack = undoState.undoStack;
+      state.redoStack = undoState.redoStack;
+      if (Object.keys({document: updatedDocument,}).length > 0) {
+        Object.assign(state, {document: updatedDocument,});
+      }
   }),
-
   removeLayer: (layerId: string) => set((state) => {
     if (layerId === '0' || layerId.toUpperCase() === 'DEFPOINTS') {
       return state;
@@ -1074,10 +1053,12 @@ export const useCADStore = create<CADState>((set, get) => ({
           const updatedEntities = sketch.entities.map((e) =>
             e.layerId === layerId ? { ...e, layerId: '0' } : e
           );
-          return applyConstraintsToSketch({
+          const updatedSketch: SketchFeature = {
             ...sketch,
             entities: updatedEntities,
-          });
+          };
+          applyConstraintsToSketch(updatedSketch);
+          return updatedSketch;
         }
       }
       return feature;
@@ -1089,13 +1070,15 @@ export const useCADStore = create<CADState>((set, get) => ({
       featureTree: updatedFeatureTree,
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-      activeLayerId: newActiveLayerId,
-    };
+    const undoState = pushUndoState(state);
+      state.undoStack = undoState.undoStack;
+      state.redoStack = undoState.redoStack;
+      if (Object.keys({document: updatedDocument,
+      activeLayerId: newActiveLayerId,}).length > 0) {
+        Object.assign(state, {document: updatedDocument,
+      activeLayerId: newActiveLayerId,});
+      }
   }),
-
   renameLayer: (layerId: string, newName: string) => set((state) => {
     const trimmed = newName.trim();
     if (!trimmed) return state;
@@ -1120,12 +1103,13 @@ export const useCADStore = create<CADState>((set, get) => ({
       },
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-    };
+    const undoState = pushUndoState(state);
+      state.undoStack = undoState.undoStack;
+      state.redoStack = undoState.redoStack;
+      if (Object.keys({document: updatedDocument,}).length > 0) {
+        Object.assign(state, {document: updatedDocument,});
+      }
   }),
-
   updateLayer: (layerId: string, updates: Partial<CADLayer>) => set((state) => {
     const existingLayer = state.document.layers[layerId];
     if (!existingLayer) return state;
@@ -1142,12 +1126,13 @@ export const useCADStore = create<CADState>((set, get) => ({
       },
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-    };
+    const undoState = pushUndoState(state);
+      state.undoStack = undoState.undoStack;
+      state.redoStack = undoState.redoStack;
+      if (Object.keys({document: updatedDocument,}).length > 0) {
+        Object.assign(state, {document: updatedDocument,});
+      }
   }),
-
   toggleLayerVisibility: (layerId: string) => set((state) => {
     const existingLayer = state.document.layers[layerId];
     if (!existingLayer) return state;
@@ -1163,12 +1148,13 @@ export const useCADStore = create<CADState>((set, get) => ({
       },
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-    };
+    const undoState = pushUndoState(state);
+      state.undoStack = undoState.undoStack;
+      state.redoStack = undoState.redoStack;
+      if (Object.keys({document: updatedDocument,}).length > 0) {
+        Object.assign(state, {document: updatedDocument,});
+      }
   }),
-
   toggleLayerLock: (layerId: string) => set((state) => {
     const existingLayer = state.document.layers[layerId];
     if (!existingLayer) return state;
@@ -1184,18 +1170,18 @@ export const useCADStore = create<CADState>((set, get) => ({
       },
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-    };
+    const undoState = pushUndoState(state);
+      state.undoStack = undoState.undoStack;
+      state.redoStack = undoState.redoStack;
+      if (Object.keys({document: updatedDocument,}).length > 0) {
+        Object.assign(state, {document: updatedDocument,});
+      }
   }),
-
   // ------------------------------------------
   // 2D 編輯與繪圖邏輯 (2D Operations)
   // ------------------------------------------
   
-  addEntity: (sketchIdOrEntity: any, entity?: any) => {
-    const state = get();
+  addEntity: (sketchIdOrEntity: any, entity?: any) => set((state) => {
     const targetSketchId = typeof sketchIdOrEntity === 'string' ? sketchIdOrEntity : state.activeSketchId;
     const actualEntity = typeof sketchIdOrEntity === 'string' ? entity : sketchIdOrEntity;
     if (!targetSketchId || !actualEntity) return;
@@ -1211,19 +1197,18 @@ export const useCADStore = create<CADState>((set, get) => ({
       isConstruction: actualEntity.isConstruction ?? (targetLayerId === 'CONSTRUCTION'),
     };
 
-    const docInserted = insertEntityIntoSketch(state.document, targetSketchId, newEntity);
-    const docDirty = markSketchDirtyInDoc(docInserted, targetSketchId);
+    insertEntityIntoSketch(state.document, targetSketchId, newEntity);
+    const docDirty = markSketchDirtyInDoc(state.document, targetSketchId);
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-    });
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {document: docDirty,});
 
-    get().regenerateFeatureTree();
-  },
 
-  importDxfData: (entities, layers) => {
-    const state = get();
+    }),
+  importDxfData: (entities, layers) => set((state) => {
     if (!entities || entities.length === 0 || !state.activeSketchId) {
       return;
     }
@@ -1239,12 +1224,11 @@ export const useCADStore = create<CADState>((set, get) => ({
       state: 'UnderDefined',
     }));
 
-    const mergedSketch: SketchFeature = {
+    const updatedSketch: SketchFeature = {
       ...sketch,
       entities: [...sketch.entities, ...preparedEntities],
     };
-
-    const updatedSketch = applyConstraintsToSketch(mergedSketch);
+    applyConstraintsToSketch(updatedSketch);
 
     const mergedLayers = { ...state.document.layers };
     if (layers) {
@@ -1265,35 +1249,33 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-      selectedEntityIds: [],
-    });
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {document: docDirty,
+      selectedEntityIds: [],});
 
-    get().regenerateFeatureTree();
-  },
 
+    }),
   importEntities: (entities) => get().importDxfData(entities, {}),
 
-  removeEntity: (id) => {
-    const state = get();
+  removeEntity: (id) => { set((state) => {
     if (!state.activeSketchId) return;
 
-    const docRemoved = removeEntityFromSketch(state.document, state.activeSketchId, id);
-    const docDirty = markSketchDirtyInDoc(docRemoved, state.activeSketchId);
+    removeEntityFromSketch(state.document, state.activeSketchId, id);
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-      selectedEntityIds: state.selectedEntityIds.filter((entityId) => entityId !== id),
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    state.selectedEntityIds = state.selectedEntityIds.filter((entityId) => entityId !== id);
+
     });
-
     get().regenerateFeatureTree();
   },
 
-  updateEntity: (id, updates) => {
-    const state = get();
+  updateEntity: (id, updates) => { set((state) => {
     if (!state.activeSketchId) return;
     
     const sketch = state.document.featureTree.find(
@@ -1307,19 +1289,18 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     const updatedEntity = { ...existingEntity, ...updates } as CADEntity2D;
 
-    const docUpdated = updateEntityInSketch(state.document, state.activeSketchId, updatedEntity);
-    const docDirty = markSketchDirtyInDoc(docUpdated, state.activeSketchId);
+    updateEntityInSketch(state.document, state.activeSketchId, updatedEntity);
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+
     });
-
     get().regenerateFeatureTree();
   },
 
-  updateEntities: (newEntities) => {
-    const state = get();
+  updateEntities: (newEntities) => { set((state) => {
     if (!state.activeSketchId || !newEntities || newEntities.length === 0) {
       return;
     }
@@ -1331,32 +1312,20 @@ export const useCADStore = create<CADState>((set, get) => ({
     if (!sketch) return;
 
     const entityMap = new Map(newEntities.map((e) => [e.id, e]));
-    const updatedEntities = sketch.entities.map((e) => entityMap.get(e.id) || e);
+    sketch.entities = sketch.entities.map((e) => entityMap.get(e.id) || e);
+    applyConstraintsToSketch(sketch);
 
-    const updatedSketch = applyConstraintsToSketch({
-      ...sketch,
-      entities: updatedEntities,
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
+
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+
     });
-
-    const updatedDocument: CADDocument = {
-      ...state.document,
-      featureTree: state.document.featureTree.map((f) =>
-        f.id === state.activeSketchId ? updatedSketch : f
-      ),
-    };
-
-    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
-
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-    });
-
     get().regenerateFeatureTree();
   },
 
-  toggleConstruction: (entityId: string) => {
-    const state = get();
+  toggleConstruction: (entityId: string) => { set((state) => {
     if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
@@ -1373,34 +1342,32 @@ export const useCADStore = create<CADState>((set, get) => ({
       isConstruction: !existingEntity.isConstruction,
     } as CADEntity2D;
 
-    const docUpdated = updateEntityInSketch(state.document, state.activeSketchId, updatedEntity);
-    const docDirty = markSketchDirtyInDoc(docUpdated, state.activeSketchId);
+    updateEntityInSketch(state.document, state.activeSketchId, updatedEntity);
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+
     });
-
     get().regenerateFeatureTree();
   },
 
-  addConstraint: (constraint) => {
-    const state = get();
+  addConstraint: (constraint) => { set((state) => {
     if (!state.activeSketchId) return;
 
-    const docAdded = addConstraintToSketch(state.document, state.activeSketchId, constraint);
-    const docDirty = markSketchDirtyInDoc(docAdded, state.activeSketchId);
+    addConstraintToSketch(state.document, state.activeSketchId, constraint);
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+
     });
-
     get().regenerateFeatureTree();
   },
 
-  addDimension: (dimension, constraint) => {
-    const state = get();
+  addDimension: (dimension, constraint) => set((state) => {
     if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
@@ -1496,19 +1463,21 @@ export const useCADStore = create<CADState>((set, get) => ({
         entityIds: actualConstraint.entityIds,
         pointIndices: actualConstraint.pointIndices
       };
-      newDocument = addDimensionToSketch(currentDoc, state.activeSketchId, finalDimension, actualConstraint);
+      addDimensionToSketch(currentDoc, state.activeSketchId, finalDimension, actualConstraint);
+      newDocument = currentDoc;
     }
 
     const docDirty = markSketchDirtyInDoc(newDocument, state.activeSketchId);
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-    });
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {document: docDirty,});
 
-    get().regenerateFeatureTree();
-  },
 
+    
+  }),
   updateDimensionPosition: (dimensionId, newPosition) => set((state) => {
     if (!state.activeSketchId) return state;
 
@@ -1535,12 +1504,13 @@ export const useCADStore = create<CADState>((set, get) => ({
       }),
     };
 
-    return {
-      ...pushUndoState(state),
-      document: updatedDocument,
-    };
+    const undoState = pushUndoState(state);
+      state.undoStack = undoState.undoStack;
+      state.redoStack = undoState.redoStack;
+      if (Object.keys({document: updatedDocument,}).length > 0) {
+        Object.assign(state, {document: updatedDocument,});
+      }
   }),
-
   updateDimensionPositionLive: (dimensionId, newPosition) => set((state) => {
     if (!state.activeSketchId) return state;
 
@@ -1571,40 +1541,36 @@ export const useCADStore = create<CADState>((set, get) => ({
       document: updatedDocument,
     };
   }),
-
-  removeConstraint: (constraintId) => {
-    const state = get();
+  removeConstraint: (constraintId) => { set((state) => {
     if (!state.activeSketchId) return;
 
-    const docRemoved = removeConstraintFromSketch(state.document, state.activeSketchId, constraintId);
-    const docDirty = markSketchDirtyInDoc(docRemoved, state.activeSketchId);
+    removeConstraintFromSketch(state.document, state.activeSketchId, constraintId);
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+
     });
-
     get().regenerateFeatureTree();
   },
 
-  removeDimension: (dimensionId) => {
-    const state = get();
+  removeDimension: (dimensionId) => { set((state) => {
     if (!state.activeSketchId) return;
 
-    const docRemoved = removeDimensionFromSketch(state.document, state.activeSketchId, dimensionId);
-    const docDirty = markSketchDirtyInDoc(docRemoved, state.activeSketchId);
+    removeDimensionFromSketch(state.document, state.activeSketchId, dimensionId);
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-      selectedEntityIds: state.selectedEntityIds.filter((id) => id !== dimensionId),
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    state.selectedEntityIds = state.selectedEntityIds.filter((id) => id !== dimensionId);
+
     });
-
     get().regenerateFeatureTree();
   },
 
-  updateConstraintValue: (constraintId, value) => {
-    const state = get();
+  updateConstraintValue: (constraintId, value) => set((state) => {
     if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
@@ -1627,10 +1593,11 @@ export const useCADStore = create<CADState>((set, get) => ({
       return c;
     });
 
-    const updatedSketch = applyConstraintsToSketch({
+    const updatedSketch: SketchFeature = {
       ...sketch,
       constraints: updatedConstraints,
-    });
+    };
+    applyConstraintsToSketch(updatedSketch);
 
     if (updatedSketch.dimensions) {
       updatedSketch.dimensions = updatedSketch.dimensions.map((dim) => {
@@ -1724,16 +1691,16 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-    });
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {document: docDirty,});
 
-    get().regenerateFeatureTree();
-  },
 
-  updateDimensionValue: (dimensionId, newValue) => {
-    const state = get();
+    
+  }),
+  updateDimensionValue: (dimensionId, newValue) => set((state) => {
     if (!state.activeSketchId) return;
     const safeValue = Math.abs(newValue);
     if (isNaN(safeValue) || safeValue <= 0) return;
@@ -1835,11 +1802,12 @@ export const useCADStore = create<CADState>((set, get) => ({
       }
     }
 
-    const updatedSketchTemp = applyConstraintsToSketch({
+    const updatedSketchTemp: SketchFeature = {
       ...sketch,
       entities: workingSketchEntities,
       constraints: updatedConstraints,
-    });
+    };
+    applyConstraintsToSketch(updatedSketchTemp);
     
     const updatedEntities = updatedSketchTemp.entities;
 
@@ -1952,20 +1920,23 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-    });
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {document: docDirty,});
 
-    get().regenerateFeatureTree();
-  },
 
-  dragVertexStart: () => set((state) => {
-    return {
-      ...pushUndoState(state)
-    };
+    
   }),
-
+  dragVertexStart: () => set((state) => {
+    const undoState = pushUndoState(state);
+      state.undoStack = undoState.undoStack;
+      state.redoStack = undoState.redoStack;
+      if (Object.keys({}).length > 0) {
+        Object.assign(state, {});
+      }
+  }),
   dragVertexLive: (entityId, pointIndex, newPos) => set((state) => {
     if (!state.activeSketchId) return state;
     
@@ -2024,7 +1995,12 @@ export const useCADStore = create<CADState>((set, get) => ({
        constraints: [...sketch.constraints, tempFixConstraint],
     };
     
-    const solvedTempSketch = applyConstraintsToSketch(tempSketch);
+    const solvedTempSketch: SketchFeature = {
+       ...sketch,
+       entities: newEntities,
+       constraints: [...sketch.constraints, tempFixConstraint],
+    };
+    applyConstraintsToSketch(solvedTempSketch);
     solvedTempSketch.constraints = sketch.constraints;
 
     const updatedDocument: CADDocument = {
@@ -2036,9 +2012,7 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     return { document: updatedDocument };
   }),
-
-  dragVertexCommit: () => {
-    const state = get();
+  dragVertexCommit: () => set((state) => {
     if (!state.activeSketchId) return;
     
     const sketch = state.document.featureTree.find(
@@ -2047,7 +2021,8 @@ export const useCADStore = create<CADState>((set, get) => ({
     
     if (!sketch) return;
 
-    const finalSketch = applyConstraintsToSketch(sketch);
+    const finalSketch: SketchFeature = { ...sketch };
+    applyConstraintsToSketch(finalSketch);
 
     const updatedDocument: CADDocument = {
        ...state.document,
@@ -2062,11 +2037,8 @@ export const useCADStore = create<CADState>((set, get) => ({
        document: docDirty,
     });
 
-    get().regenerateFeatureTree();
-  },
-
-  trimEntity: (entityId, clickPoint) => {
-    const state = get();
+    }),
+  trimEntity: (entityId, clickPoint) => set((state) => {
     if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
@@ -2105,7 +2077,13 @@ export const useCADStore = create<CADState>((set, get) => ({
       dimensions: remainingDimensions,
     };
 
-    const updatedSketch = applyConstraintsToSketch(tempSketch);
+    const updatedSketch: SketchFeature = {
+      ...sketch,
+      entities: updatedEntities,
+      constraints: remainingConstraints,
+      dimensions: remainingDimensions,
+    };
+    applyConstraintsToSketch(updatedSketch);
 
     const updatedDocument: CADDocument = {
       ...state.document,
@@ -2116,17 +2094,16 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-      selectedEntityIds: state.selectedEntityIds.filter((id) => !toRemoveSet.has(id)),
-    });
+    
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    Object.assign(state, {document: docDirty,
+      selectedEntityIds: state.selectedEntityIds.filter((id) => !toRemoveSet.has(id)),});
 
-    get().regenerateFeatureTree();
-  },
 
-  extendEntity: (entityId, clickPoint) => {
-    const state = get();
+    }),
+  extendEntity: (entityId, clickPoint) => { set((state) => {
     if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
@@ -2135,28 +2112,18 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!sketch) return;
 
-    const updatedSketch = applyExtendToSketch(sketch, entityId, clickPoint);
-    if (updatedSketch === sketch) return;
+    applyExtendToSketch(sketch, entityId, clickPoint);
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    const updatedDocument: CADDocument = {
-      ...state.document,
-      featureTree: state.document.featureTree.map((f) =>
-        f.id === state.activeSketchId ? updatedSketch : f
-      ),
-    };
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
 
-    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
-
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
     });
-
     get().regenerateFeatureTree();
   },
 
-  applyFillet: (entityId1, entityId2, radius) => {
-    const state = get();
+  applyFillet: (entityId1, entityId2, radius) => { set((state) => {
     if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
@@ -2165,29 +2132,19 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!sketch) return;
 
-    const updatedSketch = applyFilletToSketch(sketch, entityId1, entityId2, radius);
-    if (updatedSketch === sketch) return;
+    applyFilletToSketch(sketch, entityId1, entityId2, radius);
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    const updatedDocument: CADDocument = {
-      ...state.document,
-      featureTree: state.document.featureTree.map((f) =>
-        f.id === state.activeSketchId ? updatedSketch : f
-      ),
-    };
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    state.selectedEntityIds = state.selectedEntityIds.filter((id) => id !== entityId1 && id !== entityId2);
 
-    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
-
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-      selectedEntityIds: state.selectedEntityIds.filter((id) => id !== entityId1 && id !== entityId2),
     });
-
     get().regenerateFeatureTree();
   },
 
-  applyChamfer: (entityId1, entityId2, distance) => {
-    const state = get();
+  applyChamfer: (entityId1, entityId2, distance) => { set((state) => {
     if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
@@ -2196,29 +2153,19 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!sketch) return;
 
-    const updatedSketch = applyChamferToSketch(sketch, entityId1, entityId2, distance);
-    if (updatedSketch === sketch) return;
+    applyChamferToSketch(sketch, entityId1, entityId2, distance);
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    const updatedDocument: CADDocument = {
-      ...state.document,
-      featureTree: state.document.featureTree.map((f) =>
-        f.id === state.activeSketchId ? updatedSketch : f
-      ),
-    };
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    state.selectedEntityIds = state.selectedEntityIds.filter((id) => id !== entityId1 && id !== entityId2);
 
-    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
-
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-      selectedEntityIds: state.selectedEntityIds.filter((id) => id !== entityId1 && id !== entityId2),
     });
-
     get().regenerateFeatureTree();
   },
 
-  offsetEntity: (entityId, distance, sidePoint) => {
-    const state = get();
+  offsetEntity: (entityId, distance, sidePoint) => { set((state) => {
     if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
@@ -2227,28 +2174,18 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!sketch) return;
 
-    const updatedSketch = applyOffsetToSketch(sketch, entityId, distance, sidePoint);
-    if (updatedSketch === sketch) return;
+    applyOffsetToSketch(sketch, entityId, distance, sidePoint);
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    const updatedDocument: CADDocument = {
-      ...state.document,
-      featureTree: state.document.featureTree.map((f) =>
-        f.id === state.activeSketchId ? updatedSketch : f
-      ),
-    };
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
 
-    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
-
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
     });
-
     get().regenerateFeatureTree();
   },
 
-  mirrorEntities: (sourceEntityIds, p1, p2) => {
-    const state = get();
+  mirrorEntities: (sourceEntityIds, p1, p2) => { set((state) => {
     if (!state.activeSketchId) return;
 
     const sketch = state.document.featureTree.find(
@@ -2257,28 +2194,18 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!sketch) return;
 
-    const updatedSketch = applyMirrorToSketch(sketch, sourceEntityIds, p1, p2);
-    if (updatedSketch === sketch) return;
+    applyMirrorToSketch(sketch, sourceEntityIds, p1, p2);
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    const updatedDocument: CADDocument = {
-      ...state.document,
-      featureTree: state.document.featureTree.map((f) =>
-        f.id === state.activeSketchId ? updatedSketch : f
-      ),
-    };
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
 
-    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
-
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
     });
-
     get().regenerateFeatureTree();
   },
 
-  moveEntities: (entityIds, basePoint, targetPoint) => {
-    const state = get();
+  moveEntities: (entityIds, basePoint, targetPoint) => { set((state) => {
     if (!state.activeSketchId || !entityIds || entityIds.length === 0) return;
 
     const sketch = state.document.featureTree.find(
@@ -2287,29 +2214,19 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!sketch) return;
 
-    const updatedSketch = applyMoveToSketch(sketch, entityIds, basePoint, targetPoint);
-    if (updatedSketch === sketch) return;
+    applyMoveToSketch(sketch, entityIds, basePoint, targetPoint);
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    const updatedDocument: CADDocument = {
-      ...state.document,
-      featureTree: state.document.featureTree.map((f) =>
-        f.id === state.activeSketchId ? updatedSketch : f
-      ),
-    };
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    state.selectedEntityIds = entityIds;
 
-    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
-
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-      selectedEntityIds: entityIds,
     });
-
     get().regenerateFeatureTree();
   },
 
-  copyEntities: (entityIds, basePoint, targetPoint) => {
-    const state = get();
+  copyEntities: (entityIds, basePoint, targetPoint) => { set((state) => {
     if (!state.activeSketchId || !entityIds || entityIds.length === 0) return;
 
     const sketch = state.document.featureTree.find(
@@ -2319,32 +2236,22 @@ export const useCADStore = create<CADState>((set, get) => ({
     if (!sketch) return;
 
     const prevEntityCount = sketch.entities.length;
-    const updatedSketch = applyCopyToSketch(sketch, entityIds, basePoint, targetPoint);
-    if (updatedSketch === sketch) return;
-
-    const newEntities = updatedSketch.entities.slice(prevEntityCount);
+    applyCopyToSketch(sketch, entityIds, basePoint, targetPoint);
+    const newEntities = sketch.entities.slice(prevEntityCount);
     const newEntityIds = newEntities.map((e) => e.id);
 
-    const updatedDocument: CADDocument = {
-      ...state.document,
-      featureTree: state.document.featureTree.map((f) =>
-        f.id === state.activeSketchId ? updatedSketch : f
-      ),
-    };
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    state.selectedEntityIds = newEntityIds.length > 0 ? newEntityIds : state.selectedEntityIds;
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-      selectedEntityIds: newEntityIds.length > 0 ? newEntityIds : state.selectedEntityIds,
     });
-
     get().regenerateFeatureTree();
   },
 
-  scaleEntities: (entityIds, basePoint, factor) => {
-    const state = get();
+  scaleEntities: (entityIds, basePoint, factor) => { set((state) => {
     if (!state.activeSketchId || !entityIds || entityIds.length === 0 || factor <= 0) return;
 
     const sketch = state.document.featureTree.find(
@@ -2353,29 +2260,19 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!sketch) return;
 
-    const updatedSketch = applyScaleToSketch(sketch, entityIds, basePoint, factor);
-    if (updatedSketch === sketch) return;
+    applyScaleToSketch(sketch, entityIds, basePoint, factor);
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    const updatedDocument: CADDocument = {
-      ...state.document,
-      featureTree: state.document.featureTree.map((f) =>
-        f.id === state.activeSketchId ? updatedSketch : f
-      ),
-    };
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    state.selectedEntityIds = entityIds;
 
-    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
-
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-      selectedEntityIds: entityIds,
     });
-
     get().regenerateFeatureTree();
   },
 
-  rotateEntities: (entityIds, basePoint, angleRad) => {
-    const state = get();
+  rotateEntities: (entityIds, basePoint, angleRad) => { set((state) => {
     if (!state.activeSketchId || !entityIds || entityIds.length === 0) return;
 
     const sketch = state.document.featureTree.find(
@@ -2384,29 +2281,19 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!sketch) return;
 
-    const updatedSketch = applyRotateToSketch(sketch, entityIds, basePoint, angleRad);
-    if (updatedSketch === sketch) return;
+    applyRotateToSketch(sketch, entityIds, basePoint, angleRad);
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    const updatedDocument: CADDocument = {
-      ...state.document,
-      featureTree: state.document.featureTree.map((f) =>
-        f.id === state.activeSketchId ? updatedSketch : f
-      ),
-    };
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    state.selectedEntityIds = entityIds;
 
-    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
-
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-      selectedEntityIds: entityIds,
     });
-
     get().regenerateFeatureTree();
   },
 
-  circularArrayEntities: (entityIds, centerPoint, items, fillAngleDeg) => {
-    const state = get();
+  circularArrayEntities: (entityIds, centerPoint, items, fillAngleDeg) => { set((state) => {
     if (!state.activeSketchId || !entityIds || entityIds.length === 0 || items <= 1) return;
 
     const sketch = state.document.featureTree.find(
@@ -2415,30 +2302,23 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!sketch) return;
 
-    const updatedSketch = applyCircularArrayToSketch(sketch, entityIds, centerPoint, items, fillAngleDeg);
-    if (updatedSketch === sketch) return;
+    const prevCount = sketch.entities.length;
+    applyCircularArrayToSketch(sketch, entityIds, centerPoint, items, fillAngleDeg);
+    const newEntities = sketch.entities.slice(prevCount);
+    const newEntityIds = newEntities.map((e) => e.id);
 
-    const updatedDocument: CADDocument = {
-      ...state.document,
-      featureTree: state.document.featureTree.map((f) =>
-        f.id === state.activeSketchId ? updatedSketch : f
-      ),
-    };
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    const newEntityIds = updatedSketch.entities.map((e) => e.id);
-    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    state.selectedEntityIds = newEntityIds;
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-      selectedEntityIds: newEntityIds,
     });
-
     get().regenerateFeatureTree();
   },
 
-  rectArrayEntities: (entityIds, cols, rows, colSpacing, rowSpacing) => {
-    const state = get();
+  rectArrayEntities: (entityIds, cols, rows, colSpacing, rowSpacing) => { set((state) => {
     if (!state.activeSketchId || !entityIds || entityIds.length === 0 || cols < 1 || rows < 1 || (cols === 1 && rows === 1)) return;
 
     const sketch = state.document.featureTree.find(
@@ -2447,25 +2327,19 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     if (!sketch) return;
 
-    const updatedSketch = applyRectArrayToSketch(sketch, entityIds, cols, rows, colSpacing, rowSpacing);
-    if (updatedSketch === sketch) return;
+    const prevCount = sketch.entities.length;
+    applyRectArrayToSketch(sketch, entityIds, cols, rows, colSpacing, rowSpacing);
+    const newEntities = sketch.entities.slice(prevCount);
+    const newEntityIds = newEntities.map((e) => e.id);
 
-    const updatedDocument: CADDocument = {
-      ...state.document,
-      featureTree: state.document.featureTree.map((f) =>
-        f.id === state.activeSketchId ? updatedSketch : f
-      ),
-    };
+    markSketchDirtyInDoc(state.document, state.activeSketchId);
 
-    const newEntityIds = updatedSketch.entities.map((e) => e.id);
-    const docDirty = markSketchDirtyInDoc(updatedDocument, state.activeSketchId);
+    const undoState = pushUndoState(state);
+    state.undoStack = undoState.undoStack;
+    state.redoStack = undoState.redoStack;
+    state.selectedEntityIds = newEntityIds;
 
-    set({
-      ...pushUndoState(state),
-      document: docDirty,
-      selectedEntityIds: newEntityIds,
     });
-
     get().regenerateFeatureTree();
   },
 
@@ -2508,7 +2382,6 @@ export const useCADStore = create<CADState>((set, get) => ({
     }
     return { customPolarAngles: [...state.customPolarAngles, angle].sort((a, b) => a - b) };
   }),
-  
   removeCustomPolarAngle: (angle) => set((state) => ({
     customPolarAngles: state.customPolarAngles.filter((a) => a !== angle)
   })),
@@ -2537,7 +2410,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       selectedFeatureId: null,
     };
   }),
-
   redo: () => set((state) => {
     if (state.redoStack.length === 0) return state;
     const nextDoc = state.redoStack[state.redoStack.length - 1];
@@ -2558,7 +2430,6 @@ export const useCADStore = create<CADState>((set, get) => ({
       selectedFeatureId: null,
     };
   }),
-
   canUndo: () => get().undoStack.length > 0,
   
   canRedo: () => get().redoStack.length > 0,
@@ -2585,7 +2456,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       kernelDiagnostics: [],
     });
   },
-}));
+})));
 
 // 常用的 state Selectors
 export const useCADDocument = () => useCADStore((state) => state.document);

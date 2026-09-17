@@ -20,98 +20,75 @@ import { calculateOffsetEntity, calculateOffsetChain } from '../core/2d/OffsetEn
 import { calculateMirror } from '../core/2d/MirrorEngine';
 import { normalizeAngle } from '../core/2d/IntersectionEngine';
 
-export function applyConstraintsToSketch(sketch: SketchFeature): SketchFeature {
+export function applyConstraintsToSketch(sketch: SketchFeature): void {
   const solverResult = solveConstraints(sketch.entities, sketch.constraints);
   const dofState = analyzeSketchDOF(solverResult.entities, sketch.constraints);
   const profiles = findClosedProfiles(solverResult.entities, sketch.constraints);
 
-  return {
-    ...sketch,
-    entities: solverResult.entities.map((e) => ({
-      ...e,
-      state: dofState.entityStates[e.id] || 'UnderDefined',
-    })),
-    constraints: sketch.constraints,
-    profiles: profiles,
-    solverState: dofState.state,
-  };
+  sketch.entities = solverResult.entities.map((e) => ({
+    ...e,
+    state: dofState.entityStates[e.id] || 'UnderDefined',
+  }));
+  sketch.profiles = profiles;
+  sketch.solverState = dofState.state;
 }
 
-export function insertEntityIntoSketch(doc: CADDocument, sketchId: string, entity: CADEntity2D): CADDocument {
-  return {
-    ...doc,
-    featureTree: doc.featureTree.map((feature) => {
-      if (feature.id === sketchId && feature.type === 'SKETCH') {
-        const updatedSketch: SketchFeature = {
-          ...feature,
-          entities: [...feature.entities, entity],
-        };
-        return applyConstraintsToSketch(updatedSketch);
-      }
-      return feature;
-    }),
-  };
+export function insertEntityIntoSketch(doc: CADDocument, sketchId: string, entity: CADEntity2D): void {
+  const sketch = doc.featureTree.find(
+    (feature) => feature.id === sketchId && feature.type === 'SKETCH'
+  ) as SketchFeature | undefined;
+
+  if (sketch) {
+    sketch.entities.push(entity);
+    applyConstraintsToSketch(sketch);
+  }
 }
 
-export function removeEntityFromSketch(doc: CADDocument, sketchId: string, entityId: string): CADDocument {
-  return {
-    ...doc,
-    featureTree: doc.featureTree.map((feature) => {
-      if (feature.id === sketchId && feature.type === 'SKETCH') {
-        // Find all constraints that are associated with the target entity
-        const constraintsToRemove = new Set(
-          feature.constraints
-            .filter((c) => c.entityIds.includes(entityId))
-            .map((c) => c.id)
-        );
+export function removeEntityFromSketch(doc: CADDocument, sketchId: string, entityId: string): void {
+  const sketch = doc.featureTree.find(
+    (feature) => feature.id === sketchId && feature.type === 'SKETCH'
+  ) as SketchFeature | undefined;
 
-        const updatedSketch: SketchFeature = {
-          ...feature,
-          entities: feature.entities.filter((e) => e.id !== entityId),
-          // Remove the associated constraints
-          constraints: feature.constraints.filter((c) => !constraintsToRemove.has(c.id)),
-          // Remove the dimensions linked to the removed constraints
-          dimensions: feature.dimensions.filter(
-            (d) => !d.constraintId || !constraintsToRemove.has(d.constraintId)
-          ),
-        };
-        return applyConstraintsToSketch(updatedSketch);
-      }
-      return feature;
-    }),
-  };
+  if (sketch) {
+    const constraintsToRemove = new Set(
+      sketch.constraints
+        .filter((c) => c.entityIds.includes(entityId))
+        .map((c) => c.id)
+    );
+
+    sketch.entities = sketch.entities.filter((e) => e.id !== entityId);
+    sketch.constraints = sketch.constraints.filter((c) => !constraintsToRemove.has(c.id));
+    sketch.dimensions = (sketch.dimensions || []).filter(
+      (d) => !d.constraintId || !constraintsToRemove.has(d.constraintId)
+    );
+    
+    applyConstraintsToSketch(sketch);
+  }
 }
 
-export function updateEntityInSketch(doc: CADDocument, sketchId: string, entity: CADEntity2D): CADDocument {
-  return {
-    ...doc,
-    featureTree: doc.featureTree.map((feature) => {
-      if (feature.id === sketchId && feature.type === 'SKETCH') {
-        const updatedSketch: SketchFeature = {
-          ...feature,
-          entities: feature.entities.map((e) => (e.id === entity.id ? entity : e)),
-        };
-        return applyConstraintsToSketch(updatedSketch);
-      }
-      return feature;
-    }),
-  };
+export function updateEntityInSketch(doc: CADDocument, sketchId: string, entity: CADEntity2D): void {
+  const sketch = doc.featureTree.find(
+    (feature) => feature.id === sketchId && feature.type === 'SKETCH'
+  ) as SketchFeature | undefined;
+  if (sketch) {
+    const idx = sketch.entities.findIndex((e) => e.id === entity.id);
+    if (idx !== -1) {
+      sketch.entities[idx] = entity;
+    } else {
+      sketch.entities.push(entity);
+    }
+    applyConstraintsToSketch(sketch);
+  }
 }
 
-export function addConstraintToSketch(doc: CADDocument, sketchId: string, constraint: Constraint): CADDocument {
-  return {
-    ...doc,
-    featureTree: doc.featureTree.map((feature) => {
-      if (feature.id === sketchId && feature.type === 'SKETCH') {
-        const updatedSketch: SketchFeature = {
-          ...feature,
-          constraints: [...feature.constraints, constraint],
-        };
-        return applyConstraintsToSketch(updatedSketch);
-      }
-      return feature;
-    }),
-  };
+export function addConstraintToSketch(doc: CADDocument, sketchId: string, constraint: Constraint): void {
+  const sketch = doc.featureTree.find(
+    (feature) => feature.id === sketchId && feature.type === 'SKETCH'
+  ) as SketchFeature | undefined;
+  if (sketch) {
+    sketch.constraints.push(constraint);
+    applyConstraintsToSketch(sketch);
+  }
 }
 
 export function addDimensionToSketch(
@@ -119,65 +96,44 @@ export function addDimensionToSketch(
   sketchId: string,
   dimension: any,
   constraint: Constraint
-): CADDocument {
-  return {
-    ...doc,
-    featureTree: doc.featureTree.map((feature) => {
-      if (feature.id === sketchId && feature.type === 'SKETCH') {
-        const updatedSketch: SketchFeature = {
-          ...feature,
-          dimensions: [...(feature.dimensions || []), dimension],
-          constraints: [...feature.constraints, constraint],
-        };
-        return applyConstraintsToSketch(updatedSketch);
-      }
-      return feature;
-    }),
-  };
+): void {
+  const sketch = doc.featureTree.find(
+    (feature) => feature.id === sketchId && feature.type === 'SKETCH'
+  ) as SketchFeature | undefined;
+  if (sketch) {
+    if (!sketch.dimensions) sketch.dimensions = [];
+    sketch.dimensions.push(dimension);
+    sketch.constraints.push(constraint);
+    applyConstraintsToSketch(sketch);
+  }
 }
 
-export function removeConstraintFromSketch(doc: CADDocument, sketchId: string, constraintId: string): CADDocument {
-  return {
-    ...doc,
-    featureTree: doc.featureTree.map((feature) => {
-      if (feature.id === sketchId && feature.type === 'SKETCH') {
-        const updatedSketch: SketchFeature = {
-          ...feature,
-          constraints: feature.constraints.filter((c) => c.id !== constraintId),
-        };
-        return applyConstraintsToSketch(updatedSketch);
-      }
-      return feature;
-    }),
-  };
+export function removeConstraintFromSketch(doc: CADDocument, sketchId: string, constraintId: string): void {
+  const sketch = doc.featureTree.find(
+    (feature) => feature.id === sketchId && feature.type === 'SKETCH'
+  ) as SketchFeature | undefined;
+  if (sketch) {
+    sketch.constraints = sketch.constraints.filter((c) => c.id !== constraintId);
+    applyConstraintsToSketch(sketch);
+  }
 }
 
-export function removeDimensionFromSketch(doc: CADDocument, sketchId: string, dimensionId: string): CADDocument {
-  return {
-    ...doc,
-    featureTree: doc.featureTree.map((feature) => {
-      if (feature.id === sketchId && feature.type === 'SKETCH') {
-        const sketch = feature as SketchFeature;
-        const targetDim = sketch.dimensions?.find((d) => d.id === dimensionId);
-        if (!targetDim) return feature;
+export function removeDimensionFromSketch(doc: CADDocument, sketchId: string, dimensionId: string): void {
+  const sketch = doc.featureTree.find(
+    (feature) => feature.id === sketchId && feature.type === 'SKETCH'
+  ) as SketchFeature | undefined;
+  if (sketch) {
+    const targetDim = sketch.dimensions?.find((d) => d.id === dimensionId);
+    if (!targetDim) return;
 
-        const constraintId = targetDim.constraintId;
+    const constraintId = targetDim.constraintId;
 
-        const updatedDimensions = (sketch.dimensions || []).filter((d) => d.id !== dimensionId);
-        const updatedConstraints = constraintId
-          ? sketch.constraints.filter((c) => c.id !== constraintId)
-          : sketch.constraints;
-
-        const updatedSketch: SketchFeature = {
-          ...sketch,
-          dimensions: updatedDimensions,
-          constraints: updatedConstraints,
-        };
-        return applyConstraintsToSketch(updatedSketch);
-      }
-      return feature;
-    }),
-  };
+    sketch.dimensions = (sketch.dimensions || []).filter((d) => d.id !== dimensionId);
+    if (constraintId) {
+      sketch.constraints = sketch.constraints.filter((c) => c.id !== constraintId);
+    }
+    applyConstraintsToSketch(sketch);
+  }
 }
 
 export function applyFilletToSketch(
@@ -185,17 +141,17 @@ export function applyFilletToSketch(
   entityId1: string,
   entityId2: string,
   radius: number
-): SketchFeature {
+): void {
   const ent1 = sketch.entities.find((e) => e.id === entityId1 && (e.type === 'line' || e.type === 'arc')) as LineEntity | ArcEntity | undefined;
   const ent2 = sketch.entities.find((e) => e.id === entityId2 && (e.type === 'line' || e.type === 'arc')) as LineEntity | ArcEntity | undefined;
 
   if (!ent1 || !ent2) {
-    return sketch;
+    return;
   }
 
   const result = createFillet(ent1, ent2, radius);
   if (!result) {
-    return sketch;
+    return;
   }
 
   const { arc, trimmedEntity1, trimmedEntity2, generatedConstraints } = result;
@@ -268,14 +224,11 @@ export function applyFilletToSketch(
   });
   updatedEntities.push(arc);
 
-  const tempSketch: SketchFeature = {
-    ...sketch,
-    entities: updatedEntities,
-    constraints: [...finalConstraints, ...generatedConstraints],
-    dimensions: filteredDimensions,
-  };
+  sketch.entities = updatedEntities;
+  sketch.constraints = [...finalConstraints, ...generatedConstraints];
+  sketch.dimensions = filteredDimensions;
 
-  return applyConstraintsToSketch(tempSketch);
+  applyConstraintsToSketch(sketch);
 }
 
 export function applyChamferToSketch(
@@ -283,17 +236,17 @@ export function applyChamferToSketch(
   entityId1: string,
   entityId2: string,
   distance: number
-): SketchFeature {
+): void {
   const ent1 = sketch.entities.find((e) => e.id === entityId1) as LineEntity | undefined;
   const ent2 = sketch.entities.find((e) => e.id === entityId2) as LineEntity | undefined;
 
   if (!ent1 || !ent2 || ent1.type !== 'line' || ent2.type !== 'line') {
-    return sketch;
+    return;
   }
 
   const result = createChamfer(ent1, ent2, distance);
   if (!result) {
-    return sketch;
+    return;
   }
 
   const { chamferLine, trimmedEntity1, trimmedEntity2, generatedConstraints } = result;
@@ -354,24 +307,21 @@ export function applyChamferToSketch(
   });
   updatedEntities.push(chamferLine);
 
-  const tempSketch: SketchFeature = {
-    ...sketch,
-    entities: updatedEntities,
-    constraints: [...finalConstraints, ...generatedConstraints],
-    dimensions: filteredDimensions,
-  };
+  sketch.entities = updatedEntities;
+  sketch.constraints = [...finalConstraints, ...generatedConstraints];
+  sketch.dimensions = filteredDimensions;
 
-  return applyConstraintsToSketch(tempSketch);
+  applyConstraintsToSketch(sketch);
 }
 
 export function applyExtendToSketch(
   sketch: SketchFeature,
   entityId: string,
   clickPoint: Point2D
-): SketchFeature {
+): void {
   const extendResult = calculateExtend(entityId, clickPoint, sketch.entities);
   if (!extendResult) {
-    return sketch;
+    return;
   }
 
   const { originalEntityId, extendedEntity, generatedConstraint } = extendResult;
@@ -424,15 +374,12 @@ export function applyExtendToSketch(
     ? [...filteredConstraints, generatedConstraint]
     : filteredConstraints;
 
-  const tempSketch: SketchFeature = {
-    ...sketch,
-    entities: updatedEntities,
-    constraints: finalConstraints,
-    dimensions: updatedDimensions,
-  };
+  sketch.entities = updatedEntities;
+  sketch.constraints = finalConstraints;
+  sketch.dimensions = updatedDimensions;
 
   // 3. 呼叫 applyConstraintsToSketch 重新求解幾何、DOF 與提取封閉面 profiles
-  return applyConstraintsToSketch(tempSketch);
+  applyConstraintsToSketch(sketch);
 }
 
 export function applyOffsetToSketch(
@@ -440,10 +387,10 @@ export function applyOffsetToSketch(
   entityId: string,
   distance: number,
   sidePoint: Point2D
-): SketchFeature {
+): void {
   const target = sketch.entities.find((e) => e.id === entityId);
   if (!target) {
-    return sketch;
+    return;
   }
 
   // 支援整條連續多段線/連鎖幾何一次性整體偏移
@@ -454,16 +401,13 @@ export function applyOffsetToSketch(
     sketch.constraints
   );
   if (!offsetResult || offsetResult.entities.length === 0) {
-    return sketch;
+    return;
   }
 
-  const updatedSketch: SketchFeature = {
-    ...sketch,
-    entities: [...sketch.entities, ...offsetResult.entities],
-    constraints: [...sketch.constraints, ...offsetResult.generatedConstraints],
-  };
+  sketch.entities = [...sketch.entities, ...offsetResult.entities];
+  sketch.constraints = [...sketch.constraints, ...offsetResult.generatedConstraints];
 
-  return applyConstraintsToSketch(updatedSketch);
+  applyConstraintsToSketch(sketch);
 }
 
 export function applyMirrorToSketch(
@@ -471,24 +415,21 @@ export function applyMirrorToSketch(
   sourceEntityIds: string[],
   p1: Point2D,
   p2: Point2D
-): SketchFeature {
+): void {
   const sourceEntities = sketch.entities.filter((e) => sourceEntityIds.includes(e.id));
   if (sourceEntities.length === 0) {
-    return sketch;
+    return;
   }
 
   const result = calculateMirror(sourceEntities, p1, p2);
   if (!result) {
-    return sketch;
+    return;
   }
 
-  const updatedSketch: SketchFeature = {
-    ...sketch,
-    entities: [...sketch.entities, ...result.mirroredEntities],
-    constraints: [...sketch.constraints, ...result.generatedConstraints],
-  };
+  sketch.entities = [...sketch.entities, ...result.mirroredEntities];
+  sketch.constraints = [...sketch.constraints, ...result.generatedConstraints];
 
-  return applyConstraintsToSketch(updatedSketch);
+  applyConstraintsToSketch(sketch);
 }
 
 export function applyMoveToSketch(
@@ -496,11 +437,11 @@ export function applyMoveToSketch(
   entityIds: string[],
   basePoint: Point2D,
   targetPoint: Point2D
-): SketchFeature {
-  if (!entityIds || entityIds.length === 0) return sketch;
+): void {
+  if (!entityIds || entityIds.length === 0) return;
   const dx = targetPoint.x - basePoint.x;
   const dy = targetPoint.y - basePoint.y;
-  if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) return sketch;
+  if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) return;
 
   const targetIdSet = new Set(entityIds);
 
@@ -578,14 +519,11 @@ export function applyMoveToSketch(
       return d;
     });
 
-  const tempSketch: SketchFeature = {
-    ...sketch,
-    entities: updatedEntities,
-    constraints: filteredConstraints,
-    dimensions: updatedDimensions,
-  };
+  sketch.entities = updatedEntities;
+  sketch.constraints = filteredConstraints;
+  sketch.dimensions = updatedDimensions;
 
-  return applyConstraintsToSketch(tempSketch);
+  applyConstraintsToSketch(sketch);
 }
 
 export function applyCopyToSketch(
@@ -593,14 +531,14 @@ export function applyCopyToSketch(
   entityIds: string[],
   basePoint: Point2D,
   targetPoint: Point2D
-): SketchFeature {
-  if (!entityIds || entityIds.length === 0) return sketch;
+): void {
+  if (!entityIds || entityIds.length === 0) return;
   const dx = targetPoint.x - basePoint.x;
   const dy = targetPoint.y - basePoint.y;
 
   const targetIdSet = new Set(entityIds);
   const sourceEntities = sketch.entities.filter((e) => targetIdSet.has(e.id));
-  if (sourceEntities.length === 0) return sketch;
+  if (sourceEntities.length === 0) return;
 
   // 進行深拷貝 (Deep Clone)，產生全新的 UUID，並套用向量平移。
   // 注意：複製時暫時過濾掉選定圖元綁定的 Constraint 與 Dimension，以避免產生 OverDefined 錯誤。
@@ -652,12 +590,9 @@ export function applyCopyToSketch(
     } as CADEntity2D;
   });
 
-  const updatedSketch: SketchFeature = {
-    ...sketch,
-    entities: [...sketch.entities, ...copiedEntities],
-  };
+  sketch.entities = [...sketch.entities, ...copiedEntities];
 
-  return applyConstraintsToSketch(updatedSketch);
+  applyConstraintsToSketch(sketch);
 }
 
 export function applyScaleToSketch(
@@ -665,9 +600,9 @@ export function applyScaleToSketch(
   entityIds: string[],
   basePoint: Point2D,
   factor: number
-): SketchFeature {
+): void {
   if (!entityIds || entityIds.length === 0 || factor <= 0 || Math.abs(factor - 1) < 1e-9) {
-    return sketch;
+    return;
   }
 
   const targetIdSet = new Set(entityIds);
@@ -808,14 +743,11 @@ export function applyScaleToSketch(
       return d;
     });
 
-  const tempSketch: SketchFeature = {
-    ...sketch,
-    entities: updatedEntities,
-    constraints: updatedConstraints,
-    dimensions: updatedDimensions,
-  };
+  sketch.entities = updatedEntities;
+  sketch.constraints = updatedConstraints;
+  sketch.dimensions = updatedDimensions;
 
-  return applyConstraintsToSketch(tempSketch);
+  applyConstraintsToSketch(sketch);
 }
 
 /**
@@ -837,9 +769,9 @@ export function applyRotateToSketch(
   entityIds: string[],
   basePoint: Point2D,
   angleRad: number
-): SketchFeature {
+): void {
   if (!entityIds || entityIds.length === 0 || Math.abs(angleRad) < 1e-9) {
-    return sketch;
+    return;
   }
 
   const targetIdSet = new Set(entityIds);
@@ -952,14 +884,11 @@ export function applyRotateToSketch(
       return d;
     });
 
-  const tempSketch: SketchFeature = {
-    ...sketch,
-    entities: updatedEntities,
-    constraints: updatedConstraints,
-    dimensions: updatedDimensions,
-  };
+  sketch.entities = updatedEntities;
+  sketch.constraints = updatedConstraints;
+  sketch.dimensions = updatedDimensions;
 
-  return applyConstraintsToSketch(tempSketch);
+  applyConstraintsToSketch(sketch);
 }
 
 /**
@@ -975,15 +904,15 @@ export function applyCircularArrayToSketch(
   centerPoint: Point2D,
   items: number,
   fillAngleDeg: number
-): SketchFeature {
+): void {
   if (!entityIds || entityIds.length === 0 || items <= 1) {
-    return sketch;
+    return;
   }
 
   const targetIdSet = new Set(entityIds);
   const sourceEntities = sketch.entities.filter((e) => targetIdSet.has(e.id));
   if (sourceEntities.length === 0) {
-    return sketch;
+    return;
   }
 
   // 1. 計算每次遞增的旋轉角度
@@ -1049,16 +978,9 @@ export function applyCircularArrayToSketch(
     }
   }
 
-  // 3. 【關鍵防護】：複製過程中絕對不要複製來源圖元的 Constraints 與 Dimensions，以防止拓撲樹與求解器過載。
-  // 原始圖元的 constraints 與 dimensions 保持不變，新圖元作為獨立幾何加入
-  const updatedSketch: SketchFeature = {
-    ...sketch,
-    entities: [...sketch.entities, ...clonedEntities],
-    constraints: sketch.constraints,
-    dimensions: sketch.dimensions,
-  };
+  sketch.entities = [...sketch.entities, ...clonedEntities];
 
-  return applyConstraintsToSketch(updatedSketch);
+  applyConstraintsToSketch(sketch);
 }
 
 /**
@@ -1076,15 +998,15 @@ export function applyRectArrayToSketch(
   rows: number,
   colSpacing: number,
   rowSpacing: number
-): SketchFeature {
+): void {
   if (!entityIds || entityIds.length === 0 || cols < 1 || rows < 1 || (cols === 1 && rows === 1)) {
-    return sketch;
+    return;
   }
 
   const targetIdSet = new Set(entityIds);
   const sourceEntities = sketch.entities.filter((e) => targetIdSet.has(e.id));
   if (sourceEntities.length === 0) {
-    return sketch;
+    return;
   }
 
   const clonedEntities: CADEntity2D[] = [];
@@ -1143,15 +1065,9 @@ export function applyRectArrayToSketch(
     }
   }
 
-  // 【關鍵防護】：複製過程中絕對禁止複製來源圖元的 Constraints 與 Dimensions，以免造成求解器 (ConstraintSolver) 過載或 OverDefined 錯誤。
-  const updatedSketch: SketchFeature = {
-    ...sketch,
-    entities: [...sketch.entities, ...clonedEntities],
-    constraints: sketch.constraints,
-    dimensions: sketch.dimensions,
-  };
+  sketch.entities = [...sketch.entities, ...clonedEntities];
 
-  return applyConstraintsToSketch(updatedSketch);
+  applyConstraintsToSketch(sketch);
 }
 
 /**

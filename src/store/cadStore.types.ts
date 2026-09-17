@@ -131,7 +131,6 @@ export interface CADActions {
   toggleLayerLock: (layerId: string) => void;
 
   // 3D 實體背景投影邊線（提供 2D 草圖鎖點與投影幾何參考）
-  projectedEntities: CADEntity2D[];
   setProjectedEntities: (entities: CADEntity2D[]) => void;
 
   // 視圖與工具控制
@@ -256,6 +255,9 @@ export interface CADState extends CADActions {
   // 圖層狀態與管理
   activeLayerId: string;
   isLayerModalOpen: boolean;
+
+  // 3D 實體背景投影邊線（提供 2D 草圖鎖點與投影幾何參考）
+  projectedEntities: CADEntity2D[];
 
   undoStack: CADDocument[];
   redoStack: CADDocument[];
