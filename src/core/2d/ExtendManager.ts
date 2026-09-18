@@ -509,7 +509,7 @@ export function calculateExtend(
         const dEnd = getDistance(pEnd, targetPoint);
         if (dStart < 1e-3 || dEnd < 1e-3) {
           isEndpoint = true;
-          boundaryPointIndex = dStart < dEnd ? 0 : 1;
+          boundaryPointIndex = dStart < dEnd ? 1 : 2;
         }
       } else if (boundaryEntity.type === 'polyline') {
         let minD = Infinity;
@@ -568,14 +568,14 @@ export function calculateExtend(
 
     const originalSweep = getArcSweepAngle(sAngle, eAngle, isCW);
     const unSweptRegion = 2 * Math.PI - originalSweep;
-    let extendedPointIndex: number; // 0 for startAngle, 1 for endAngle
+    let extendedPointIndex: number; // 1 for startAngle, 2 for endAngle
     let minSweep = Infinity;
     let targetPoint: Point2D | null = null;
     let targetTheta = 0;
     let boundaryEntityId = '';
 
     const isExtendingEnd = distEnd < distStart;
-    extendedPointIndex = isExtendingEnd ? 1 : 0;
+    extendedPointIndex = isExtendingEnd ? 2 : 1;
 
     // 2. 遍歷其他圖元，尋找與目標圓周的交點
     for (const boundary of boundaryEntities) {
@@ -659,7 +659,7 @@ export function calculateExtend(
         const dEnd = getDistance(pEnd, targetPoint);
         if (dStart < 1e-3 || dEnd < 1e-3) {
           isEndpoint = true;
-          boundaryPointIndex = dStart < dEnd ? 0 : 1;
+          boundaryPointIndex = dStart < dEnd ? 1 : 2;
         }
       } else if (boundaryEntity.type === 'polyline') {
         let minD = Infinity;

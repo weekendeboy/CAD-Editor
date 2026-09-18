@@ -283,9 +283,9 @@ export default function App() {
           y: ent.center.y + ent.radius * Math.sin(ent.endAngle),
         };
         return [
-          { pt: startPt, idx: 0 },
-          { pt: endPt, idx: 1 },
-          { pt: ent.center, idx: 2 },
+          { pt: startPt, idx: 1 },
+          { pt: endPt, idx: 2 },
+          { pt: ent.center, idx: 0 },
         ];
       }
       if (ent.type === 'circle') {

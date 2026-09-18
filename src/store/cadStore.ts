@@ -3202,17 +3202,17 @@ export const useCADStore = create<CADState>()(
             }
           } else if (updatedEntity.type === "arc") {
             if (pointIndex === 0) {
+              updatedEntity.center = newPos;
+            } else if (pointIndex === 1) {
               const dx = newPos.x - updatedEntity.center.x;
               const dy = newPos.y - updatedEntity.center.y;
               updatedEntity.startAngle = Math.atan2(dy, dx);
               updatedEntity.radius = Math.hypot(dx, dy);
-            } else if (pointIndex === 1) {
+            } else if (pointIndex === 2) {
               const dx = newPos.x - updatedEntity.center.x;
               const dy = newPos.y - updatedEntity.center.y;
               updatedEntity.endAngle = Math.atan2(dy, dx);
               updatedEntity.radius = Math.hypot(dx, dy);
-            } else if (pointIndex === 2) {
-              updatedEntity.center = newPos;
             }
           } else if (updatedEntity.type === "polyline") {
             if (updatedEntity.points[pointIndex]) {
@@ -3279,17 +3279,17 @@ export const useCADStore = create<CADState>()(
           }
         } else if (updatedEntity.type === "arc") {
           if (pointIndex === 0) {
+            updatedEntity.center = newPos;
+          } else if (pointIndex === 1) {
             const dx = newPos.x - updatedEntity.center.x;
             const dy = newPos.y - updatedEntity.center.y;
             updatedEntity.startAngle = Math.atan2(dy, dx);
             updatedEntity.radius = Math.hypot(dx, dy);
-          } else if (pointIndex === 1) {
+          } else if (pointIndex === 2) {
             const dx = newPos.x - updatedEntity.center.x;
             const dy = newPos.y - updatedEntity.center.y;
             updatedEntity.endAngle = Math.atan2(dy, dx);
             updatedEntity.radius = Math.hypot(dx, dy);
-          } else if (pointIndex === 2) {
-            updatedEntity.center = newPos;
           }
         } else if (updatedEntity.type === "polyline") {
           if (updatedEntity.points[pointIndex]) {

@@ -820,7 +820,7 @@ export function useDrawMachine() {
             }
           }
         }
-      } else if ((e.key === 'm' || e.key === 'M') && currentTool === 'POLYLINE') {
+      } else if ((e.key === 'm' || e.key === 'M' || e.key === 'a' || e.key === 'A' || e.key === 'l' || e.key === 'L') && currentTool === 'POLYLINE') {
         togglePolylineMode();
       } else if (e.key === 'Enter' && currentTool === 'POLYLINE') {
         finishPolyline(false);
@@ -1916,7 +1916,7 @@ export function useDrawMachine() {
               drawSession.startPoint,
               actualEndPt,
               arcData.center,
-              !arcData.isStartPointMatchingPStart
+              arcData.clockwise
             );
           }
 
@@ -1940,7 +1940,7 @@ export function useDrawMachine() {
             setLastRadius(arcData.radius);
             newEntityId = newArc.id;
 
-            const newTangent = getSegmentEndTangent(newArc, arcData.isStartPointMatchingPStart);
+            const newTangent = getSegmentEndTangent(newArc, !arcData.clockwise);
             setLastTangentDir(newTangent);
             newSegs = [
               ...polySegments,
@@ -1984,19 +1984,17 @@ export function useDrawMachine() {
             setLastEntityId(newEntityId);
 
             if (startSnap && startSnap.entityId !== newEntityId && isRealSketchEntity(startSnap.entityId) && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
+              const startPtIdx = polylineMode === 'ARC' && arcData ? 1 : 0;
               addConstraint({
                 id: crypto.randomUUID(),
                 type: 'coincident',
                 entityIds: [newEntityId, startSnap.entityId],
-                pointIndices: [0, startSnap.pointIndex],
+                pointIndices: [startPtIdx, startSnap.pointIndex],
               });
             }
           } else {
-            // Find physical starting point index of the new segment
-            let newStartIndex = 0;
-            if (polylineMode === 'ARC' && arcData) {
-              newStartIndex = arcData.isStartPointMatchingPStart ? 0 : 1;
-            }
+            // Standardized Arc Point Indices: 0: Center, 1: Start (p1), 2: End (p2)
+            const newStartIndex = polylineMode === 'ARC' && arcData ? 1 : 0;
 
             // Find physical ending point index of previous segment
             let lastEndIndex = 1;
@@ -2015,7 +2013,7 @@ export function useDrawMachine() {
                 };
                 const dStart = Math.hypot(drawSession.startPoint.x - startPt.x, drawSession.startPoint.y - startPt.y);
                 const dEnd = Math.hypot(drawSession.startPoint.x - endPt.x, drawSession.startPoint.y - endPt.y);
-                lastEndIndex = dStart < dEnd ? 0 : 1;
+                lastEndIndex = dStart < dEnd ? 1 : 2;
               }
             }
 
@@ -2041,10 +2039,7 @@ export function useDrawMachine() {
           }
 
           if (res.snap && res.snap.entityId !== newEntityId && !isClosing && isRealSketchEntity(res.snap.entityId) && (res.snap.type === 'endpoint' || res.snap.type === 'center') && res.snap.pointIndex !== undefined) {
-            let newEndIndex = 1;
-            if (polylineMode === 'ARC' && arcData) {
-              newEndIndex = arcData.isStartPointMatchingPStart ? 1 : 0;
-            }
+            const newEndIndex = polylineMode === 'ARC' && arcData ? 2 : 1;
             addConstraint({
               id: crypto.randomUUID(),
               type: 'coincident',
@@ -2054,15 +2049,14 @@ export function useDrawMachine() {
           }
 
           if (isClosing && firstEntityId) {
-            let newEndIndex = 1;
-            if (polylineMode === 'ARC' && arcData) {
-              newEndIndex = arcData.isStartPointMatchingPStart ? 1 : 0;
-            }
+            const newEndIndex = polylineMode === 'ARC' && arcData ? 2 : 1;
+            const firstEntity = currentEntities.find((e) => e.id === firstEntityId);
+            const firstStartIndex = firstEntity && firstEntity.type === 'arc' ? 1 : 0;
             addConstraint({
               id: crypto.randomUUID(),
               type: 'coincident',
               entityIds: [newEntityId, firstEntityId],
-              pointIndices: [newEndIndex, 0],
+              pointIndices: [newEndIndex, firstStartIndex],
             });
             finishPolyline(true, newSegs);
             return;
@@ -2333,7 +2327,7 @@ export function useDrawMachine() {
             const p1Index = 1;
             const p2Index = 2;
 
-            if (snapP1 && (snapP1.type === 'endpoint' || snapP1.type === 'center') && snapP1.pointIndex !== undefined) {
+            if (snapP1 && (snapP1.type === 'endpoint' || snapP1.type === 'center') && snapP1.pointIndex !== undefined && isRealSketchEntity(snapP1.entityId)) {
               addConstraint({
                 id: crypto.randomUUID(),
                 type: 'coincident',
@@ -2342,7 +2336,7 @@ export function useDrawMachine() {
               });
             }
 
-            if (snapP2 && (snapP2.type === 'endpoint' || snapP2.type === 'center') && snapP2.pointIndex !== undefined) {
+            if (snapP2 && (snapP2.type === 'endpoint' || snapP2.type === 'center') && snapP2.pointIndex !== undefined && isRealSketchEntity(snapP2.entityId)) {
               addConstraint({
                 id: crypto.randomUUID(),
                 type: 'coincident',
@@ -2408,7 +2402,7 @@ export function useDrawMachine() {
             addEntity(newArc);
             setLastRadius(radius);
 
-            if (snapCenter) {
+            if (snapCenter && isRealSketchEntity(snapCenter.entityId)) {
               addConstraint({
                 id: crypto.randomUUID(),
                 type: 'coincident',
@@ -2417,7 +2411,7 @@ export function useDrawMachine() {
               });
             }
 
-            if (snapP1) {
+            if (snapP1 && isRealSketchEntity(snapP1.entityId)) {
               addConstraint({
                 id: crypto.randomUUID(),
                 type: 'coincident',
@@ -2426,7 +2420,7 @@ export function useDrawMachine() {
               });
             }
 
-            if (currentSnap) {
+            if (currentSnap && isRealSketchEntity(currentSnap.entityId)) {
               addConstraint({
                 id: crypto.randomUUID(),
                 type: 'coincident',

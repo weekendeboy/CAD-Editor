@@ -15,13 +15,13 @@ function getEntityPoint(entity: CADEntity2D, pointIndex: number = 0): Point2D | 
     return pointIndex === 1 ? entity.end : entity.start;
   }
   if (entity.type === 'arc') {
-    if (pointIndex === 0) {
+    if (pointIndex === 1) {
       return {
         x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
         y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
       };
     }
-    if (pointIndex === 1) {
+    if (pointIndex === 2) {
       return {
         x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
         y: entity.center.y + entity.radius * Math.sin(entity.endAngle),

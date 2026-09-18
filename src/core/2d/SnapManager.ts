@@ -254,9 +254,9 @@ export function findSnapPoint(
         x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
         y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
       };
-      checkSnap(arcStart, 'endpoint', entity.id, 0);
-      checkSnap(arcEnd, 'endpoint', entity.id, 1);
-      checkSnap(entity.center, 'center', entity.id, 2);
+      checkSnap(arcStart, 'endpoint', entity.id, 1);
+      checkSnap(arcEnd, 'endpoint', entity.id, 2);
+      checkSnap(entity.center, 'center', entity.id, 0);
 
       // Arc midpoint snap calculation (100% 依據 clockwise 旗標，絕不依賴 endAngle < startAngle 猜測)
       const isCW = Boolean(entity.clockwise);

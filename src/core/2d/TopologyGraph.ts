@@ -1,4 +1,5 @@
 import { CADEntity2D, Constraint, Point2D } from '../../types/cad';
+import { bulgeToArc } from './BulgeMath';
 
 export interface GraphNode {
   id: string;
@@ -146,9 +147,9 @@ export class PlanarGraph {
       return;
     }
 
-    const dx12 = node2.point.x - node1.point.x;
-    const dy12 = node2.point.y - node1.point.y;
-    const angle12 = Math.atan2(dy12, dx12);
+    const isCW = false; // default CCW when not specified
+    const rawAngle12 = isCW ? startAngle - Math.PI / 2 : startAngle + Math.PI / 2;
+    const angle12 = Math.atan2(Math.sin(rawAngle12), Math.cos(rawAngle12));
     const edge12Id = `edge_${this.nextEdgeId++}`;
 
     const edge12: GraphEdge = {
@@ -163,6 +164,7 @@ export class PlanarGraph {
         radius,
         startAngle,
         endAngle,
+        clockwise: isCW,
         isReversed: false,
       },
     };
@@ -170,9 +172,8 @@ export class PlanarGraph {
     this.edges.set(edge12Id, edge12);
     node1.outgoingEdgeIds.push(edge12Id);
 
-    const dx21 = node1.point.x - node2.point.x;
-    const dy21 = node1.point.y - node2.point.y;
-    const angle21 = Math.atan2(dy21, dx21);
+    const rawAngle21 = isCW ? endAngle + Math.PI / 2 : endAngle - Math.PI / 2;
+    const angle21 = Math.atan2(Math.sin(rawAngle21), Math.cos(rawAngle21));
     const edge21Id = `edge_${this.nextEdgeId++}`;
 
     const edge21: GraphEdge = {
@@ -187,6 +188,7 @@ export class PlanarGraph {
         radius,
         startAngle,
         endAngle,
+        clockwise: isCW,
         isReversed: true,
       },
     };
@@ -332,10 +334,9 @@ export class PlanarGraph {
           continue;
         }
 
-        const dx12 = node2.point.x - node1.point.x;
-        const dy12 = node2.point.y - node1.point.y;
-        // 使用真實幾何出射切線角度 (Incident Tangent Angle) 而非弦向量
-        const angle12 = entity.clockwise ? entity.startAngle - Math.PI / 2 : entity.startAngle + Math.PI / 2;
+        const isCW = Boolean(entity.clockwise);
+        const rawAngle12 = isCW ? entity.startAngle - Math.PI / 2 : entity.startAngle + Math.PI / 2;
+        const angle12 = Math.atan2(Math.sin(rawAngle12), Math.cos(rawAngle12));
         const edge12Id = `edge_${graph.nextEdgeId++}`;
 
         const edge12: GraphEdge = {
@@ -357,10 +358,8 @@ export class PlanarGraph {
         graph.edges.set(edge12Id, edge12);
         node1.outgoingEdgeIds.push(edge12Id);
 
-        const dx21 = node1.point.x - node2.point.x;
-        const dy21 = node1.point.y - node2.point.y;
-        // 反向遍歷：從 end 走回 start，出射切線為原本 end 處切線的反向
-        const angle21 = entity.clockwise ? entity.endAngle + Math.PI / 2 : entity.endAngle - Math.PI / 2;
+        const rawAngle21 = isCW ? entity.endAngle + Math.PI / 2 : entity.endAngle - Math.PI / 2;
+        const angle21 = Math.atan2(Math.sin(rawAngle21), Math.cos(rawAngle21));
         const edge21Id = `edge_${graph.nextEdgeId++}`;
 
         const edge21: GraphEdge = {
@@ -394,6 +393,60 @@ export class PlanarGraph {
 
             if (node1.id === node2.id) {
               continue;
+            }
+
+            const bulge = entity.bulges?.[i] ?? 0;
+            if (Math.abs(bulge) > 1e-6) {
+              const arcDef = bulgeToArc(p1, p2, bulge);
+              if (arcDef) {
+                const isCW = arcDef.isClockwise;
+                const rawAngle12 = isCW ? arcDef.startAngle - Math.PI / 2 : arcDef.startAngle + Math.PI / 2;
+                const angle12 = Math.atan2(Math.sin(rawAngle12), Math.cos(rawAngle12));
+                const edge12Id = `edge_${graph.nextEdgeId++}`;
+
+                const edge12: GraphEdge = {
+                  id: edge12Id,
+                  fromNodeId: node1.id,
+                  toNodeId: node2.id,
+                  entityId: entity.id,
+                  angle: angle12,
+                  curveType: 'arc',
+                  arcData: {
+                    center: { ...arcDef.center },
+                    radius: arcDef.radius,
+                    startAngle: arcDef.startAngle,
+                    endAngle: arcDef.endAngle,
+                    clockwise: isCW,
+                    isReversed: false,
+                  },
+                };
+                graph.edges.set(edge12Id, edge12);
+                node1.outgoingEdgeIds.push(edge12Id);
+
+                const rawAngle21 = isCW ? arcDef.endAngle + Math.PI / 2 : arcDef.endAngle - Math.PI / 2;
+                const angle21 = Math.atan2(Math.sin(rawAngle21), Math.cos(rawAngle21));
+                const edge21Id = `edge_${graph.nextEdgeId++}`;
+
+                const edge21: GraphEdge = {
+                  id: edge21Id,
+                  fromNodeId: node2.id,
+                  toNodeId: node1.id,
+                  entityId: entity.id,
+                  angle: angle21,
+                  curveType: 'arc',
+                  arcData: {
+                    center: { ...arcDef.center },
+                    radius: arcDef.radius,
+                    startAngle: arcDef.startAngle,
+                    endAngle: arcDef.endAngle,
+                    clockwise: isCW,
+                    isReversed: true,
+                  },
+                };
+                graph.edges.set(edge21Id, edge21);
+                node2.outgoingEdgeIds.push(edge21Id);
+                continue;
+              }
             }
 
             const dx12 = node2.point.x - node1.point.x;

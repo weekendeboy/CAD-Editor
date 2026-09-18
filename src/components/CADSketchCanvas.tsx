@@ -464,7 +464,12 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
           const idx2 = dim.pointIndices?.[1] ?? 0;
           const getPt = (ent: CADEntity2D, idx: number) => {
             if (ent.type === 'line') return idx === 1 ? ent.end : ent.start;
-            if (ent.type === 'circle' || ent.type === 'arc') return ent.center;
+            if (ent.type === 'arc') {
+              if (idx === 1) return { x: ent.center.x + ent.radius * Math.cos(ent.startAngle), y: ent.center.y + ent.radius * Math.sin(ent.startAngle) };
+              if (idx === 2) return { x: ent.center.x + ent.radius * Math.cos(ent.endAngle), y: ent.center.y + ent.radius * Math.sin(ent.endAngle) };
+              return ent.center;
+            }
+            if (ent.type === 'circle') return ent.center;
             if (ent.type === 'polyline') return ent.points[idx] || ent.points[0];
             return null;
           };
@@ -917,8 +922,8 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
             const d2 = Math.hypot(clickWorld.x - clickedEnt.center.x, clickWorld.y - clickedEnt.center.y);
             const threshold = 18 / scale;
             if (d0 < threshold || d1 < threshold || d2 < threshold) {
-              if (d2 < d0 && d2 < d1) pointIndex = 2;
-              else pointIndex = d0 < d1 ? 0 : 1;
+              if (d2 < d0 && d2 < d1) pointIndex = 0;
+              else pointIndex = d0 < d1 ? 1 : 2;
             }
           }
         }
