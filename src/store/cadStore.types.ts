@@ -41,6 +41,13 @@ export type OsnapMode =
 
 export type OsnapSettings = Record<OsnapMode, boolean>;
 
+export interface SketchDraftSnapshot {
+  draftEntities: CADEntity2D[];
+  draftConstraints: Constraint[];
+  draftDimensions: any[];
+  draftProfiles: any[];
+}
+
 export interface SketchSession {
   isActive: boolean;
   sketchId: string | null;
@@ -53,6 +60,8 @@ export interface SketchSession {
   draftDimensions: any[];
   draftProfiles: any[];
   isDirty: boolean;
+  draftUndoStack: SketchDraftSnapshot[];
+  draftRedoStack: SketchDraftSnapshot[];
 }
 
 export type CADTool =
@@ -86,6 +95,7 @@ export type CADTool =
 export interface CADActions {
   // 特徵選取與特徵樹 Actions
   setSelectedFeatureId: (id: string | null) => void;
+  setSelectedPointIndex: (id: string, index?: number) => void;
   addFeature: (feature: CADFeature) => void;
   removeFeature: (id: string) => void;
   updateFeature: (id: string, updates: Partial<CADFeature>) => void;
@@ -162,12 +172,13 @@ export interface CADActions {
   setViewMode: (mode: '2D' | '3D') => void;
   setTool: (tool: CADTool) => void;
   setActiveSketch: (sketchId: string | null) => void;
-  selectEntity: (id: string) => void;
+  selectEntity: (id: string, pointIndex?: number) => void;
   setSelectedEntityIds: (ids: string[]) => void;
   clearSelection: () => void;
 
   // 草圖編輯 Session 生命週期 (Sketch Session Lifecycle)
   enterSketchSession: (sketchId: string) => void;
+  startSketchSession?: (sketchId: string) => void;
   commitSketchSession: () => Promise<void>;
   cancelSketchSession: () => void;
 
@@ -176,8 +187,8 @@ export interface CADActions {
   importEntities: (entities: CADEntity2D[]) => void;
   importDxfData: (entities: CADEntity2D[], layers: Record<string, CADLayer>) => void;
   removeEntity: (id: string) => void;
-  updateEntity: (id: string, updates: Partial<CADEntity2D>) => void;
-  updateEntities: (entities: CADEntity2D[]) => void;
+  updateEntity: (id: string, updates: Partial<CADEntity2D>, recordUndo?: boolean) => void;
+  updateEntities: (entities: CADEntity2D[], recordUndo?: boolean) => void;
   toggleConstruction: (entityId: string) => void;
 
   // 約束與尺寸標註 Actions
@@ -198,8 +209,20 @@ export interface CADActions {
   // 2D 幾何修剪、延伸與幾何變換 Actions
   trimEntity: (entityId: string, clickPoint: Point2D) => void;
   extendEntity: (entityId: string, clickPoint: Point2D) => void;
-  applyFillet: (entityId1: string, entityId2: string, radius: number) => void;
-  applyChamfer: (entityId1: string, entityId2: string, distance: number) => void;
+  applyFillet: (
+    entityId1: string,
+    entityId2: string,
+    arg3?: Point2D | number,
+    arg4?: Point2D | number,
+    radius?: number
+  ) => void;
+  applyChamfer: (
+    entityId1: string,
+    entityId2: string,
+    arg3?: Point2D | number,
+    arg4?: Point2D | number,
+    distance?: number
+  ) => void;
   offsetEntity: (entityId: string, distance: number, sidePoint: Point2D) => void;
   mirrorEntities: (sourceEntityIds: string[], p1: Point2D, p2: Point2D) => void;
   moveEntities: (entityIds: string[], basePoint: Point2D, targetPoint: Point2D) => void;
@@ -236,6 +259,7 @@ export interface CADState extends CADActions {
   currentTool: CADTool;
   activeSketchId: string | null;
   selectedEntityIds: string[];
+  selectedPointIndices: Record<string, number>;
   selectedFeatureId: string | null;
   selectedFaceInfo: {
     point: Point3D;

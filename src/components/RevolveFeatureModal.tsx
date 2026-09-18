@@ -6,6 +6,7 @@ import {
   RevolveCutFeature,
   LineEntity,
 } from '../types/cad';
+import { findClosedProfiles } from '../core/2d/TopologyEngine';
 import {
   RotateCw,
   RotateCcw,

@@ -12,13 +12,13 @@ export class NumericalConstraintSolver {
     entities: CADEntity2D[],
     constraints: Constraint[],
     fixedEntityIds: string[] = []
-  ): CADEntity2D[] {
+  ): { entities: CADEntity2D[]; converged: boolean; errorNorm: number; iterations: number; conflictEntityIds: string[] } {
     const varSys = new VariableSystem();
     let x = varSys.extractVariables(entities);
     const initialX = [...x];
     const n = x.length;
 
-    if (n === 0) return entities; // 沒有需要求解的變數
+    if (n === 0) return { entities, converged: true, errorNorm: 0, iterations: 0, conflictEntityIds: [] };
 
     const entityMap = new Map(entities.map(e => [e.id, e]));
 
@@ -31,32 +31,35 @@ export class NumericalConstraintSolver {
     let residuals = EquationSystem.evaluate(solveConstraints, x, initialX, varSys, entityMap);
     const m = residuals.length;
     
-    if (m === 0) return entities; // 沒有任何約束，不需疊代
+    if (m === 0) return { entities, converged: true, errorNorm: 0, iterations: 0, conflictEntityIds: [] };
 
     let errorNorm = this.norm(residuals);
 
     if (errorNorm < this.TOLERANCE) {
-      return entities; // 已經滿足約束
+      return { entities, converged: true, errorNorm, iterations: 0, conflictEntityIds: [] };
     }
 
     let lambda = 1e-3;
     let v = 2;
+    let iter = 0;
 
-    for (let iter = 0; iter < this.MAX_ITER; iter++) {
+    for (; iter < this.MAX_ITER; iter++) {
       // 1. 數值差分計算 Jacobian 矩陣 (m * n)
       const J = this.computeJacobian(solveConstraints, x, initialX, varSys, entityMap, m, n);
       const JT = MatrixMath.transpose(J); // n * m
       const JTJ = MatrixMath.multiply(JT, J); // n * n
       const JTF = MatrixMath.multiplyVector(JT, residuals); // n * 1
 
-      // 2. Levenberg-Marquardt 阻尼
+      // 2. Levenberg-Marquardt 阻尼與初值錨定 (Anchor Damping)
       const A = MatrixMath.copy(JTJ);
+      const anchorWeight = 1e-4; // 錨定權重，防止圖元在無衝突時亂飄
+
       for (let i = 0; i < n; i++) {
         // 利用對角線元素做自適應，或直接加上 lambda
-        A[i][i] += lambda * Math.max(A[i][i], 1e-5); 
+        A[i][i] += lambda * Math.max(A[i][i], 1e-5) + anchorWeight; 
       }
 
-      const b = JTF.map(val => -val);
+      const b = JTF.map((val, i) => -(val + anchorWeight * (x[i] - initialX[i])));
 
       // 3. 求解線性方程組 A * delta = b
       let delta: number[];
@@ -93,7 +96,60 @@ export class NumericalConstraintSolver {
       }
     }
 
-    return varSys.applyVariables(x, entities);
+    const resultEntities = varSys.applyVariables(x, entities);
+    let converged = errorNorm < this.TOLERANCE;
+    const conflictEntityIds = new Set<string>();
+
+    if (!converged) {
+      // Find which constraints are failing to converge
+      let rIdx = 0;
+      for (const c of solveConstraints) {
+        let count = 0;
+        if (c.type === 'coincident') count = 2;
+        else if (c.type === 'horizontal' || c.type === 'vertical' || c.type === 'distance' || c.type === 'length' || c.type === 'parallel' || c.type === 'perpendicular' || c.type === 'tangent' || c.type === 'radius' || c.type === 'equal_length' || c.type === 'equal_radius') count = 1;
+        else if (c.type === 'fix') {
+          if (c.pointIndices && c.pointIndices.length > 0) count = c.pointIndices.length * 2;
+          else {
+            const allIndices = varSys.getAllVariableIndices(c.entityIds[0]);
+            count = allIndices.length;
+          }
+        }
+        
+        let cErr = 0;
+        for (let i = 0; i < count; i++) {
+          cErr += residuals[rIdx + i] * residuals[rIdx + i];
+        }
+        if (cErr > this.TOLERANCE * this.TOLERANCE) {
+          c.entityIds.forEach(id => conflictEntityIds.add(id));
+        }
+        rIdx += count;
+      }
+    }
+
+    // Check for degenerate geometry
+    for (const ent of resultEntities) {
+      if (ent.type === 'line') {
+        const dx = ent.end.x - ent.start.x;
+        const dy = ent.end.y - ent.start.y;
+        if (dx * dx + dy * dy < 1e-12) {
+          converged = false;
+          conflictEntityIds.add(ent.id);
+        }
+      } else if (ent.type === 'circle' || ent.type === 'arc') {
+        if (ent.radius < 1e-6) {
+          converged = false;
+          conflictEntityIds.add(ent.id);
+        }
+      }
+    }
+
+    return {
+      entities: resultEntities,
+      converged,
+      errorNorm,
+      iterations: iter,
+      conflictEntityIds: Array.from(conflictEntityIds)
+    };
   }
 
   private static computeJacobian(
@@ -135,13 +191,13 @@ export function solveConstraints(
   constraints: Constraint[],
   fixedEntityIds: string[] = []
 ): { entities: CADEntity2D[]; iterations: number; maxDisp: number; converged: boolean; conflictEntityIds: string[] } {
-  const resultEntities = NumericalConstraintSolver.solveConstraints(entities, constraints, fixedEntityIds);
+  const result = NumericalConstraintSolver.solveConstraints(entities, constraints, fixedEntityIds);
   return {
-    entities: resultEntities,
-    iterations: 0,
-    maxDisp: 0,
-    converged: true,
-    conflictEntityIds: []
+    entities: result.entities,
+    iterations: result.iterations,
+    maxDisp: result.errorNorm,
+    converged: result.converged,
+    conflictEntityIds: result.conflictEntityIds
   };
 }
 

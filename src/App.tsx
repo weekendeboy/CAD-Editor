@@ -154,6 +154,7 @@ export default function App() {
     commitSketchSession,
     cancelSketchSession,
     selectedEntityIds,
+    selectedPointIndices,
     addConstraint,
     toggleConstruction,
     polygonSides,
@@ -197,6 +198,12 @@ export default function App() {
   const realSelectedEntities =
     currentEntities.filter((e) => selectedEntityIds.includes(e.id)) || [];
   const totalSelectedCount = selectedEntityIds.length;
+  
+  const currentConstraints =
+    sketchSession.isActive && sketchSession.sketchId === activeSketchId
+      ? sketchSession.draftConstraints
+      : activeSketch?.constraints || [];
+
   const isAnySelectedConstruction = realSelectedEntities.some((e) => e.isConstruction);
 
   const handleToggleConstruction = () => {
@@ -237,21 +244,115 @@ export default function App() {
 
   const handleAddFix = () => {
     if (totalSelectedCount === 1 && selectedEntityIds[0] && !hasOrigin) {
+      const entId = selectedEntityIds[0];
+      const explicitIdx = selectedPointIndices?.[entId];
+      const pointIndices = explicitIdx !== undefined ? [explicitIdx] : undefined;
       addConstraint({
         id: crypto.randomUUID(),
         type: 'fix',
-        entityIds: [selectedEntityIds[0]],
-        pointIndices: [0], // 鎖定起點或中心點
+        entityIds: [entId],
+        ...(pointIndices ? { pointIndices } : {}),
       });
     }
   };
 
   const handleAddCoincident = () => {
     if (totalSelectedCount !== 2) return;
+    const entId1 = selectedEntityIds[0];
+    const entId2 = selectedEntityIds[1];
+
+    const getEntityPoints = (id: string): { pt: { x: number; y: number }; idx: number }[] => {
+      if (id === 'origin') {
+        return [{ pt: { x: 0, y: 0 }, idx: 0 }];
+      }
+      const ent = currentEntities.find((e) => e.id === id);
+      if (!ent) return [];
+      if (ent.type === 'line') {
+        return [
+          { pt: ent.start, idx: 0 },
+          { pt: ent.end, idx: 1 },
+        ];
+      }
+      if (ent.type === 'arc') {
+        const startPt = {
+          x: ent.center.x + ent.radius * Math.cos(ent.startAngle),
+          y: ent.center.y + ent.radius * Math.sin(ent.startAngle),
+        };
+        const endPt = {
+          x: ent.center.x + ent.radius * Math.cos(ent.endAngle),
+          y: ent.center.y + ent.radius * Math.sin(ent.endAngle),
+        };
+        return [
+          { pt: startPt, idx: 0 },
+          { pt: endPt, idx: 1 },
+          { pt: ent.center, idx: 2 },
+        ];
+      }
+      if (ent.type === 'circle') {
+        return [{ pt: ent.center, idx: 0 }];
+      }
+      return [];
+    };
+
+    const explicitIdx1 = selectedPointIndices?.[entId1];
+    const explicitIdx2 = selectedPointIndices?.[entId2];
+
+    let pointIndices: [number, number] | undefined = undefined;
+    if (explicitIdx1 !== undefined && explicitIdx2 !== undefined) {
+      pointIndices = [explicitIdx1, explicitIdx2];
+    } else {
+      const pts1 = getEntityPoints(entId1);
+      const pts2 = getEntityPoints(entId2);
+
+      if (pts1.length > 0 && pts2.length > 0) {
+        if (explicitIdx1 !== undefined) {
+          const p1 = pts1.find((p) => p.idx === explicitIdx1) || pts1[0];
+          let bestIdx2 = pts2[0].idx;
+          let minDist = Infinity;
+          for (const p2 of pts2) {
+            const d = Math.hypot(p2.pt.x - p1.pt.x, p2.pt.y - p1.pt.y);
+            if (d < minDist) {
+              minDist = d;
+              bestIdx2 = p2.idx;
+            }
+          }
+          pointIndices = [explicitIdx1, bestIdx2];
+        } else if (explicitIdx2 !== undefined) {
+          const p2 = pts2.find((p) => p.idx === explicitIdx2) || pts2[0];
+          let bestIdx1 = pts1[0].idx;
+          let minDist = Infinity;
+          for (const p1 of pts1) {
+            const d = Math.hypot(p1.pt.x - p2.pt.x, p1.pt.y - p2.pt.y);
+            if (d < minDist) {
+              minDist = d;
+              bestIdx1 = p1.idx;
+            }
+          }
+          pointIndices = [bestIdx1, explicitIdx2];
+        } else {
+          let bestIdx1 = pts1[0].idx;
+          let bestIdx2 = pts2[0].idx;
+          let minDist = Infinity;
+          for (const p1 of pts1) {
+            for (const p2 of pts2) {
+              const d = Math.hypot(p1.pt.x - p2.pt.x, p1.pt.y - p2.pt.y);
+              if (d < minDist) {
+                minDist = d;
+                bestIdx1 = p1.idx;
+                bestIdx2 = p2.idx;
+              }
+            }
+          }
+          pointIndices = [bestIdx1, bestIdx2];
+        }
+      }
+    }
+
     addConstraint({
       id: crypto.randomUUID(),
       type: 'coincident',
-      entityIds: [...selectedEntityIds],
+      entityIds: [entId1, entId2],
+      ...(pointIndices ? { pointIndices } : {}),
     });
   };
 
@@ -851,27 +952,32 @@ export default function App() {
                   <div className="w-px h-5 bg-neutral-800 mx-1" />
 
                   {/* 水平 / 垂直 (Horizontal / Vertical) */}
-                  {canApplyConstraint('horizontal', realSelectedEntities, hasOrigin) && (
+                  {(canApplyConstraint('horizontal', realSelectedEntities, hasOrigin, currentConstraints) ||
+                    canApplyConstraint('vertical', realSelectedEntities, hasOrigin, currentConstraints)) && (
                     <>
-                      <button
-                        onClick={handleAddHorizontal}
-                        className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
-                        title="水平 (Horizontal)"
-                      >
-                        <MoveHorizontal size={18} />
-                      </button>
-                      <button
-                        onClick={handleAddVertical}
-                        className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
-                        title="垂直 (Vertical)"
-                      >
-                        <MoveVertical size={18} />
-                      </button>
+                      {canApplyConstraint('horizontal', realSelectedEntities, hasOrigin, currentConstraints) && (
+                        <button
+                          onClick={handleAddHorizontal}
+                          className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
+                          title="水平 (Horizontal)"
+                        >
+                          <MoveHorizontal size={18} />
+                        </button>
+                      )}
+                      {canApplyConstraint('vertical', realSelectedEntities, hasOrigin, currentConstraints) && (
+                        <button
+                          onClick={handleAddVertical}
+                          className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
+                          title="垂直 (Vertical)"
+                        >
+                          <MoveVertical size={18} />
+                        </button>
+                      )}
                     </>
                   )}
 
                   {/* 重合 / 同心 (Coincident / Concentric) */}
-                  {canApplyConstraint('coincident', realSelectedEntities, hasOrigin) && (
+                  {canApplyConstraint('coincident', realSelectedEntities, hasOrigin, currentConstraints) && (
                     <button
                       onClick={handleAddCoincident}
                       className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
@@ -882,7 +988,7 @@ export default function App() {
                   )}
 
                   {/* 固定約束 (Fix) */}
-                  {canApplyConstraint('fix', realSelectedEntities, hasOrigin) && (
+                  {canApplyConstraint('fix', realSelectedEntities, hasOrigin, currentConstraints) && (
                     <button
                       onClick={handleAddFix}
                       className="p-1.5 rounded text-neutral-400 hover:text-yellow-400 hover:bg-neutral-800 transition-colors"
@@ -893,7 +999,7 @@ export default function App() {
                   )}
 
                   {/* 平行 / 垂直 / 等長 (Parallel / Perpendicular / Equal Length) */}
-                  {canApplyConstraint('parallel', realSelectedEntities, hasOrigin) && (
+                  {canApplyConstraint('parallel', realSelectedEntities, hasOrigin, currentConstraints) && (
                     <>
                       <button
                         onClick={handleAddParallel}
@@ -930,7 +1036,7 @@ export default function App() {
                   )}
 
                   {/* 相切 (Tangent) */}
-                  {canApplyConstraint('tangent', realSelectedEntities, hasOrigin) && (
+                  {canApplyConstraint('tangent', realSelectedEntities, hasOrigin, currentConstraints) && (
                     <button
                       onClick={handleAddTangent}
                       className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
@@ -944,7 +1050,7 @@ export default function App() {
                   )}
 
                   {/* 等半徑 (Equal Radius) */}
-                  {canApplyConstraint('equal_radius', realSelectedEntities, hasOrigin) && (
+                  {canApplyConstraint('equal_radius', realSelectedEntities, hasOrigin, currentConstraints) && (
                     <button
                       onClick={handleAddEqualRadius}
                       className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"

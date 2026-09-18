@@ -12,12 +12,12 @@ export interface ChamferResult {
  * 支援兩相交直線 (Line-Line) 的等距倒角 (D1 = D2 = distance)。
  *
  * 步驟：
- * 1. 計算兩線段的虛擬交點 I。
- * 2. 判定兩線段朝向遠端（保留端）的單位向量。
- * 3. 沿遠端方向退縮指定的 distance，計算新的退縮端點。
- * 4. 修改兩線段靠近交點處的端點至退縮端點。
+ * 1. 計算兩線段的交點 I。
+ * 2. 根據 pickPt1 / pickPt2 判定兩線段在交點形成的 4 個象限中欲保留的射線方向 (u1, u2)。
+ * 3. 沿保留方向退縮指定的 distance，計算新的退縮端點。
+ * 4. 將原線段靠近交點側的端點縮短至退縮端點。
  * 5. 產生連接兩退縮端點的全新直線 (Chamfer Line)。
- * 6. 生成新倒角線與兩原線段端點間的重合約束 (Coincident Constraints)。
+ * 6. 生成重合約束 (Coincident Constraints)。
  */
 export function createChamfer(
   ent1: LineEntity,
@@ -40,8 +40,13 @@ export function createChamfer(
 
   const vx1 = p2.x - p1.x;
   const vy1 = p2.y - p1.y;
+  const len1 = Math.hypot(vx1, vy1);
+  if (len1 < 1e-6) return null;
+
   const vx2 = p4.x - p3.x;
   const vy2 = p4.y - p3.y;
+  const len2 = Math.hypot(vx2, vy2);
+  if (len2 < 1e-6) return null;
 
   const D = vx1 * vy2 - vy1 * vx2;
   if (Math.abs(D) < 1e-10) {
@@ -52,75 +57,64 @@ export function createChamfer(
   const dy = p3.y - p1.y;
   const t = (dx * vy2 - dy * vx2) / D;
 
-  // 虛擬交點 I (Intersection Point)
+  // 交點 I (Intersection Point)
   const I: Point2D = {
     x: p1.x + t * vx1,
     y: p1.y + t * vy1,
   };
 
-  // 判定線段 1 靠近交點與遠離交點的端點
-  const distA1 = Math.hypot(p1.x - I.x, p1.y - I.y);
-  const distB1 = Math.hypot(p2.x - I.x, p2.y - I.y);
-  let p1_near = distA1 < distB1 ? p1 : p2;
-  let p1_far = distA1 < distB1 ? p2 : p1;
-
-  // 判定線段 2 靠近交點與遠離交點的端點
-  const distA2 = Math.hypot(p3.x - I.x, p3.y - I.y);
-  const distB2 = Math.hypot(p4.x - I.x, p4.y - I.y);
-  let p2_near = distA2 < distB2 ? p3 : p4;
-  let p2_far = distA2 < distB2 ? p4 : p3;
-
-  // 若使用者有點擊特定點，且點擊點可明確區分在交點哪一側（針對完全交叉的十字線）
+  // 判定 Line 1 在交點 I 哪一側建立倒角 (u1 方向)
+  const e1 = { x: vx1 / len1, y: vy1 / len1 };
+  let dir1 = 1;
   if (pickPt1) {
-    const dotPick1 = (pickPt1.x - I.x) * (p1_far.x - I.x) + (pickPt1.y - I.y) * (p1_far.y - I.y);
-    const dotNear1 = (pickPt1.x - I.x) * (p1_near.x - I.x) + (pickPt1.y - I.y) * (p1_near.y - I.y);
-    if (dotNear1 > 0 && dotNear1 > dotPick1) {
-      // 點擊在 near 側
-      const tmp = p1_near;
-      p1_near = p1_far;
-      p1_far = tmp;
+    const projPick1 = (pickPt1.x - I.x) * e1.x + (pickPt1.y - I.y) * e1.y;
+    if (Math.abs(projPick1) > 1e-5) {
+      dir1 = projPick1 > 0 ? 1 : -1;
+    } else {
+      const midProj1 = ((p1.x + p2.x) / 2 - I.x) * e1.x + ((p1.y + p2.y) / 2 - I.y) * e1.y;
+      dir1 = midProj1 >= 0 ? 1 : -1;
     }
+  } else {
+    const midProj1 = ((p1.x + p2.x) / 2 - I.x) * e1.x + ((p1.y + p2.y) / 2 - I.y) * e1.y;
+    dir1 = midProj1 >= 0 ? 1 : -1;
   }
+  const u1 = { x: dir1 * e1.x, y: dir1 * e1.y };
 
+  const sA1 = (p1.x - I.x) * u1.x + (p1.y - I.y) * u1.y;
+  const sB1 = (p2.x - I.x) * u1.x + (p2.y - I.y) * u1.y;
+  const sFar1 = Math.max(sA1, sB1);
+  if (sFar1 < 1e-5) return null; // 該方向無可保留之線段
+
+  // 判定 Line 2 在交點 I 哪一側建立倒角 (u2 方向)
+  const e2 = { x: vx2 / len2, y: vy2 / len2 };
+  let dir2 = 1;
   if (pickPt2) {
-    const dotPick2 = (pickPt2.x - I.x) * (p2_far.x - I.x) + (pickPt2.y - I.y) * (p2_far.y - I.y);
-    const dotNear2 = (pickPt2.x - I.x) * (p2_near.x - I.x) + (pickPt2.y - I.y) * (p2_near.y - I.y);
-    if (dotNear2 > 0 && dotNear2 > dotPick2) {
-      // 點擊在 near 側
-      const tmp = p2_near;
-      p2_near = p2_far;
-      p2_far = tmp;
+    const projPick2 = (pickPt2.x - I.x) * e2.x + (pickPt2.y - I.y) * e2.y;
+    if (Math.abs(projPick2) > 1e-5) {
+      dir2 = projPick2 > 0 ? 1 : -1;
+    } else {
+      const midProj2 = ((p3.x + p4.x) / 2 - I.x) * e2.x + ((p3.y + p4.y) / 2 - I.y) * e2.y;
+      dir2 = midProj2 >= 0 ? 1 : -1;
     }
+  } else {
+    const midProj2 = ((p3.x + p4.x) / 2 - I.x) * e2.x + ((p3.y + p4.y) / 2 - I.y) * e2.y;
+    dir2 = midProj2 >= 0 ? 1 : -1;
   }
+  const u2 = { x: dir2 * e2.x, y: dir2 * e2.y };
 
-  const distFar1 = Math.hypot(p1_far.x - I.x, p1_far.y - I.y);
-  const distFar2 = Math.hypot(p2_far.x - I.x, p2_far.y - I.y);
-
-  if (distFar1 < 1e-5 || distFar2 < 1e-5) {
-    return null;
-  }
-
-  // 單位方向向量（由交點 I 指向遠端）
-  const u1 = {
-    x: (p1_far.x - I.x) / distFar1,
-    y: (p1_far.y - I.y) / distFar1,
-  };
-
-  const u2 = {
-    x: (p2_far.x - I.x) / distFar2,
-    y: (p2_far.y - I.y) / distFar2,
-  };
+  const sA2 = (p3.x - I.x) * u2.x + (p3.y - I.y) * u2.y;
+  const sB2 = (p4.x - I.x) * u2.x + (p4.y - I.y) * u2.y;
+  const sFar2 = Math.max(sA2, sB2);
+  if (sFar2 < 1e-5) return null;
 
   const cosAlpha = Math.max(-1, Math.min(1, u1.x * u2.x + u1.y * u2.y));
   const alpha = Math.acos(cosAlpha);
-
-  // 夾角過小或接近 180 度共線無法形成倒角
   if (alpha < 1e-4 || alpha > Math.PI - 1e-4) {
     return null;
   }
 
   // 檢查倒角距離是否過大超出線段長度
-  if (distance >= distFar1 || distance >= distFar2) {
+  if (distance >= sFar1 - 1e-5 || distance >= sFar2 - 1e-5) {
     return null;
   }
 
@@ -135,15 +129,15 @@ export function createChamfer(
     y: I.y + distance * u2.y,
   };
 
-  // 修改原線段的端點座標至退縮端點
-  const isStartNear1 = p1_near === p1;
+  // 修改原線段：捨棄近交點端，縮短至退縮端點
+  const isStartNear1 = sA1 < sB1;
   const trimmedLine1: LineEntity = {
     ...ent1,
     start: isStartNear1 ? P1_retract : ent1.start,
     end: isStartNear1 ? ent1.end : P1_retract,
   };
 
-  const isStartNear2 = p2_near === p3;
+  const isStartNear2 = sA2 < sB2;
   const trimmedLine2: LineEntity = {
     ...ent2,
     start: isStartNear2 ? P2_retract : ent2.start,
@@ -153,7 +147,7 @@ export function createChamfer(
   const line1PtIdx = isStartNear1 ? 0 : 1;
   const line2PtIdx = isStartNear2 ? 0 : 1;
 
-  // 生成一條連接兩個退縮端點的全新直線 (Chamfer Line)
+  // 生成連接兩個退縮端點的全新直線 (Chamfer Line)
   const chamferLineId = 'chamfer-' + Date.now().toString() + '-' + Math.random().toString(36).substr(2, 9);
   const chamferLine: LineEntity = {
     id: chamferLineId,
@@ -168,7 +162,6 @@ export function createChamfer(
     end: P2_retract,
   };
 
-  // 生成約束：在兩交點處建立重合約束 (Coincident Constraints)
   const uuid = () => Math.random().toString(36).substring(2, 11);
 
   const coincident1: Constraint = {

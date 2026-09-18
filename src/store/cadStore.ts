@@ -6,7 +6,7 @@
 import { create } from "zustand";
 import { immer } from "zustand/middleware/immer";
 import { original } from "immer";
-import { CADState } from "./cadStore.types";
+import { CADState, SketchDraftSnapshot } from "./cadStore.types";
 import {
   CADDocument,
   CADEntity2D,
@@ -22,6 +22,7 @@ import {
   CustomPlane,
   Constraint,
   ConstraintType,
+  Point2D,
 } from "../types/cad";
 import { createOffsetPlane } from "../core/3d/DatumPlaneEngine";
 import {
@@ -44,6 +45,7 @@ import {
   applyRotateToSketch,
   applyCircularArrayToSketch,
   applyRectArrayToSketch,
+  pushSketchUndoState,
 } from "./sketchMutators";
 import {
   getDirectDependencies,
@@ -253,6 +255,7 @@ export const useCADStore = create<CADState>()(
     currentTool: "SELECT",
     activeSketchId: "sketch-1",
     selectedEntityIds: [],
+    selectedPointIndices: {},
     selectedFeatureId: null,
     selectedFaceInfo: null,
     selectedMeshSelection: null,
@@ -299,9 +302,11 @@ export const useCADStore = create<CADState>()(
       draftEntities: [],
       draftConstraints: [],
       draftDimensions: [],
-            initialProfiles: [],
-            draftProfiles: [],
+      initialProfiles: [],
+      draftProfiles: [],
       isDirty: false,
+      draftUndoStack: [],
+      draftRedoStack: [],
     },
 
     // ==========================================
@@ -1305,10 +1310,16 @@ export const useCADStore = create<CADState>()(
           draftDimensions: JSON.parse(JSON.stringify(dimensionsClone)),
           draftProfiles: JSON.parse(JSON.stringify(profilesClone)),
           isDirty: false,
+          draftUndoStack: [],
+          draftRedoStack: [],
         };
         state.activeSketchId = sketchId;
         state.viewMode = "2D";
       });
+    },
+
+    startSketchSession: (sketchId: string) => {
+      get().enterSketchSession(sketchId);
     },
 
     commitSketchSession: async () => {
@@ -1353,6 +1364,8 @@ export const useCADStore = create<CADState>()(
             initialProfiles: [],
             draftProfiles: [],
             isDirty: false,
+            draftUndoStack: [],
+            draftRedoStack: [],
           };
         });
 
@@ -1371,6 +1384,8 @@ export const useCADStore = create<CADState>()(
             initialProfiles: [],
             draftProfiles: [],
             isDirty: false,
+            draftUndoStack: [],
+            draftRedoStack: [],
           };
         });
       }
@@ -1387,23 +1402,43 @@ export const useCADStore = create<CADState>()(
           draftEntities: [],
           draftConstraints: [],
           draftDimensions: [],
-            initialProfiles: [],
-            draftProfiles: [],
+          initialProfiles: [],
+          draftProfiles: [],
           isDirty: false,
+          draftUndoStack: [],
+          draftRedoStack: [],
         };
       });
     },
 
-    selectEntity: (id) =>
+    setSelectedPointIndex: (id, index) =>
       set((state) => {
-        if (state.selectedEntityIds.includes(id)) {
-          return state;
+        if (index === undefined) {
+          const next = { ...state.selectedPointIndices };
+          delete next[id];
+          return { selectedPointIndices: next };
         }
-        return { selectedEntityIds: [...state.selectedEntityIds, id] };
+        return {
+          selectedPointIndices: {
+            ...state.selectedPointIndices,
+            [id]: index,
+          },
+        };
+      }),
+    selectEntity: (id, pointIndex) =>
+      set((state) => {
+        const nextIds = state.selectedEntityIds.includes(id)
+          ? state.selectedEntityIds
+          : [...state.selectedEntityIds, id];
+        const nextIndices = { ...state.selectedPointIndices };
+        if (pointIndex !== undefined) {
+          nextIndices[id] = pointIndex;
+        }
+        return { selectedEntityIds: nextIds, selectedPointIndices: nextIndices };
       }),
     setSelectedEntityIds: (ids) => set({ selectedEntityIds: ids }),
     clearSelection: () =>
-      set({ selectedEntityIds: [], selectedFeatureId: null }),
+      set({ selectedEntityIds: [], selectedPointIndices: {}, selectedFeatureId: null }),
     setActiveLayer: (layerId: string) => set({ activeLayerId: layerId }),
 
     // ------------------------------------------
@@ -1624,6 +1659,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === targetSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const dummySketch: SketchFeature = {
             id: targetSketchId,
             name: "Draft",
@@ -1685,6 +1721,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
             name: "Draft",
@@ -1756,6 +1793,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
             name: "Draft",
@@ -1806,7 +1844,7 @@ export const useCADStore = create<CADState>()(
       }
     },
 
-    updateEntity: (id, updates) => {
+    updateEntity: (id, updates, recordUndo = true) => {
       let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
@@ -1816,6 +1854,9 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          if (recordUndo) {
+            pushSketchUndoState(state);
+          }
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
             name: "Draft",
@@ -1861,9 +1902,11 @@ export const useCADStore = create<CADState>()(
           state.activeSketchId,
         );
 
-        const undoState = pushUndoState(get());
-        state.undoStack = undoState.undoStack;
-        state.redoStack = undoState.redoStack;
+        if (recordUndo) {
+          const undoState = pushUndoState(get());
+          state.undoStack = undoState.undoStack;
+          state.redoStack = undoState.redoStack;
+        }
         state.document = docDirty;
       });
       if (!isSessionEdit) {
@@ -1871,7 +1914,7 @@ export const useCADStore = create<CADState>()(
       }
     },
 
-    updateEntities: (newEntities) => {
+    updateEntities: (newEntities, recordUndo = true) => {
       let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId || !newEntities || newEntities.length === 0) {
@@ -1883,6 +1926,9 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          if (recordUndo) {
+            pushSketchUndoState(state);
+          }
           const entityMap = new Map(newEntities.map((e) => [e.id, e]));
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
@@ -1923,9 +1969,11 @@ export const useCADStore = create<CADState>()(
           state.activeSketchId,
         );
 
-        const undoState = pushUndoState(get());
-        state.undoStack = undoState.undoStack;
-        state.redoStack = undoState.redoStack;
+        if (recordUndo) {
+          const undoState = pushUndoState(get());
+          state.undoStack = undoState.undoStack;
+          state.redoStack = undoState.redoStack;
+        }
         state.document = docDirty;
       });
       if (!isSessionEdit) {
@@ -1943,6 +1991,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const existing = state.sketchSession.draftEntities.find(
             (e) => e.id === entityId,
           );
@@ -1997,6 +2046,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
             name: "Draft",
@@ -2071,6 +2121,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const referencedProjEntities = (actualConstraint.entityIds || [])
             .map((id) => state.projectedEntities.find((p) => p.id === id))
             .filter(Boolean) as CADEntity2D[];
@@ -2347,6 +2398,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
             name: "Draft",
@@ -2405,6 +2457,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const targetDim = state.sketchSession.draftDimensions.find(
             (d) => d.id === dimensionId,
           );
@@ -2473,6 +2526,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const linkedDim = state.sketchSession.draftDimensions.find(
             (d) => d.constraintId === constraintId,
           );
@@ -2567,33 +2621,34 @@ export const useCADStore = create<CADState>()(
                       const id2 = constraint.entityIds[1];
                       const idx1 = constraint.pointIndices?.[0] ?? 0;
                       const idx2 = constraint.pointIndices?.[1] ?? 0;
-                      const e1 = dummySketch.entities.find((e) => e.id === id1);
-                      const e2 = dummySketch.entities.find((e) => e.id === id2);
-                      if (e1 && e2) {
-                        const getPoint = (
-                          entity: CADEntity2D,
-                          index: number,
-                        ) => {
-                          if (entity.type === "line") {
-                            return index === 1 ? entity.end : entity.start;
-                          } else if (
-                            entity.type === "circle" ||
-                            entity.type === "arc"
-                          ) {
-                            return entity.center;
-                          } else if (entity.type === "polyline") {
-                            return entity.points[index] || entity.points[0];
-                          }
-                          return null;
-                        };
-                        const pt1 = getPoint(e1, idx1);
-                        const pt2 = getPoint(e2, idx2);
-                        if (pt1 && pt2) {
-                          return {
-                            ...dim,
-                            points: [{ ...pt1 }, { ...pt2 }],
-                          };
+                      const getPointById = (
+                        id: string,
+                        index: number,
+                      ): Point2D | null => {
+                        if (id === 'origin' || id === 'ORIGIN' || id === '__ORIGIN__') {
+                          return { x: 0, y: 0 };
                         }
+                        const entity = dummySketch.entities.find((e) => e.id === id);
+                        if (!entity) return null;
+                        if (entity.type === "line") {
+                          return index === 1 ? entity.end : entity.start;
+                        } else if (
+                          entity.type === "circle" ||
+                          entity.type === "arc"
+                        ) {
+                          return entity.center;
+                        } else if (entity.type === "polyline") {
+                          return entity.points[index] || entity.points[0];
+                        }
+                        return null;
+                      };
+                      const pt1 = getPointById(id1, idx1);
+                      const pt2 = getPointById(id2, idx2);
+                      if (pt1 && pt2) {
+                        return {
+                          ...dim,
+                          points: [{ ...pt1 }, { ...pt2 }],
+                        };
                       }
                     }
                   }
@@ -2701,30 +2756,34 @@ export const useCADStore = create<CADState>()(
                     const id2 = constraint.entityIds[1];
                     const idx1 = constraint.pointIndices?.[0] ?? 0;
                     const idx2 = constraint.pointIndices?.[1] ?? 0;
-                    const e1 = updatedSketch.entities.find((e) => e.id === id1);
-                    const e2 = updatedSketch.entities.find((e) => e.id === id2);
-                    if (e1 && e2) {
-                      const getPoint = (entity: CADEntity2D, index: number) => {
-                        if (entity.type === "line") {
-                          return index === 1 ? entity.end : entity.start;
-                        } else if (
-                          entity.type === "circle" ||
-                          entity.type === "arc"
-                        ) {
-                          return entity.center;
-                        } else if (entity.type === "polyline") {
-                          return entity.points[index] || entity.points[0];
-                        }
-                        return null;
-                      };
-                      const pt1 = getPoint(e1, idx1);
-                      const pt2 = getPoint(e2, idx2);
-                      if (pt1 && pt2) {
-                        return {
-                          ...dim,
-                          points: [{ ...pt1 }, { ...pt2 }],
-                        };
+                    const getPointById = (
+                      id: string,
+                      index: number,
+                    ): Point2D | null => {
+                      if (id === 'origin' || id === 'ORIGIN' || id === '__ORIGIN__') {
+                        return { x: 0, y: 0 };
                       }
+                      const entity = updatedSketch.entities.find((e) => e.id === id);
+                      if (!entity) return null;
+                      if (entity.type === "line") {
+                        return index === 1 ? entity.end : entity.start;
+                      } else if (
+                        entity.type === "circle" ||
+                        entity.type === "arc"
+                      ) {
+                        return entity.center;
+                      } else if (entity.type === "polyline") {
+                        return entity.points[index] || entity.points[0];
+                      }
+                      return null;
+                    };
+                    const pt1 = getPointById(id1, idx1);
+                    const pt2 = getPointById(id2, idx2);
+                    if (pt1 && pt2) {
+                      return {
+                        ...dim,
+                        points: [{ ...pt1 }, { ...pt2 }],
+                      };
                     }
                   }
                 } else if (dim.type === "angular") {
@@ -2784,6 +2843,9 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.isActive &&
           state.sketchSession.sketchId === state.activeSketchId;
         isSessionEdit = isSession;
+        if (isSession) {
+          pushSketchUndoState(state);
+        }
 
         const currentEntities = isSession
           ? state.sketchSession.draftEntities
@@ -3101,12 +3163,13 @@ export const useCADStore = create<CADState>()(
     },
     dragVertexStart: () =>
       set((state) => {
+        if (state.sketchSession.isActive) {
+          pushSketchUndoState(state);
+          return;
+        }
         const undoState = pushUndoState(get());
         state.undoStack = undoState.undoStack;
         state.redoStack = undoState.redoStack;
-        if (Object.keys({}).length > 0) {
-          Object.assign(state, {});
-        }
       }),
     dragVertexLive: (entityId, pointIndex, newPos) =>
       set((state) => {
@@ -3332,6 +3395,8 @@ export const useCADStore = create<CADState>()(
           );
           if (!trimResult) return;
 
+          pushSketchUndoState(state);
+
           const { toRemoveIds, toAddEntities } = trimResult;
           const toRemoveSet = new Set(toRemoveIds);
 
@@ -3456,6 +3521,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
             name: "Draft",
@@ -3500,7 +3566,7 @@ export const useCADStore = create<CADState>()(
       }
     },
 
-    applyFillet: (entityId1, entityId2, radius) => {
+    applyFillet: (entityId1, entityId2, arg3, arg4, arg5) => {
       let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
@@ -3510,6 +3576,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
             name: "Draft",
@@ -3523,7 +3590,7 @@ export const useCADStore = create<CADState>()(
             profiles: [],
             solverState: "UnderDefined",
           };
-          applyFilletToSketch(dummySketch, entityId1, entityId2, radius);
+          applyFilletToSketch(dummySketch, entityId1, entityId2, arg3, arg4, arg5);
           state.sketchSession.draftEntities = dummySketch.entities;
           state.sketchSession.draftProfiles = dummySketch.profiles || [];
           state.sketchSession.draftConstraints = dummySketch.constraints;
@@ -3541,7 +3608,7 @@ export const useCADStore = create<CADState>()(
 
         if (!sketch) return;
 
-        applyFilletToSketch(sketch, entityId1, entityId2, radius);
+        applyFilletToSketch(sketch, entityId1, entityId2, arg3, arg4, arg5);
         const docDirty = markSketchDirtyInDoc(
           state.document,
           state.activeSketchId,
@@ -3560,7 +3627,7 @@ export const useCADStore = create<CADState>()(
       }
     },
 
-    applyChamfer: (entityId1, entityId2, distance) => {
+    applyChamfer: (entityId1, entityId2, arg3, arg4, arg5) => {
       let isSessionEdit = false;
       set((state) => {
         if (!state.activeSketchId) return;
@@ -3570,6 +3637,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
             name: "Draft",
@@ -3583,7 +3651,7 @@ export const useCADStore = create<CADState>()(
             profiles: [],
             solverState: "UnderDefined",
           };
-          applyChamferToSketch(dummySketch, entityId1, entityId2, distance);
+          applyChamferToSketch(dummySketch, entityId1, entityId2, arg3, arg4, arg5);
           state.sketchSession.draftEntities = dummySketch.entities;
           state.sketchSession.draftProfiles = dummySketch.profiles || [];
           state.sketchSession.draftConstraints = dummySketch.constraints;
@@ -3601,7 +3669,7 @@ export const useCADStore = create<CADState>()(
 
         if (!sketch) return;
 
-        applyChamferToSketch(sketch, entityId1, entityId2, distance);
+        applyChamferToSketch(sketch, entityId1, entityId2, arg3, arg4, arg5);
         const docDirty = markSketchDirtyInDoc(
           state.document,
           state.activeSketchId,
@@ -3630,6 +3698,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
             name: "Draft",
@@ -3684,6 +3753,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
             name: "Draft",
@@ -3739,6 +3809,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
             name: "Draft",
@@ -3796,6 +3867,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const prevEntityCount = state.sketchSession.draftEntities.length;
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
@@ -3868,6 +3940,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
             name: "Draft",
@@ -3925,6 +3998,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
             name: "Draft",
@@ -3987,6 +4061,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const prevCount = state.sketchSession.draftEntities.length;
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
@@ -4071,6 +4146,7 @@ export const useCADStore = create<CADState>()(
           state.sketchSession.sketchId === state.activeSketchId
         ) {
           isSessionEdit = true;
+          pushSketchUndoState(state);
           const prevCount = state.sketchSession.draftEntities.length;
           const dummySketch: SketchFeature = {
             id: state.activeSketchId,
@@ -4198,7 +4274,45 @@ export const useCADStore = create<CADState>()(
 
     undo: () =>
       set((state) => {
-        if (state.undoStack.length === 0) return state;
+        if (state.sketchSession.isActive) {
+          const undoStack = state.sketchSession.draftUndoStack || [];
+          if (undoStack.length === 0) return;
+
+          const previousSnapshot = undoStack[undoStack.length - 1];
+          const newUndoStack = undoStack.slice(0, -1);
+
+          const currentSnapshot: SketchDraftSnapshot = {
+            draftEntities: JSON.parse(
+              JSON.stringify(state.sketchSession.draftEntities),
+            ),
+            draftConstraints: JSON.parse(
+              JSON.stringify(state.sketchSession.draftConstraints),
+            ),
+            draftDimensions: JSON.parse(
+              JSON.stringify(state.sketchSession.draftDimensions),
+            ),
+            draftProfiles: JSON.parse(
+              JSON.stringify(state.sketchSession.draftProfiles),
+            ),
+          };
+
+          state.sketchSession.draftUndoStack = newUndoStack;
+          state.sketchSession.draftRedoStack = [
+            ...(state.sketchSession.draftRedoStack || []),
+            currentSnapshot,
+          ];
+          state.sketchSession.draftEntities = previousSnapshot.draftEntities;
+          state.sketchSession.draftConstraints =
+            previousSnapshot.draftConstraints;
+          state.sketchSession.draftDimensions =
+            previousSnapshot.draftDimensions;
+          state.sketchSession.draftProfiles = previousSnapshot.draftProfiles;
+          state.sketchSession.isDirty = true;
+          state.selectedEntityIds = [];
+          return;
+        }
+
+        if (state.undoStack.length === 0) return;
         const previousDoc = state.undoStack[state.undoStack.length - 1];
         const newUndoStack = state.undoStack.slice(0, -1);
 
@@ -4208,21 +4322,55 @@ export const useCADStore = create<CADState>()(
         );
         const safeActiveSketchId = sketchExists ? state.activeSketchId : null;
 
-        return {
-          undoStack: newUndoStack,
-          redoStack: [
-            ...state.redoStack,
-            JSON.parse(JSON.stringify(state.document)),
-          ],
-          document: previousDoc,
-          activeSketchId: safeActiveSketchId,
-          selectedEntityIds: [],
-          selectedFeatureId: null,
-        };
+        state.undoStack = newUndoStack;
+        state.redoStack = [
+          ...state.redoStack,
+          JSON.parse(JSON.stringify(state.document)),
+        ];
+        state.document = previousDoc;
+        state.activeSketchId = safeActiveSketchId;
+        state.selectedEntityIds = [];
+        state.selectedFeatureId = null;
       }),
     redo: () =>
       set((state) => {
-        if (state.redoStack.length === 0) return state;
+        if (state.sketchSession.isActive) {
+          const redoStack = state.sketchSession.draftRedoStack || [];
+          if (redoStack.length === 0) return;
+
+          const nextSnapshot = redoStack[redoStack.length - 1];
+          const newRedoStack = redoStack.slice(0, -1);
+
+          const currentSnapshot: SketchDraftSnapshot = {
+            draftEntities: JSON.parse(
+              JSON.stringify(state.sketchSession.draftEntities),
+            ),
+            draftConstraints: JSON.parse(
+              JSON.stringify(state.sketchSession.draftConstraints),
+            ),
+            draftDimensions: JSON.parse(
+              JSON.stringify(state.sketchSession.draftDimensions),
+            ),
+            draftProfiles: JSON.parse(
+              JSON.stringify(state.sketchSession.draftProfiles),
+            ),
+          };
+
+          state.sketchSession.draftRedoStack = newRedoStack;
+          state.sketchSession.draftUndoStack = [
+            ...(state.sketchSession.draftUndoStack || []),
+            currentSnapshot,
+          ];
+          state.sketchSession.draftEntities = nextSnapshot.draftEntities;
+          state.sketchSession.draftConstraints = nextSnapshot.draftConstraints;
+          state.sketchSession.draftDimensions = nextSnapshot.draftDimensions;
+          state.sketchSession.draftProfiles = nextSnapshot.draftProfiles;
+          state.sketchSession.isDirty = true;
+          state.selectedEntityIds = [];
+          return;
+        }
+
+        if (state.redoStack.length === 0) return;
         const nextDoc = state.redoStack[state.redoStack.length - 1];
         const newRedoStack = state.redoStack.slice(0, -1);
 
@@ -4232,21 +4380,31 @@ export const useCADStore = create<CADState>()(
         );
         const safeActiveSketchId = sketchExists ? state.activeSketchId : null;
 
-        return {
-          undoStack: [
-            ...state.undoStack,
-            JSON.parse(JSON.stringify(state.document)),
-          ],
-          redoStack: newRedoStack,
-          document: nextDoc,
-          activeSketchId: safeActiveSketchId,
-          selectedEntityIds: [],
-          selectedFeatureId: null,
-        };
+        state.undoStack = [
+          ...state.undoStack,
+          JSON.parse(JSON.stringify(state.document)),
+        ];
+        state.redoStack = newRedoStack;
+        state.document = nextDoc;
+        state.activeSketchId = safeActiveSketchId;
+        state.selectedEntityIds = [];
+        state.selectedFeatureId = null;
       }),
-    canUndo: () => get().undoStack.length > 0,
+    canUndo: () => {
+      const state = get();
+      if (state.sketchSession.isActive) {
+        return (state.sketchSession.draftUndoStack?.length || 0) > 0;
+      }
+      return state.undoStack.length > 0;
+    },
 
-    canRedo: () => get().redoStack.length > 0,
+    canRedo: () => {
+      const state = get();
+      if (state.sketchSession.isActive) {
+        return (state.sketchSession.draftRedoStack?.length || 0) > 0;
+      }
+      return state.redoStack.length > 0;
+    },
 
     resetDocument: () => {
       const doc = createInitialDocument();

@@ -1,291 +1,494 @@
 import { Point2D, CADEntity2D, LineEntity, ArcEntity, CircleEntity } from '../../types/cad';
 import { findAllIntersections, isAngleOnArc, normalizeAngle } from './IntersectionEngine';
+import { getArcSweepAngle } from './GeometryMath';
+
+export interface TrimResult {
+  toRemoveIds: string[];
+  toAddEntities: CADEntity2D[];
+}
+
+export interface TrimSubsegments {
+  subsegmentToRemove: CADEntity2D;
+  remainingSubsegments: CADEntity2D[];
+}
 
 /**
- * 實作修剪演算法：
- * 找到點擊最近的子圖元並剔除，其餘子圖元轉成全新圖元並保留。
- *
- * @param targetEntityId 被修剪的目標圖元 ID
- * @param clickPoint 點擊的位置，用以判斷要剔除哪一段子圖元
- * @param allEntities 畫布中所有的圖元
+ * 核心演算法：根據點擊座標 clickPoint 與所有實體的相交情形，
+ * 將 target 分割為多個子區間，辨識出包含點擊點的子區間作為待刪除段，並重構其餘子區間。
+ */
+export function findTrimSubsegments(
+  target: CADEntity2D,
+  clickPoint: Point2D,
+  allEntities: CADEntity2D[]
+): TrimSubsegments | null {
+  if (!target || (target.type !== 'line' && target.type !== 'arc' && target.type !== 'circle')) {
+    return null;
+  }
+
+  // 1. 找出 target 與其他圖元的所有有效交點
+  const otherEntities = allEntities.filter((e) => e.id !== target.id);
+  if (otherEntities.length === 0) {
+    return null;
+  }
+
+  const intersections = findAllIntersections(target, otherEntities);
+  if (intersections.length === 0) {
+    return null;
+  }
+
+  // 2. 根據圖元幾何類型進行分段與點擊測試
+  if (target.type === 'line') {
+    return trimLine(target, clickPoint, intersections);
+  } else if (target.type === 'circle') {
+    return trimCircle(target, clickPoint, intersections);
+  } else if (target.type === 'arc') {
+    return trimArc(target, clickPoint, intersections);
+  }
+
+  return null;
+}
+
+/**
+ * 線段修剪演算
+ */
+function trimLine(
+  target: LineEntity,
+  clickPoint: Point2D,
+  intersections: { point: Point2D }[]
+): TrimSubsegments | null {
+  const p0 = target.start;
+  const p1 = target.end;
+  const vx = p1.x - p0.x;
+  const vy = p1.y - p0.y;
+  const lenSq = vx * vx + vy * vy;
+  if (lenSq < 1e-10) return null;
+
+  // A. 計算交點於線段上的投影參數 t
+  const rawT: number[] = [];
+  for (const item of intersections) {
+    const pt = item.point;
+    const t = ((pt.x - p0.x) * vx + (pt.y - p0.y) * vy) / lenSq;
+    // 排除線段端點 (t ≈ 0 或 t ≈ 1)
+    if (t > 1e-4 && t < 1 - 1e-4) {
+      rawT.push(t);
+    }
+  }
+
+  // 去除重複 t 參數
+  const deduplicatedT: number[] = [];
+  for (const t of rawT) {
+    if (!deduplicatedT.some((existing) => Math.abs(existing - t) < 1e-4)) {
+      deduplicatedT.push(t);
+    }
+  }
+  deduplicatedT.sort((a, b) => a - b);
+
+  if (deduplicatedT.length === 0) {
+    return null;
+  }
+
+  // B. 加入起終點 0 與 1，構成區間 [cuts[i], cuts[i+1]]
+  const cuts = [0, ...deduplicatedT, 1];
+  const numSubsegments = cuts.length - 1;
+
+  // C. 將使用者 clickPoint 投影至線段上取得 tClick
+  const rawTClick = ((clickPoint.x - p0.x) * vx + (clickPoint.y - p0.y) * vy) / lenSq;
+  const tClick = Math.max(0, Math.min(1, rawTClick));
+
+  // D. 尋找包含 tClick 的子線段區間
+  let removeIdx = -1;
+  let minMidDist = Infinity;
+
+  for (let i = 0; i < numSubsegments; i++) {
+    const tStart = cuts[i];
+    const tEnd = cuts[i + 1];
+    if (tEnd - tStart < 1e-5) continue;
+
+    if (tClick >= tStart - 1e-5 && tClick <= tEnd + 1e-5) {
+      const mid = (tStart + tEnd) / 2;
+      const dist = Math.abs(tClick - mid);
+      if (dist < minMidDist) {
+        minMidDist = dist;
+        removeIdx = i;
+      }
+    }
+  }
+
+  // 備用：若不在區間內（浮點公差），以距離子線段最短者判定
+  if (removeIdx === -1) {
+    let minDist = Infinity;
+    for (let i = 0; i < numSubsegments; i++) {
+      const tStart = cuts[i];
+      const tEnd = cuts[i + 1];
+      const pS: Point2D = { x: p0.x + tStart * vx, y: p0.y + tStart * vy };
+      const pE: Point2D = { x: p0.x + tEnd * vx, y: p0.y + tEnd * vy };
+      const dist = getDistanceToLineSegment(clickPoint, pS, pE);
+      if (dist < minDist) {
+        minDist = dist;
+        removeIdx = i;
+      }
+    }
+  }
+
+  if (removeIdx === -1) return null;
+
+  // E. 建構被刪除段與保留段
+  const remStartT = cuts[removeIdx];
+  const remEndT = cuts[removeIdx + 1];
+  const subsegmentToRemove: LineEntity = {
+    ...target,
+    id: `trim-preview-${target.id}`,
+    type: 'line',
+    start: { x: p0.x + remStartT * vx, y: p0.y + remStartT * vy },
+    end: { x: p0.x + remEndT * vx, y: p0.y + remEndT * vy },
+  };
+
+  const remainingSubsegments: CADEntity2D[] = [];
+  for (let i = 0; i < numSubsegments; i++) {
+    if (i === removeIdx) continue;
+    const tStart = cuts[i];
+    const tEnd = cuts[i + 1];
+    if (tEnd - tStart < 1e-4) continue;
+
+    remainingSubsegments.push({
+      id: crypto.randomUUID(),
+      layerId: target.layerId,
+      visible: target.visible,
+      locked: target.locked,
+      color: target.color,
+      lineWidth: target.lineWidth,
+      isConstruction: target.isConstruction,
+      type: 'line',
+      start: { x: p0.x + tStart * vx, y: p0.y + tStart * vy },
+      end: { x: p0.x + tEnd * vx, y: p0.y + tEnd * vy },
+    } as LineEntity);
+  }
+
+  return { subsegmentToRemove, remainingSubsegments };
+}
+
+/**
+ * 完整圓修剪演算
+ * 封閉圓至少需要 2 個交點才能進行修剪；修剪後將被點擊的圓弧區段移除，其餘區段轉為 ArcEntity。
+ */
+function trimCircle(
+  target: CircleEntity,
+  clickPoint: Point2D,
+  intersections: { point: Point2D }[]
+): TrimSubsegments | null {
+  const center = target.center;
+  const radius = target.radius;
+  if (radius < 1e-5) return null;
+
+  // A. 計算交點在圓上的極角 theta ∈ [0, 2π)
+  const rawAngles: number[] = [];
+  for (const item of intersections) {
+    const pt = item.point;
+    const theta = normalizeAngle(Math.atan2(pt.y - center.y, pt.x - center.x));
+    rawAngles.push(theta);
+  }
+
+  // 角度去重（圓周循環公差）
+  const deduplicatedAngles: number[] = [];
+  for (const ang of rawAngles) {
+    let isDuplicate = false;
+    for (const existing of deduplicatedAngles) {
+      let diff = Math.abs(ang - existing);
+      if (diff > Math.PI) diff = 2 * Math.PI - diff;
+      if (diff < 1e-4) {
+        isDuplicate = true;
+        break;
+      }
+    }
+    if (!isDuplicate) {
+      deduplicatedAngles.push(ang);
+    }
+  }
+
+  // 特例：若交點小於 2 個，無法剪開封閉圓周
+  if (deduplicatedAngles.length < 2) {
+    return null;
+  }
+
+  // 排序角度
+  deduplicatedAngles.sort((a, b) => a - b);
+  const n = deduplicatedAngles.length;
+
+  // B. 計算 clickPoint 在圓上的極角
+  const thetaClick = normalizeAngle(Math.atan2(clickPoint.y - center.y, clickPoint.x - center.x));
+
+  // C. 判定 clickPoint 落在第幾個圓弧區間 [deduplicatedAngles[i], deduplicatedAngles[(i+1)%n]]
+  let removeIdx = -1;
+  let minMidDist = Infinity;
+
+  for (let i = 0; i < n; i++) {
+    const startA = deduplicatedAngles[i];
+    const endA = deduplicatedAngles[(i + 1) % n];
+    const sweep = normalizeAngle(endA - startA);
+    if (sweep < 1e-4) continue;
+
+    const clickOffset = normalizeAngle(thetaClick - startA);
+    if (clickOffset >= -1e-5 && clickOffset <= sweep + 1e-5) {
+      const midSweep = sweep / 2;
+      const dist = Math.abs(clickOffset - midSweep);
+      if (dist < minMidDist) {
+        minMidDist = dist;
+        removeIdx = i;
+      }
+    }
+  }
+
+  // 備用：距離圓弧區段中點最近者
+  if (removeIdx === -1) {
+    let minDist = Infinity;
+    for (let i = 0; i < n; i++) {
+      const startA = deduplicatedAngles[i];
+      const endA = deduplicatedAngles[(i + 1) % n];
+      const sweep = normalizeAngle(endA - startA);
+      const midA = normalizeAngle(startA + sweep / 2);
+      let diff = Math.abs(thetaClick - midA);
+      if (diff > Math.PI) diff = 2 * Math.PI - diff;
+      if (diff < minDist) {
+        minDist = diff;
+        removeIdx = i;
+      }
+    }
+  }
+
+  if (removeIdx === -1) return null;
+
+  // D. 建構待刪除段與保留段
+  const remStartA = deduplicatedAngles[removeIdx];
+  const remEndA = deduplicatedAngles[(removeIdx + 1) % n];
+  const subsegmentToRemove: ArcEntity = {
+    id: `trim-preview-${target.id}`,
+    layerId: target.layerId,
+    visible: target.visible,
+    locked: target.locked,
+    color: target.color,
+    lineWidth: target.lineWidth,
+    isConstruction: target.isConstruction,
+    type: 'arc',
+    center: { ...target.center },
+    radius: target.radius,
+    startAngle: remStartA,
+    endAngle: remEndA,
+    clockwise: false,
+  };
+
+  const remainingSubsegments: CADEntity2D[] = [];
+  for (let i = 0; i < n; i++) {
+    if (i === removeIdx) continue;
+    const startA = deduplicatedAngles[i];
+    const endA = deduplicatedAngles[(i + 1) % n];
+    const sweep = normalizeAngle(endA - startA);
+    if (sweep < 1e-4) continue;
+
+    remainingSubsegments.push({
+      id: crypto.randomUUID(),
+      layerId: target.layerId,
+      visible: target.visible,
+      locked: target.locked,
+      color: target.color,
+      lineWidth: target.lineWidth,
+      isConstruction: target.isConstruction,
+      type: 'arc',
+      center: { ...target.center },
+      radius: target.radius,
+      startAngle: startA,
+      endAngle: endA,
+      clockwise: false,
+    } as ArcEntity);
+  }
+
+  return { subsegmentToRemove, remainingSubsegments };
+}
+
+/**
+ * 圓弧修剪演算
+ * 支援順時針 (clockwise=true) 與逆時針 (clockwise=false) 圓弧。
+ */
+function trimArc(
+  target: ArcEntity,
+  clickPoint: Point2D,
+  intersections: { point: Point2D }[]
+): TrimSubsegments | null {
+  const center = target.center;
+  const radius = target.radius;
+  const isCW = Boolean(target.clockwise);
+  const startAngle = target.startAngle;
+  const endAngle = target.endAngle;
+  const totalSweep = getArcSweepAngle(startAngle, endAngle, isCW);
+
+  if (totalSweep < 1e-4 || radius < 1e-5) return null;
+
+  // A. 計算交點相對於 startAngle 的掃掠角差
+  const rawSweeps: number[] = [];
+  for (const item of intersections) {
+    const pt = item.point;
+    const theta = normalizeAngle(Math.atan2(pt.y - center.y, pt.x - center.x));
+    const s = isCW ? normalizeAngle(startAngle - theta) : normalizeAngle(theta - startAngle);
+    // 嚴格落在圓弧內部 (排除兩端點)
+    if (s > 1e-4 && s < totalSweep - 1e-4) {
+      rawSweeps.push(s);
+    }
+  }
+
+  // 去重
+  const deduplicatedSweeps: number[] = [];
+  for (const s of rawSweeps) {
+    if (!deduplicatedSweeps.some((existing) => Math.abs(existing - s) < 1e-4)) {
+      deduplicatedSweeps.push(s);
+    }
+  }
+  deduplicatedSweeps.sort((a, b) => a - b);
+
+  if (deduplicatedSweeps.length === 0) {
+    return null;
+  }
+
+  // B. 加入 0 與 totalSweep，構成掃掠區間
+  const cuts = [0, ...deduplicatedSweeps, totalSweep];
+  const numSubsegments = cuts.length - 1;
+
+  // C. 計算 clickPoint 在弧上的掃掠參數 sClick
+  const thetaClick = normalizeAngle(Math.atan2(clickPoint.y - center.y, clickPoint.x - center.x));
+  const rawSClick = isCW ? normalizeAngle(startAngle - thetaClick) : normalizeAngle(thetaClick - startAngle);
+  const sClick = Math.max(0, Math.min(totalSweep, rawSClick));
+
+  // D. 判定包含 sClick 的子圓弧區間
+  let removeIdx = -1;
+  let minMidDist = Infinity;
+
+  for (let i = 0; i < numSubsegments; i++) {
+    const sStart = cuts[i];
+    const sEnd = cuts[i + 1];
+    if (sEnd - sStart < 1e-4) continue;
+
+    if (sClick >= sStart - 1e-5 && sClick <= sEnd + 1e-5) {
+      const mid = (sStart + sEnd) / 2;
+      const dist = Math.abs(sClick - mid);
+      if (dist < minMidDist) {
+        minMidDist = dist;
+        removeIdx = i;
+      }
+    }
+  }
+
+  // 備用：尋找中點最接近者
+  if (removeIdx === -1) {
+    let minDist = Infinity;
+    for (let i = 0; i < numSubsegments; i++) {
+      const mid = (cuts[i] + cuts[i + 1]) / 2;
+      const dist = Math.abs(sClick - mid);
+      if (dist < minDist) {
+        minDist = dist;
+        removeIdx = i;
+      }
+    }
+  }
+
+  if (removeIdx === -1) return null;
+
+  // E. 建構待刪除段與保留段，保持原始 clockwise 屬性
+  const remSStart = cuts[removeIdx];
+  const remSEnd = cuts[removeIdx + 1];
+  const subRemStartAngle = normalizeAngle(isCW ? startAngle - remSStart : startAngle + remSStart);
+  const subRemEndAngle = normalizeAngle(isCW ? startAngle - remSEnd : startAngle + remSEnd);
+
+  const subsegmentToRemove: ArcEntity = {
+    id: `trim-preview-${target.id}`,
+    layerId: target.layerId,
+    visible: target.visible,
+    locked: target.locked,
+    color: target.color,
+    lineWidth: target.lineWidth,
+    isConstruction: target.isConstruction,
+    type: 'arc',
+    center: { ...target.center },
+    radius: target.radius,
+    startAngle: subRemStartAngle,
+    endAngle: subRemEndAngle,
+    clockwise: isCW,
+  };
+
+  const remainingSubsegments: CADEntity2D[] = [];
+  for (let i = 0; i < numSubsegments; i++) {
+    if (i === removeIdx) continue;
+    const sStart = cuts[i];
+    const sEnd = cuts[i + 1];
+    if (sEnd - sStart < 1e-4) continue;
+
+    const subStartAngle = normalizeAngle(isCW ? startAngle - sStart : startAngle + sStart);
+    const subEndAngle = normalizeAngle(isCW ? startAngle - sEnd : startAngle + sEnd);
+
+    remainingSubsegments.push({
+      id: crypto.randomUUID(),
+      layerId: target.layerId,
+      visible: target.visible,
+      locked: target.locked,
+      color: target.color,
+      lineWidth: target.lineWidth,
+      isConstruction: target.isConstruction,
+      type: 'arc',
+      center: { ...target.center },
+      radius: target.radius,
+      startAngle: subStartAngle,
+      endAngle: subEndAngle,
+      clockwise: isCW,
+    } as ArcEntity);
+  }
+
+  return { subsegmentToRemove, remainingSubsegments };
+}
+
+/**
+ * 執行修剪：返回欲刪除的實體 ID 列表以及需加入的新子實體列表
  */
 export function executeTrim(
   targetEntityId: string,
   clickPoint: Point2D,
   allEntities: CADEntity2D[]
-): { toRemoveIds: string[]; toAddEntities: CADEntity2D[] } | null {
-  // 從 allEntities 找到目標圖元 target。若不存在或非 line/arc/circle 則回傳 null。
+): TrimResult | null {
   const target = allEntities.find((e) => e.id === targetEntityId);
-  if (!target || (target.type !== 'line' && target.type !== 'arc' && target.type !== 'circle')) {
-    return null;
-  }
+  if (!target) return null;
 
-  // 呼叫 findAllIntersections(allEntities) 取得所有交點
-  const allIntersections = findAllIntersections(allEntities);
+  const result = findTrimSubsegments(target, clickPoint, allEntities);
+  if (!result) return null;
 
-  // 過濾出涉及 targetEntityId 的交點列表與參數
-  const params: number[] = [];
-  for (const res of allIntersections) {
-    if (res.entityAId === targetEntityId) {
-      params.push(res.paramA);
-    } else if (res.entityBId === targetEntityId) {
-      params.push(res.paramB);
-    }
-  }
-
-  // 若該圖元無任何交點，回傳 null（無法修剪）。
-  if (params.length === 0) {
-    return null;
-  }
-
-  // 二維/角度去重輔助函式，避免精度誤差產生重複參數
-  const deduplicate = (arr: number[], tolerance: number = 1e-5): number[] => {
-    const res: number[] = [];
-    for (const val of arr) {
-      if (!res.some((existing) => Math.abs(existing - val) < tolerance)) {
-        res.push(val);
-      }
-    }
-    return res;
-  };
-
-  const toAddEntities: CADEntity2D[] = [];
-
-  if (target.type === 'line') {
-    // 將交點依在線段上的投影參數 t（0 到 1 之間）由小到大排序，加入起點 (t=0) 與終點 (t=1)。
-    const tValues = deduplicate([...params, 0, 1].map((t) => Math.max(0, Math.min(1, t))));
-    tValues.sort((a, b) => a - b);
-
-    // 相鄰兩參數切分為多個子線段區間 [t_i, t_{i+1}]
-    const subsegments: { start: Point2D; end: Point2D; dist: number }[] = [];
-    for (let i = 0; i < tValues.length - 1; i++) {
-      const tStart = tValues[i];
-      const tEnd = tValues[i + 1];
-      if (tEnd - tStart < 1e-5) {
-        continue;
-      }
-
-      const pStart = {
-        x: target.start.x + tStart * (target.end.x - target.start.x),
-        y: target.start.y + tStart * (target.end.y - target.start.y),
-      };
-      const pEnd = {
-        x: target.start.x + tEnd * (target.end.x - target.start.x),
-        y: target.start.y + tEnd * (target.end.y - target.start.y),
-      };
-
-      // 計算與 clickPoint 的距離
-      const dist = getDistanceToLineSegment(clickPoint, pStart, pEnd);
-      subsegments.push({ start: pStart, end: pEnd, dist });
-    }
-
-    if (subsegments.length === 0) {
-      return null;
-    }
-
-    // 計算 clickPoint 距離哪一個子線段最近，將該區間剔除
-    let minIdx = 0;
-    let minDist = subsegments[0].dist;
-    for (let i = 1; i < subsegments.length; i++) {
-      if (subsegments[i].dist < minDist) {
-        minDist = subsegments[i].dist;
-        minIdx = i;
-      }
-    }
-
-    // 其餘子區間轉換為全新的 LineEntity
-    for (let i = 0; i < subsegments.length; i++) {
-      if (i === minIdx) {
-        continue;
-      }
-      const sub = subsegments[i];
-      toAddEntities.push({
-        id: crypto.randomUUID(),
-        layerId: target.layerId,
-        visible: target.visible,
-        locked: target.locked,
-        color: target.color,
-        lineWidth: target.lineWidth,
-        isConstruction: target.isConstruction,
-        type: 'line',
-        start: sub.start,
-        end: sub.end,
-      } as LineEntity);
-    }
-  } else if (target.type === 'arc') {
-    // 取得該圓弧上的所有有效交點。
-    const startAngle = target.startAngle;
-    const endAngle = target.endAngle;
-    const totalSweep = normalizeAngle(endAngle - startAngle);
-
-    // 將各交點的角度相對於 startAngle 轉換為逆時針掃掠角差：
-    // deltaTheta_i = (theta_i - startAngle) mod 2pi
-    const relativeSweeps: number[] = [];
-    for (const p of params) {
-      const sweep = normalizeAngle(p - startAngle);
-      // 容差範圍內才納入
-      if (sweep <= totalSweep + 1e-5) {
-        relativeSweeps.push(Math.min(totalSweep, Math.max(0, sweep)));
-      }
-    }
-
-    // 將這些交點依 deltaTheta_i 由小到大排序，形成子圓弧區間序列
-    const sValues = deduplicate([...relativeSweeps, 0, totalSweep]);
-    sValues.sort((a, b) => a - b);
-
-    // 切分成多段子圓弧
-    const subarcs: { startAngle: number; endAngle: number; dist: number }[] = [];
-    for (let i = 0; i < sValues.length - 1; i++) {
-      const sStart = sValues[i];
-      const sEnd = sValues[i + 1];
-      if (sEnd - sStart < 1e-5) {
-        continue;
-      }
-
-      const subStartAngle = normalizeAngle(startAngle + sStart);
-      const subEndAngle = normalizeAngle(startAngle + sEnd);
-
-      // 計算子圓弧弧上中點（Midpoint on Arc）
-      const subSweep = normalizeAngle(subEndAngle - subStartAngle);
-      const midAngle = normalizeAngle(subStartAngle + subSweep / 2);
-      const midPoint = {
-        x: target.center.x + target.radius * Math.cos(midAngle),
-        y: target.center.y + target.radius * Math.sin(midAngle),
-      };
-
-      // 計算該中點與 clickPoint 的空間距離
-      const dist = Math.hypot(clickPoint.x - midPoint.x, clickPoint.y - midPoint.y);
-
-      subarcs.push({ startAngle: subStartAngle, endAngle: subEndAngle, dist });
-    }
-
-    if (subarcs.length === 0) {
-      return null;
-    }
-
-    // 找出距離 clickPoint 最近的子圓弧將其剔除
-    let minIdx = 0;
-    let minDist = subarcs[0].dist;
-    for (let i = 1; i < subarcs.length; i++) {
-      if (subarcs[i].dist < minDist) {
-        minDist = subarcs[i].dist;
-        minIdx = i;
-      }
-    }
-
-    // 其餘子區段保留為全新的 ArcEntity（維持相同的 center, radius 與 layerId）
-    for (let i = 0; i < subarcs.length; i++) {
-      if (i === minIdx) {
-        continue;
-      }
-      const sub = subarcs[i];
-      toAddEntities.push({
-        id: crypto.randomUUID(),
-        layerId: target.layerId,
-        visible: target.visible,
-        locked: target.locked,
-        color: target.color,
-        lineWidth: target.lineWidth,
-        isConstruction: target.isConstruction,
-        type: 'arc',
-        center: target.center,
-        radius: target.radius,
-        startAngle: sub.startAngle,
-        endAngle: sub.endAngle,
-      } as ArcEntity);
-    }
-  } else if (target.type === 'circle') {
-    // 1. 找出所有與此圓相交的有效交點（割線會有 2 個交點）。
-    const sortedAngles = deduplicate(params);
-    sortedAngles.sort((a, b) => a - b);
-
-    // 2. 若交點數量 < 2：回傳 null
-    if (sortedAngles.length < 2) {
-      return null;
-    }
-
-    // 計算各交點相對於圓心的極角 theta_i，正規化至 [0, 2pi) 並遞增排序：theta_0, theta_1
-    const theta0 = sortedAngles[0];
-    const theta1 = sortedAngles[1];
-
-    // 3. 將圓周劃分為兩個圓弧候選區間：
-    // - 區間 A: startAngle = theta0, endAngle = theta1
-    // - 區間 B: startAngle = theta1, endAngle = theta0（跨過 0 度邊界）
-
-    // 計算區間 A 的中點
-    let diffA = theta1 - theta0;
-    while (diffA < 0) diffA += 2 * Math.PI;
-    const midA = normalizeAngle(theta0 + diffA / 2);
-    const midPointA = {
-      x: target.center.x + target.radius * Math.cos(midA),
-      y: target.center.y + target.radius * Math.sin(midA),
-    };
-    const distA = Math.hypot(clickPoint.x - midPointA.x, clickPoint.y - midPointA.y);
-
-    // 計算區間 B 的中點
-    let diffB = (theta0 + 2 * Math.PI) - theta1;
-    while (diffB < 0) diffB += 2 * Math.PI;
-    const midB = normalizeAngle(theta1 + diffB / 2);
-    const midPointB = {
-      x: target.center.x + target.radius * Math.cos(midB),
-      y: target.center.y + target.radius * Math.sin(midB),
-    };
-    const distB = Math.hypot(clickPoint.x - midPointB.x, clickPoint.y - midPointB.y);
-
-    // 4. 計算 clickPoint 落在區間 A 還是區間 B，剔除被點擊的那一段圓弧。
-    // 保留另一段圓弧，並建立為全新的 ArcEntity
-    let remainingArc: ArcEntity;
-    if (distA < distB) {
-      // 點擊落在區間 A，保留區間 B
-      remainingArc = {
-        id: crypto.randomUUID(),
-        layerId: target.layerId,
-        visible: target.visible,
-        locked: target.locked,
-        color: target.color,
-        lineWidth: target.lineWidth,
-        isConstruction: target.isConstruction,
-        type: 'arc',
-        center: target.center,
-        radius: target.radius,
-        startAngle: theta1,
-        endAngle: theta0,
-      };
-    } else {
-      // 點擊落在區間 B，保留區間 A
-      remainingArc = {
-        id: crypto.randomUUID(),
-        layerId: target.layerId,
-        visible: target.visible,
-        locked: target.locked,
-        color: target.color,
-        lineWidth: target.lineWidth,
-        isConstruction: target.isConstruction,
-        type: 'arc',
-        center: target.center,
-        radius: target.radius,
-        startAngle: theta0,
-        endAngle: theta1,
-      };
-    }
-
-    return {
-      toRemoveIds: [targetEntityId],
-      toAddEntities: [remainingArc],
-    };
-  }
-
-  // 回傳 toRemoveIds（包含被修剪的原圓弧 ID）與 toAddEntities
   return {
-    toRemoveIds: [targetEntityId],
-    toAddEntities,
+    toRemoveIds: [target.id],
+    toAddEntities: result.remainingSubsegments,
   };
 }
 
 /**
- * 計算點到線段的最近距離
+ * 取得 Trim 游標懸停預覽的虛擬 Entity (紅色虛線呈現即將被裁減的 Sub-segment)
  */
-function getDistanceToLineSegment(p: Point2D, sStart: Point2D, sEnd: Point2D): number {
+export function getTrimPreviewSegment(
+  target: CADEntity2D,
+  clickPoint: Point2D,
+  allEntities: CADEntity2D[]
+): CADEntity2D | null {
+  const result = findTrimSubsegments(target, clickPoint, allEntities);
+  return result ? result.subsegmentToRemove : null;
+}
+
+/**
+ * 草圖應用 Trim 變更的便利函式
+ */
+export function applyTrimToSketch(
+  sketch: { entities: CADEntity2D[] },
+  targetEntityId: string,
+  clickPoint: Point2D
+): TrimResult | null {
+  return executeTrim(targetEntityId, clickPoint, sketch.entities);
+}
+
+/**
+ * 計算點到線段的最近距離 (工具函式)
+ */
+export function getDistanceToLineSegment(p: Point2D, sStart: Point2D, sEnd: Point2D): number {
   const vx = sEnd.x - sStart.x;
   const vy = sEnd.y - sStart.y;
   const lenSq = vx * vx + vy * vy;
@@ -301,17 +504,18 @@ function getDistanceToLineSegment(p: Point2D, sStart: Point2D, sEnd: Point2D): n
 }
 
 /**
- * 計算點到圓弧的最近距離
+ * 計算點到圓弧的最近距離 (工具函式)
  */
-function getDistanceToArcSegment(
+export function getDistanceToArcSegment(
   p: Point2D,
   center: Point2D,
   radius: number,
   startAngle: number,
-  endAngle: number
+  endAngle: number,
+  clockwise?: boolean
 ): number {
   const thetaP = Math.atan2(p.y - center.y, p.x - center.x);
-  if (isAngleOnArc(thetaP, startAngle, endAngle)) {
+  if (isAngleOnArc(thetaP, startAngle, endAngle, clockwise)) {
     const distToCenter = Math.hypot(p.x - center.x, p.y - center.y);
     return Math.abs(distToCenter - radius);
   } else {

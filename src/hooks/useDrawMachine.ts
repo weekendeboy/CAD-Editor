@@ -1,12 +1,12 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useCADStore } from '../store/cadStore';
-import { Point2D, LineEntity, CircleEntity, ArcEntity, PolylineEntity, SketchFeature, CADEntity2D, ConstraintType } from '../types/cad';
+import { Point2D, LineEntity, CircleEntity, ArcEntity, PolylineEntity, SketchFeature, CADEntity2D, Constraint, ConstraintType } from '../types/cad';
 import { DrawSession, createInitialDrawSession } from '../types/sketchInteraction';
 import { findSnapPoint, SnapResult } from '../core/2d/SnapManager';
 import { calculate3PointArc, calculatePolygonVertices, calculateTTRCircle, calculate3TCircle } from '../core/2d/GeometryMath';
 import { isAngleOnArc, normalizeAngle, findAllIntersections } from '../core/2d/IntersectionEngine';
 import { calculateExtend } from '../core/2d/ExtendManager';
-import { calculateOffsetEntity } from '../core/2d/OffsetEngine';
+import { calculateOffsetEntity, calculateOffsetChain } from '../core/2d/OffsetEngine';
 import { calculateTangentArcSegment, getSegmentEndTangent } from '../core/2d/PolylineMath';
 import { calculateMirror } from '../core/2d/MirrorEngine';
 import { PolarTrackingResult, calculatePolarTracking, PolarExtensionIntersection, findPolarExtensionIntersection, getNormalizedPolarAngles } from '../core/2d/PolarTracking';
@@ -14,6 +14,7 @@ import { OTrackManager, TrackAnchor, TrackGuideLine } from '../core/2d/ObjectTra
 import { determineLinearDimType } from '../core/2d/DimensionEngine';
 import { getBestTangentPoint } from '../core/2d/TangentEngine';
 import { arcToBulge, endpointsToBulge } from '../core/2d/BulgeMath';
+import { getTrimPreviewSegment } from '../core/2d/TrimManager';
 
 function getDistanceToLineSegment(p: Point2D, sStart: Point2D, sEnd: Point2D): number {
   const vx = sEnd.x - sStart.x;
@@ -35,10 +36,11 @@ function getDistanceToArcSegment(
   center: Point2D,
   radius: number,
   startAngle: number,
-  endAngle: number
+  endAngle: number,
+  clockwise: boolean = false
 ): number {
   const thetaP = Math.atan2(p.y - center.y, p.x - center.x);
-  if (isAngleOnArc(thetaP, startAngle, endAngle)) {
+  if (isAngleOnArc(thetaP, startAngle, endAngle, clockwise)) {
     const distToCenter = Math.hypot(p.x - center.x, p.y - center.y);
     return Math.abs(distToCenter - radius);
   } else {
@@ -60,7 +62,7 @@ function getDistanceToEntity(p: Point2D, entity: CADEntity2D): number {
   if (entity.type === 'line') {
     return getDistanceToLineSegment(p, entity.start, entity.end);
   } else if (entity.type === 'arc') {
-    return getDistanceToArcSegment(p, entity.center, entity.radius, entity.startAngle, entity.endAngle);
+    return getDistanceToArcSegment(p, entity.center, entity.radius, entity.startAngle, entity.endAngle, entity.clockwise);
   } else if (entity.type === 'circle') {
     const distToCenter = Math.hypot(p.x - entity.center.x, p.y - entity.center.y);
     return Math.abs(distToCenter - entity.radius);
@@ -77,186 +79,6 @@ function getDistanceToEntity(p: Point2D, entity: CADEntity2D): number {
     return minDist;
   }
   return Infinity;
-}
-
-function getTrimPreviewSegment(
-  target: CADEntity2D,
-  clickPoint: Point2D,
-  allEntities: CADEntity2D[]
-): CADEntity2D | null {
-  if (target.type !== 'line' && target.type !== 'arc' && target.type !== 'circle') {
-    return null;
-  }
-
-  const allIntersections = findAllIntersections(allEntities);
-  const params: number[] = [];
-  for (const res of allIntersections) {
-    if (res.entityAId === target.id) {
-      params.push(res.paramA);
-    } else if (res.entityBId === target.id) {
-      params.push(res.paramB);
-    }
-  }
-
-  if (params.length === 0) {
-    return null;
-  }
-
-  const deduplicate = (arr: number[], tolerance: number = 1e-5): number[] => {
-    const res: number[] = [];
-    for (const val of arr) {
-      if (!res.some((existing) => Math.abs(existing - val) < tolerance)) {
-        res.push(val);
-      }
-    }
-    return res;
-  };
-
-  if (target.type === 'line') {
-    const tValues = deduplicate([...params, 0, 1].map((t) => Math.max(0, Math.min(1, t))));
-    tValues.sort((a, b) => a - b);
-
-    const subsegments: { start: Point2D; end: Point2D; dist: number }[] = [];
-    for (let i = 0; i < tValues.length - 1; i++) {
-      const tStart = tValues[i];
-      const tEnd = tValues[i + 1];
-      if (tEnd - tStart < 1e-5) continue;
-
-      const pStart = {
-        x: target.start.x + tStart * (target.end.x - target.start.x),
-        y: target.start.y + tStart * (target.end.y - target.start.y),
-      };
-      const pEnd = {
-        x: target.start.x + tEnd * (target.end.x - target.start.x),
-        y: target.start.y + tEnd * (target.end.y - target.start.y),
-      };
-
-      const dist = getDistanceToLineSegment(clickPoint, pStart, pEnd);
-      subsegments.push({ start: pStart, end: pEnd, dist });
-    }
-
-    if (subsegments.length === 0) return null;
-
-    let minIdx = 0;
-    let minDist = subsegments[0].dist;
-    for (let i = 1; i < subsegments.length; i++) {
-      if (subsegments[i].dist < minDist) {
-        minDist = subsegments[i].dist;
-        minIdx = i;
-      }
-    }
-
-    const sub = subsegments[minIdx];
-    return {
-      ...target,
-      id: `trim-preview-${target.id}`,
-      type: 'line',
-      start: sub.start,
-      end: sub.end,
-    } as LineEntity;
-  } else if (target.type === 'arc') {
-    const startAngle = target.startAngle;
-    const endAngle = target.endAngle;
-    const totalSweep = normalizeAngle(endAngle - startAngle);
-
-    const relativeSweeps: number[] = [];
-    for (const p of params) {
-      const sweep = normalizeAngle(p - startAngle);
-      if (sweep <= totalSweep + 1e-5) {
-        relativeSweeps.push(Math.min(totalSweep, Math.max(0, sweep)));
-      }
-    }
-
-    const sValues = deduplicate([...relativeSweeps, 0, totalSweep]);
-    sValues.sort((a, b) => a - b);
-
-    const subarcs: { startAngle: number; endAngle: number; dist: number }[] = [];
-    for (let i = 0; i < sValues.length - 1; i++) {
-      const sStart = sValues[i];
-      const sEnd = sValues[i + 1];
-      if (sEnd - sStart < 1e-5) continue;
-
-      const subStartAngle = normalizeAngle(startAngle + sStart);
-      const subEndAngle = normalizeAngle(startAngle + sEnd);
-      const dist = getDistanceToArcSegment(clickPoint, target.center, target.radius, subStartAngle, subEndAngle);
-
-      subarcs.push({ startAngle: subStartAngle, endAngle: subEndAngle, dist });
-    }
-
-    if (subarcs.length === 0) return null;
-
-    let minIdx = 0;
-    let minDist = subarcs[0].dist;
-    for (let i = 1; i < subarcs.length; i++) {
-      if (subarcs[i].dist < minDist) {
-        minDist = subarcs[i].dist;
-        minIdx = i;
-      }
-    }
-
-    const sub = subarcs[minIdx];
-    return {
-      ...target,
-      id: `trim-preview-${target.id}`,
-      type: 'arc',
-      center: target.center,
-      radius: target.radius,
-      startAngle: sub.startAngle,
-      endAngle: sub.endAngle,
-    } as ArcEntity;
-  } else if (target.type === 'circle') {
-    const sortedAngles = deduplicate(params);
-    sortedAngles.sort((a, b) => a - b);
-
-    if (sortedAngles.length < 2) {
-      return null;
-    }
-
-    const theta0 = sortedAngles[0];
-    const theta1 = sortedAngles[1];
-
-    let diffA = theta1 - theta0;
-    while (diffA < 0) diffA += 2 * Math.PI;
-    const midA = normalizeAngle(theta0 + diffA / 2);
-    const midPointA = {
-      x: target.center.x + target.radius * Math.cos(midA),
-      y: target.center.y + target.radius * Math.sin(midA),
-    };
-    const distA = Math.hypot(clickPoint.x - midPointA.x, clickPoint.y - midPointA.y);
-
-    let diffB = (theta0 + 2 * Math.PI) - theta1;
-    while (diffB < 0) diffB += 2 * Math.PI;
-    const midB = normalizeAngle(theta1 + diffB / 2);
-    const midPointB = {
-      x: target.center.x + target.radius * Math.cos(midB),
-      y: target.center.y + target.radius * Math.sin(midB),
-    };
-    const distB = Math.hypot(clickPoint.x - midPointB.x, clickPoint.y - midPointB.y);
-
-    if (distA < distB) {
-      return {
-        ...target,
-        id: `trim-preview-${target.id}`,
-        type: 'arc',
-        center: target.center,
-        radius: target.radius,
-        startAngle: theta0,
-        endAngle: theta1,
-      } as ArcEntity;
-    } else {
-      return {
-        ...target,
-        id: `trim-preview-${target.id}`,
-        type: 'arc',
-        center: target.center,
-        radius: target.radius,
-        startAngle: theta1,
-        endAngle: theta0,
-      } as ArcEntity;
-    }
-  }
-
-  return null;
 }
 
 export function useDrawMachine() {
@@ -400,10 +222,12 @@ export function useDrawMachine() {
 
   // Fillet state
   const [filletFirstEntityId, setFilletFirstEntityId] = useState<string | null>(null);
+  const [filletFirstPickPoint, setFilletFirstPickPoint] = useState<Point2D | null>(null);
   const [filletRadius, setFilletRadius] = useState<number>(10);
 
   // Chamfer state
   const [chamferFirstEntityId, setChamferFirstEntityId] = useState<string | null>(null);
+  const [chamferFirstPickPoint, setChamferFirstPickPoint] = useState<Point2D | null>(null);
   const [chamferDistanceLocal, setChamferDistanceLocal] = useState<number>(10);
   const chamferDistance = storeChamferDistance ?? chamferDistanceLocal;
   const setChamferDistance = useCallback((dist: number) => {
@@ -543,16 +367,19 @@ export function useDrawMachine() {
     }
   }, [hudPrompt, lastRadius]);
 
-  // 取得目前草圖內的 entities
+  // 取得目前草圖內的 entities 與 constraints
   let currentEntities: CADEntity2D[] = [];
+  let currentConstraints: Constraint[] = [];
   if (sketchSession.isActive && sketchSession.sketchId === activeSketchId) {
     currentEntities = sketchSession.draftEntities;
+    currentConstraints = sketchSession.draftConstraints;
   } else if (activeSketchId) {
     const sketch = document.featureTree.find(
       (f) => f.id === activeSketchId && f.type === 'SKETCH'
     ) as SketchFeature | undefined;
     if (sketch) {
       currentEntities = sketch.entities;
+      currentConstraints = sketch.constraints;
     }
   }
 
@@ -590,7 +417,9 @@ export function useDrawMachine() {
     setDragVertexInfo(null);
     setStartSnap(null);
     setFilletFirstEntityId(null);
+    setFilletFirstPickPoint(null);
     setChamferFirstEntityId(null);
+    setChamferFirstPickPoint(null);
     setExtendPreview(null);
     setOffsetTargetId(null);
     setOffsetPreviewEntity(null);
@@ -957,6 +786,7 @@ export function useDrawMachine() {
           radius: r,
           startAngle,
           endAngle,
+          clockwise: Boolean(drawSession.arcClockwise),
         };
         addEntity(newArc);
         setLastRadius(r);
@@ -1452,11 +1282,32 @@ export function useDrawMachine() {
           );
           updatedStartPoint = tangentPt;
         }
+        let arcClockwise = prev.arcClockwise;
+        let accumulatedAngle = prev.accumulatedAngle;
+        let lastCursorAngle = prev.lastCursorAngle;
+
+        if (currentTool === 'ARC_CENTER' && prev.step === 2 && prev.startPoint && prev.secondPoint) {
+          const C = prev.startPoint;
+          const currAngle = Math.atan2(res.point.y - C.y, res.point.x - C.x);
+          const lastA = lastCursorAngle !== undefined ? lastCursorAngle : Math.atan2(prev.secondPoint.y - C.y, prev.secondPoint.x - C.x);
+          let delta = currAngle - lastA;
+          while (delta > Math.PI) delta -= 2 * Math.PI;
+          while (delta <= -Math.PI) delta += 2 * Math.PI;
+          if (Math.abs(delta) > 1e-4) {
+            accumulatedAngle = (accumulatedAngle ?? 0) + delta;
+            lastCursorAngle = currAngle;
+            arcClockwise = accumulatedAngle < 0;
+          }
+        }
+
         return {
           ...prev,
           startPoint: updatedStartPoint,
           currentCursor: res.point,
           inferredConstraint: res.inferredConstraint,
+          arcClockwise,
+          accumulatedAngle,
+          lastCursorAngle,
         };
       });
 
@@ -1518,11 +1369,16 @@ export function useDrawMachine() {
         if (offsetTargetId) {
           const targetEntity = currentEntities.find((e) => e.id === offsetTargetId);
           if (targetEntity) {
-            const preview = calculateOffsetEntity(targetEntity, {
-              distance: offsetDistance,
-              sidePoint: worldPt,
-            });
-            setOffsetPreviewEntity(preview ? preview.entity : null);
+            const preview = calculateOffsetChain(
+              targetEntity,
+              {
+                distance: offsetDistance,
+                sidePoint: worldPt,
+              },
+              currentEntities,
+              currentConstraints
+            );
+            setOffsetPreviewEntity(preview && preview.entities.length > 0 ? preview.entities[0] : null);
           } else {
             setOffsetPreviewEntity(null);
           }
@@ -2078,6 +1934,7 @@ export function useDrawMachine() {
               radius: arcData.radius,
               startAngle: arcData.startAngle,
               endAngle: arcData.endAngle,
+              clockwise: arcData.clockwise,
             };
             addEntity(newArc);
             setLastRadius(arcData.radius);
@@ -2357,6 +2214,11 @@ export function useDrawMachine() {
               type: 'vertical',
               entityIds: [leftLine.id],
             });
+            addConstraint({
+              id: crypto.randomUUID(),
+              type: 'vertical',
+              entityIds: [rightLine.id],
+            });
           }
 
           cancelDrawing();
@@ -2461,24 +2323,15 @@ export function useDrawMachine() {
               radius: arcData.radius,
               startAngle: arcData.startAngle,
               endAngle: arcData.endAngle,
+              clockwise: arcData.clockwise,
             };
 
             addEntity(newArc);
             setLastRadius(arcData.radius);
 
-            const arcStart = {
-              x: newArc.center.x + newArc.radius * Math.cos(newArc.startAngle),
-              y: newArc.center.y + newArc.radius * Math.sin(newArc.startAngle),
-            };
-            const arcEnd = {
-              x: newArc.center.x + newArc.radius * Math.cos(newArc.endAngle),
-              y: newArc.center.y + newArc.radius * Math.sin(newArc.endAngle),
-            };
-
-            const dStartP1 = Math.hypot(arcStart.x - p1.x, arcStart.y - p1.y);
-            const dEndP1 = Math.hypot(arcEnd.x - p1.x, arcEnd.y - p1.y);
-            const p1Index = dStartP1 <= dEndP1 ? 0 : 1;
-            const p2Index = p1Index === 0 ? 1 : 0;
+            // Standardized Arc Point Indices: 0: Center, 1: Start (p1), 2: End (p2)
+            const p1Index = 1;
+            const p2Index = 2;
 
             if (snapP1 && (snapP1.type === 'endpoint' || snapP1.type === 'center') && snapP1.pointIndex !== undefined) {
               addConstraint({
@@ -2517,11 +2370,15 @@ export function useDrawMachine() {
           const C = drawSession.startPoint;
           const dist = Math.hypot(clickPt.x - C.x, clickPt.y - C.y);
           if (dist > 0.5) {
+            const initAngle = Math.atan2(clickPt.y - C.y, clickPt.x - C.x);
             setDrawSession((prev) => ({
               ...prev,
               secondPoint: clickPt,
               currentCursor: clickPt,
               step: 2,
+              arcClockwise: false,
+              accumulatedAngle: 0,
+              lastCursorAngle: initAngle,
             }));
             setSnapP1(currentSnap ? { ...currentSnap } : null);
           }
@@ -2533,6 +2390,7 @@ export function useDrawMachine() {
           if (radius > 0.5) {
             const startAngle = Math.atan2(P_start.y - C.y, P_start.x - C.x);
             const endAngle = Math.atan2(clickPt.y - C.y, clickPt.x - C.x);
+            const isClockwise = Boolean(drawSession.arcClockwise);
 
             const newArc: ArcEntity = {
               id: crypto.randomUUID(),
@@ -2544,6 +2402,7 @@ export function useDrawMachine() {
               radius: radius,
               startAngle: startAngle,
               endAngle: endAngle,
+              clockwise: isClockwise,
             };
 
             addEntity(newArc);
@@ -2554,7 +2413,7 @@ export function useDrawMachine() {
                 id: crypto.randomUUID(),
                 type: 'coincident',
                 entityIds: [newArc.id, snapCenter.entityId],
-                pointIndices: [2, snapCenter.pointIndex ?? 0],
+                pointIndices: [0, snapCenter.pointIndex ?? 0],
               });
             }
 
@@ -2563,7 +2422,7 @@ export function useDrawMachine() {
                 id: crypto.randomUUID(),
                 type: 'coincident',
                 entityIds: [newArc.id, snapP1.entityId],
-                pointIndices: [0, snapP1.pointIndex ?? 0],
+                pointIndices: [1, snapP1.pointIndex ?? 0],
               });
             }
 
@@ -2572,7 +2431,7 @@ export function useDrawMachine() {
                 id: crypto.randomUUID(),
                 type: 'coincident',
                 entityIds: [newArc.id, currentSnap.entityId],
-                pointIndices: [1, currentSnap.pointIndex ?? 0],
+                pointIndices: [2, currentSnap.pointIndex ?? 0],
               });
             }
           }
@@ -2808,21 +2667,23 @@ export function useDrawMachine() {
       } else if (currentTool === 'TRIM') {
         if (trimPreviewEntity) {
           const hitEntityId = trimPreviewEntity.id.replace('trim-preview-', '');
-          trimEntity(hitEntityId, clickPt);
+          trimEntity(hitEntityId, worldPt);
         } else {
+          const threshold = 15 / scale;
           let closestEntity: CADEntity2D | null = null;
-          let minDistance = 5.0;
+          let minDistance = threshold;
           for (const entity of currentEntities) {
             if (entity.type === 'line' || entity.type === 'arc' || entity.type === 'circle') {
-              const dist = getDistanceToEntity(clickPt, entity);
-              if (dist < minDistance) {
+              const tolerance = entity.type === 'circle' ? 8 / scale : threshold;
+              const dist = getDistanceToEntity(worldPt, entity);
+              if (dist < tolerance && dist < minDistance) {
                 minDistance = dist;
                 closestEntity = entity;
               }
             }
           }
           if (closestEntity) {
-            trimEntity(closestEntity.id, clickPt);
+            trimEntity(closestEntity.id, worldPt);
           }
         }
       } else if (currentTool === 'FILLET') {
@@ -2843,6 +2704,7 @@ export function useDrawMachine() {
         if (closestEntity && (closestEntity.type === 'line' || closestEntity.type === 'arc')) {
           if (!filletFirstEntityId) {
             setFilletFirstEntityId(closestEntity.id);
+            setFilletFirstPickPoint(clickPt);
             setDrawSession({
               isDrawing: true,
               startPoint: null,
@@ -2855,7 +2717,7 @@ export function useDrawMachine() {
               const isFirstLineOrArc = firstEnt.type === 'line' || firstEnt.type === 'arc';
               const isSecondLineOrArc = closestEntity.type === 'line' || closestEntity.type === 'arc';
               if (isFirstLineOrArc && isSecondLineOrArc) {
-                applyFillet(filletFirstEntityId, closestEntity.id, filletRadius);
+                applyFillet(filletFirstEntityId, closestEntity.id, filletFirstPickPoint || clickPt, clickPt, filletRadius);
               }
             }
             cancelDrawing();
@@ -2879,6 +2741,7 @@ export function useDrawMachine() {
         if (closestEntity && closestEntity.type === 'line') {
           if (!chamferFirstEntityId) {
             setChamferFirstEntityId(closestEntity.id);
+            setChamferFirstPickPoint(clickPt);
             setDrawSession({
               isDrawing: true,
               startPoint: null,
@@ -2888,7 +2751,7 @@ export function useDrawMachine() {
           } else if (closestEntity.id !== chamferFirstEntityId) {
             const firstEnt = currentEntities.find((e) => e.id === chamferFirstEntityId);
             if (firstEnt && firstEnt.type === 'line') {
-              applyChamfer(chamferFirstEntityId, closestEntity.id, chamferDistance);
+              applyChamfer(chamferFirstEntityId, closestEntity.id, chamferFirstPickPoint || clickPt, clickPt, chamferDistance);
             }
             cancelDrawing();
           }
@@ -2920,7 +2783,12 @@ export function useDrawMachine() {
           let minDistance = threshold;
 
           for (const entity of currentEntities) {
-            if (entity.type === 'line' || entity.type === 'arc' || entity.type === 'circle') {
+            if (
+              entity.type === 'line' ||
+              entity.type === 'arc' ||
+              entity.type === 'circle' ||
+              entity.type === 'polyline'
+            ) {
               const dist = getDistanceToEntity(clickPt, entity);
               if (dist < minDistance) {
                 minDistance = dist;
@@ -2933,9 +2801,10 @@ export function useDrawMachine() {
             setOffsetTargetId(closestEntity.id);
           }
         } else {
-          offsetEntity(offsetTargetId, offsetDistance, worldPt);
+          offsetEntity(offsetTargetId, offsetDistance, clickPt);
           setOffsetTargetId(null);
           setOffsetPreviewEntity(null);
+          cancelDrawing();
         }
       } else if (currentTool === 'MIRROR') {
         const threshold = 15 / scale;
@@ -3604,6 +3473,7 @@ export function useDrawMachine() {
           radius: radiusToUse,
           startAngle,
           endAngle,
+          clockwise: Boolean(drawSession.arcClockwise),
         };
         addEntity(newArc);
         setLastRadius(radiusToUse);
@@ -3980,9 +3850,11 @@ export function useDrawMachine() {
     dimSelectedLineId,
     dimSelectedLineId2,
     filletFirstEntityId,
+    filletFirstPickPoint,
     filletRadius,
     setFilletRadius,
     chamferFirstEntityId,
+    chamferFirstPickPoint,
     chamferDistance,
     setChamferDistance,
     offsetTargetId,

@@ -11,7 +11,8 @@ export type GripType =
   | 'arc_center'
   | 'arc_start'
   | 'arc_mid'
-  | 'arc_end';
+  | 'arc_end'
+  | 'polyline_vertex';
 
 export interface EntityGrip {
   id: string;          // 格式: `${entityId}_${gripType}_${index}`
@@ -161,6 +162,19 @@ export function getEntityGrips(entity: CADEntity2D): EntityGrip[] {
         type: 'arc_end',
         point: endPt,
         cursorStyle: 'crosshair',
+      });
+      break;
+    }
+
+    case 'polyline': {
+      entity.points.forEach((pt, idx) => {
+        grips.push({
+          id: `${entity.id}_polyline_vertex_${idx}`,
+          entityId: entity.id,
+          type: 'polyline_vertex',
+          point: { x: pt.x, y: pt.y },
+          cursorStyle: 'crosshair',
+        });
       });
       break;
     }
@@ -338,6 +352,22 @@ export function applyGripDrag(
       break;
     }
 
+    case 'polyline': {
+      if (grip.type === 'polyline_vertex') {
+        const match = grip.id.match(/_(\d+)$/);
+        if (match) {
+          const idx = parseInt(match[1], 10);
+          const newPoints = [...entity.points];
+          newPoints[idx] = { x: currentPt.x, y: currentPt.y };
+          return {
+            ...entity,
+            points: newPoints,
+          };
+        }
+      }
+      break;
+    }
+
     default:
       break;
   }
@@ -415,6 +445,16 @@ export function applyGripDragWithConstraints(
       entityIds: [draggedEntity.id],
       pointIndices: [0],
     });
+  } else if (grip.type === 'polyline_vertex') {
+    const match = grip.id.match(/_(\d+)$/);
+    if (match) {
+      tempFixConstraints.push({
+        id: '__temp_fix_vertex',
+        type: 'fix',
+        entityIds: [draggedEntity.id],
+        pointIndices: [parseInt(match[1], 10)],
+      });
+    }
   }
 
   // 步驟 E：呼叫 solveConstraints 求解

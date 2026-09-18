@@ -14,7 +14,9 @@ export interface CadZoomToBboxEventDetail {
 }
 
 export function useViewport({
-  initialPan = { x: 0, y: 0 },
+  initialPan = typeof window !== 'undefined'
+    ? { x: window.innerWidth / 2, y: Math.max(200, (window.innerHeight - 56) / 2) }
+    : { x: 500, y: 400 },
   initialScale = 1.0,
   onMiddleDoubleClick,
 }: UseViewportOptions = {}) {

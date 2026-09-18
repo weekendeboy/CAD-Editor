@@ -172,7 +172,7 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
       }
 
       case 'arc': {
-        // 計算世界座標的起終點 (CCW 逆時針方向)
+        // 計算世界座標的起終點
         const worldStart = {
           x: entity.center.x + entity.radius * Math.cos(entity.startAngle),
           y: entity.center.y + entity.radius * Math.sin(entity.startAngle),
@@ -187,13 +187,15 @@ export const EntityRenderer: React.FC<EntityRendererProps> = ({
         const end = worldToScreen(worldEnd);
         const screenRadius = entity.radius * scale;
 
-        // 計算夾角以決定是否為大弧 (Large Arc Flag)
-        let diff = entity.endAngle - entity.startAngle;
-        while (diff < 0) diff += 2 * Math.PI;
-        while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
+        // 計算夾角以決定是否為大弧 (Large Arc Flag) 與方向 (100% 依據 clockwise 旗標)
+        const isCW = Boolean(entity.clockwise);
+        let sweep = isCW ? entity.startAngle - entity.endAngle : entity.endAngle - entity.startAngle;
+        while (sweep < 0) sweep += 2 * Math.PI;
+        while (sweep >= 2 * Math.PI) sweep -= 2 * Math.PI;
 
-        const largeArcFlag = diff > Math.PI ? 1 : 0;
-        const sweepFlag = 0; // CAD 笛卡爾座標系 Y 向上映射至 SVG Y 向下時，CCW 弧對應 sweepFlag = 0
+        const largeArcFlag = sweep > Math.PI ? 1 : 0;
+        // CAD 笛卡爾座標系 Y 向上映射至 SVG Y 向下時：CCW 對應 sweepFlag = 0，CW 對應 sweepFlag = 1
+        const sweepFlag = isCW ? 1 : 0;
 
         const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
 

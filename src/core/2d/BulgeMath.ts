@@ -126,14 +126,9 @@ export function bulgeToArcEntity(
     return null;
   }
 
-  let startAngle = arcDef.startAngle;
-  let endAngle = arcDef.endAngle;
-
-  // 當 b < 0（順時針 CW 弧）時，對調起訖角度以符合系統標準 CCW 掃掠規範
-  if (arcDef.isClockwise) {
-    startAngle = arcDef.endAngle;
-    endAngle = arcDef.startAngle;
-  }
+  const startAngle = arcDef.startAngle;
+  const endAngle = arcDef.endAngle;
+  const clockwise = arcDef.isClockwise;
 
   return {
     id: entityProps?.id || `arc-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
@@ -149,12 +144,13 @@ export function bulgeToArcEntity(
     radius: arcDef.radius,
     startAngle,
     endAngle,
+    clockwise,
   };
 }
 
 /**
  * 3. ArcEntity 轉 Bulge
- * 根據圓弧的起訖角度計算包含角，並輸出凸度值 b = tan(θ / 4)
+ * 根據圓弧的起訖角度與方向計算包含角，並輸出凸度值 b = ±tan(θ / 4)
  */
 export function arcToBulge(arc: ArcEntity): number {
   if (
@@ -167,19 +163,20 @@ export function arcToBulge(arc: ArcEntity): number {
     return 0;
   }
 
+  const isCW = Boolean(arc.clockwise);
   const start = normalizeAngle(arc.startAngle);
   const end = normalizeAngle(arc.endAngle);
 
-  let sweep = end - start;
-  if (sweep < 0) {
-    sweep += 2 * Math.PI;
-  }
+  let sweep = isCW ? start - end : end - start;
+  while (sweep < 0) sweep += 2 * Math.PI;
+  while (sweep >= 2 * Math.PI) sweep -= 2 * Math.PI;
 
   if (Math.abs(sweep) < 1e-12 || Math.abs(sweep - 2 * Math.PI) < 1e-12) {
     return 0;
   }
 
-  return Math.tan(sweep / 4);
+  const sign = isCW ? -1 : 1;
+  return sign * Math.tan(sweep / 4);
 }
 
 /**

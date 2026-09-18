@@ -18,12 +18,15 @@ export function normalizeAngle(angle: number): number {
 }
 
 /**
- * 判斷目標角度 theta 是否落在指定圓弧角度範圍內（考慮逆時針方向與跨 0 弧度邊界）。
+ * 判斷目標角度 theta 是否落在指定圓弧角度範圍內。
+ * 支援 clockwise (順時針) 與 counter-clockwise (逆時針)。
+ * 100% 依賴 clockwise 旗標，絕不使用 endAngle < startAngle 猜測。
  */
 export function isAngleOnArc(
   theta: number,
   startAngle: number,
   endAngle: number,
+  clockwise: boolean = false,
   tolerance: number = 1e-5
 ): boolean {
   if (Math.abs(endAngle - startAngle) >= 2 * Math.PI - tolerance) {
@@ -33,10 +36,21 @@ export function isAngleOnArc(
   const end = normalizeAngle(endAngle);
   const target = normalizeAngle(theta);
 
-  const sweep = normalizeAngle(end - start);
-  const targetSweep = normalizeAngle(target - start);
-
-  return targetSweep <= sweep + tolerance || (2 * Math.PI - targetSweep) <= tolerance;
+  if (clockwise) {
+    let sweep = normalizeAngle(start - end);
+    if (Math.abs(sweep) < tolerance && Math.abs(startAngle - endAngle) >= 2 * Math.PI - tolerance) {
+      sweep = 2 * Math.PI;
+    }
+    const targetSweep = normalizeAngle(start - target);
+    return targetSweep <= sweep + tolerance || (2 * Math.PI - targetSweep) <= tolerance;
+  } else {
+    let sweep = normalizeAngle(end - start);
+    if (Math.abs(sweep) < tolerance && Math.abs(endAngle - startAngle) >= 2 * Math.PI - tolerance) {
+      sweep = 2 * Math.PI;
+    }
+    const targetSweep = normalizeAngle(target - start);
+    return targetSweep <= sweep + tolerance || (2 * Math.PI - targetSweep) <= tolerance;
+  }
 }
 
 /**
@@ -152,7 +166,7 @@ export function intersectLineArc(line: LineEntity, arc: ArcEntity): Point2D[] {
         y: p1.y + t * vy,
       };
       const theta = Math.atan2(p.y - center.y, p.x - center.x);
-      if (isAngleOnArc(theta, arc.startAngle, arc.endAngle, eps)) {
+      if (isAngleOnArc(theta, arc.startAngle, arc.endAngle, arc.clockwise, eps)) {
         points.push(p);
       }
     }
@@ -216,8 +230,8 @@ export function intersectArcArc(arc1: ArcEntity, arc2: ArcEntity): Point2D[] {
     const theta1 = Math.atan2(p.y - c1.y, p.x - c1.x);
     const theta2 = Math.atan2(p.y - c2.y, p.x - c2.x);
     if (
-      isAngleOnArc(theta1, arc1.startAngle, arc1.endAngle, eps) &&
-      isAngleOnArc(theta2, arc2.startAngle, arc2.endAngle, eps)
+      isAngleOnArc(theta1, arc1.startAngle, arc1.endAngle, arc1.clockwise, eps) &&
+      isAngleOnArc(theta2, arc2.startAngle, arc2.endAngle, arc2.clockwise, eps)
     ) {
       points.push(p);
     }
@@ -268,6 +282,7 @@ function decomposeEntity(entity: CADEntity2D): Array<LineEntity | ArcEntity> {
         type: 'arc',
         startAngle: 0,
         endAngle: 2 * Math.PI,
+        clockwise: false,
       };
       return [arc];
     }
@@ -310,27 +325,133 @@ function decomposeEntity(entity: CADEntity2D): Array<LineEntity | ArcEntity> {
 }
 
 /**
- * 遍歷圖元陣列，計算所有兩兩相交的交點清單。
+ * 遍歷圖元陣列，計算所有兩兩相交的交點清單，
+ * 或計算指定目標圖元 (targetEntity) 與其餘圖元 (otherEntities) 之間的所有相交交點。
  */
-export function findAllIntersections(entities: CADEntity2D[]): IntersectionResult[] {
-  // 1. 先將所有複雜/基礎圖元展平成基礎圖元列表 (LineEntity / ArcEntity)
-  const prims: Array<{ segment: LineEntity | ArcEntity; parentId: string }> = [];
-  for (const entity of entities) {
-    const decomposed = decomposeEntity(entity);
-    for (const d of decomposed) {
-      prims.push({ segment: d, parentId: entity.id });
+export function findAllIntersections(entities: CADEntity2D[]): IntersectionResult[];
+export function findAllIntersections(targetEntity: CADEntity2D, otherEntities: CADEntity2D[]): IntersectionResult[];
+export function findAllIntersections(
+  targetOrEntities: CADEntity2D | CADEntity2D[],
+  otherEntities?: CADEntity2D[]
+): IntersectionResult[] {
+  if (Array.isArray(targetOrEntities)) {
+    // 1. 先將所有複雜/基礎圖元展平成基礎圖元列表 (LineEntity / ArcEntity)
+    const prims: Array<{ segment: LineEntity | ArcEntity; parentId: string }> = [];
+    for (const entity of targetOrEntities) {
+      const decomposed = decomposeEntity(entity);
+      for (const d of decomposed) {
+        prims.push({ segment: d, parentId: entity.id });
+      }
+    }
+
+    const results: IntersectionResult[] = [];
+
+    if (otherEntities && otherEntities.length > 0) {
+      const otherPrims: Array<{ segment: LineEntity | ArcEntity; parentId: string }> = [];
+      for (const entity of otherEntities) {
+        const decomposed = decomposeEntity(entity);
+        for (const d of decomposed) {
+          otherPrims.push({ segment: d, parentId: entity.id });
+        }
+      }
+
+      for (const pA of prims) {
+        for (const pB of otherPrims) {
+          if (pA.parentId === pB.parentId) {
+            continue;
+          }
+
+          const segA = pA.segment;
+          const segB = pB.segment;
+
+          let pts: Point2D[] = [];
+
+          if (segA.type === 'line' && segB.type === 'line') {
+            const pt = intersectLineLine(segA, segB);
+            if (pt) pts.push(pt);
+          } else if (segA.type === 'line' && segB.type === 'arc') {
+            pts = intersectLineArc(segA, segB);
+          } else if (segA.type === 'arc' && segB.type === 'line') {
+            pts = intersectLineArc(segB, segA);
+          } else if (segA.type === 'arc' && segB.type === 'arc') {
+            pts = intersectArcArc(segA, segB);
+          }
+
+          for (const pt of pts) {
+            results.push({
+              point: pt,
+              entityAId: pA.parentId,
+              entityBId: pB.parentId,
+              paramA: getEntityParameter(segA, pt),
+              paramB: getEntityParameter(segB, pt),
+            });
+          }
+        }
+      }
+
+      return results;
+    }
+
+    // 2. 兩兩進行求交 (i 與 j + 1)
+    for (let i = 0; i < prims.length; i++) {
+      for (let j = i + 1; j < prims.length; j++) {
+        const pA = prims[i];
+        const pB = prims[j];
+
+        // 若原屬於同一個實體 (例如同一多段線的相鄰段)，不計為相交交點
+        if (pA.parentId === pB.parentId) {
+          continue;
+        }
+
+        const segA = pA.segment;
+        const segB = pB.segment;
+
+        let pts: Point2D[] = [];
+
+        if (segA.type === 'line' && segB.type === 'line') {
+          const pt = intersectLineLine(segA, segB);
+          if (pt) pts.push(pt);
+        } else if (segA.type === 'line' && segB.type === 'arc') {
+          pts = intersectLineArc(segA, segB);
+        } else if (segA.type === 'arc' && segB.type === 'line') {
+          pts = intersectLineArc(segB, segA);
+        } else if (segA.type === 'arc' && segB.type === 'arc') {
+          pts = intersectArcArc(segA, segB);
+        }
+
+        for (const pt of pts) {
+          results.push({
+            point: pt,
+            entityAId: pA.parentId,
+            entityBId: pB.parentId,
+            paramA: getEntityParameter(segA, pt),
+            paramB: getEntityParameter(segB, pt),
+          });
+        }
+      }
+    }
+
+    return results;
+  }
+
+  // targetOrEntities 為單一目標圖元 (targetEntity)
+  const targetEntity = targetOrEntities;
+  const targetPrims: Array<{ segment: LineEntity | ArcEntity; parentId: string }> = [];
+  for (const d of decomposeEntity(targetEntity)) {
+    targetPrims.push({ segment: d, parentId: targetEntity.id });
+  }
+
+  const otherPrims: Array<{ segment: LineEntity | ArcEntity; parentId: string }> = [];
+  for (const entity of (otherEntities || [])) {
+    if (entity.id === targetEntity.id) continue;
+    for (const d of decomposeEntity(entity)) {
+      otherPrims.push({ segment: d, parentId: entity.id });
     }
   }
 
   const results: IntersectionResult[] = [];
-
-  // 2. 兩兩進行求交 (i 與 j + 1)
-  for (let i = 0; i < prims.length; i++) {
-    for (let j = i + 1; j < prims.length; j++) {
-      const pA = prims[i];
-      const pB = prims[j];
-
-      // 若原屬於同一個實體 (例如同一多段線的相鄰段)，不計為相交交點
+  for (const pA of targetPrims) {
+    for (const pB of otherPrims) {
       if (pA.parentId === pB.parentId) {
         continue;
       }

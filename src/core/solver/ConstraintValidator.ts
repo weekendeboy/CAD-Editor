@@ -3,15 +3,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { CADEntity2D, ConstraintType } from '../../types/cad';
+import { CADEntity2D, Constraint, ConstraintType } from '../../types/cad';
 
 /**
  * 驗證是否可對選取的圖元套用「水平 (Horizontal)」約束
  */
 export function canApplyHorizontal(
   selectedEntities: CADEntity2D[] = [],
-  hasOriginSelected: boolean = false
+  hasOriginSelected: boolean = false,
+  existingConstraints: Constraint[] = []
 ): boolean {
+  if (selectedEntities.length === 1 && selectedEntities[0].type === 'line') {
+    const lineId = selectedEntities[0].id;
+    const hasVertical = existingConstraints.some(
+      (c) => c.type === 'vertical' && c.entityIds.includes(lineId)
+    );
+    if (hasVertical) return false;
+  }
   return canApplyHorizontalVertical(selectedEntities, hasOriginSelected);
 }
 
@@ -20,8 +28,16 @@ export function canApplyHorizontal(
  */
 export function canApplyVertical(
   selectedEntities: CADEntity2D[] = [],
-  hasOriginSelected: boolean = false
+  hasOriginSelected: boolean = false,
+  existingConstraints: Constraint[] = []
 ): boolean {
+  if (selectedEntities.length === 1 && selectedEntities[0].type === 'line') {
+    const lineId = selectedEntities[0].id;
+    const hasHorizontal = existingConstraints.some(
+      (c) => c.type === 'horizontal' && c.entityIds.includes(lineId)
+    );
+    if (hasHorizontal) return false;
+  }
   return canApplyHorizontalVertical(selectedEntities, hasOriginSelected);
 }
 
@@ -74,7 +90,23 @@ export function canApplyCoincident(
 }
 
 /**
- * 驗證是否選取了兩條直線 (用於平行、垂直、等長)
+ * 驗證是否選取了所有直線 (用於等長)
+ */
+export function isAllLines(
+  selectedEntities: CADEntity2D[] = [],
+  hasOriginSelected: boolean = false
+): boolean {
+  const totalSelectedCount = selectedEntities.length + (hasOriginSelected ? 1 : 0);
+  return (
+    totalSelectedCount >= 2 &&
+    !hasOriginSelected &&
+    selectedEntities.length >= 2 &&
+    selectedEntities.every((e) => e.type === 'line')
+  );
+}
+
+/**
+ * 驗證是否選取了兩條直線 (用於平行、垂直)
  */
 export function isBothLines(
   selectedEntities: CADEntity2D[] = [],
@@ -116,7 +148,7 @@ export function canApplyEqualLength(
   selectedEntities: CADEntity2D[] = [],
   hasOriginSelected: boolean = false
 ): boolean {
-  return isBothLines(selectedEntities, hasOriginSelected);
+  return isAllLines(selectedEntities, hasOriginSelected);
 }
 
 /**
@@ -180,13 +212,14 @@ export function canApplyFix(
 export function canApplyConstraint(
   type: ConstraintType,
   selectedEntities: CADEntity2D[] = [],
-  hasOriginSelected: boolean = false
+  hasOriginSelected: boolean = false,
+  existingConstraints: Constraint[] = []
 ): boolean {
   switch (type) {
     case 'horizontal':
-      return canApplyHorizontal(selectedEntities, hasOriginSelected);
+      return canApplyHorizontal(selectedEntities, hasOriginSelected, existingConstraints);
     case 'vertical':
-      return canApplyVertical(selectedEntities, hasOriginSelected);
+      return canApplyVertical(selectedEntities, hasOriginSelected, existingConstraints);
     case 'coincident':
       return canApplyCoincident(selectedEntities, hasOriginSelected);
     case 'parallel':
@@ -211,14 +244,15 @@ export function canApplyConstraint(
  */
 export function getAvailableConstraints(
   selectedEntities: CADEntity2D[] = [],
-  hasOriginSelected: boolean = false
+  hasOriginSelected: boolean = false,
+  existingConstraints: Constraint[] = []
 ): ConstraintType[] {
   const available: ConstraintType[] = [];
 
-  if (canApplyHorizontal(selectedEntities, hasOriginSelected)) {
+  if (canApplyHorizontal(selectedEntities, hasOriginSelected, existingConstraints)) {
     available.push('horizontal');
   }
-  if (canApplyVertical(selectedEntities, hasOriginSelected)) {
+  if (canApplyVertical(selectedEntities, hasOriginSelected, existingConstraints)) {
     available.push('vertical');
   }
   if (canApplyCoincident(selectedEntities, hasOriginSelected)) {
@@ -253,16 +287,18 @@ export class ConstraintValidator {
   static canApply(
     type: ConstraintType,
     selectedEntities: CADEntity2D[],
-    hasOriginSelected: boolean = false
+    hasOriginSelected: boolean = false,
+    existingConstraints: Constraint[] = []
   ): boolean {
-    return canApplyConstraint(type, selectedEntities, hasOriginSelected);
+    return canApplyConstraint(type, selectedEntities, hasOriginSelected, existingConstraints);
   }
 
   static getAvailable(
     selectedEntities: CADEntity2D[],
-    hasOriginSelected: boolean = false
+    hasOriginSelected: boolean = false,
+    existingConstraints: Constraint[] = []
   ): ConstraintType[] {
-    return getAvailableConstraints(selectedEntities, hasOriginSelected);
+    return getAvailableConstraints(selectedEntities, hasOriginSelected, existingConstraints);
   }
 
   static canApplyHorizontalVertical(
@@ -270,6 +306,13 @@ export class ConstraintValidator {
     hasOriginSelected: boolean = false
   ): boolean {
     return canApplyHorizontalVertical(selectedEntities, hasOriginSelected);
+  }
+
+  static isAllLines(
+    selectedEntities: CADEntity2D[],
+    hasOriginSelected: boolean = false
+  ): boolean {
+    return isAllLines(selectedEntities, hasOriginSelected);
   }
 
   static isBothLines(

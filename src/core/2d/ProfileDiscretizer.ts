@@ -34,13 +34,14 @@ export function discretizeProfileLoop(
     } else if (seg.type === 'arc') {
       const center = seg.center;
       const radius = seg.radius;
-      const isCW = seg.sweepFlag === 1;
+      // SVG sweep-flag 1 表示正向（角度增加），0 表示負向（角度減少）
+      const sweepPos = seg.sweepFlag === 1;
 
       // 嚴格依據 seg.start 與 seg.end 計算起始與結束角，消弭浮點累積偏差
       const sa = Math.atan2(seg.start.y - center.y, seg.start.x - center.x);
       const ea = Math.atan2(seg.end.y - center.y, seg.end.x - center.x);
 
-      let sweep = isCW ? (sa - ea) : (ea - sa);
+      let sweep = sweepPos ? (ea - sa) : (sa - ea);
       while (sweep < -1e-6) {
         sweep += 2 * Math.PI;
       }
@@ -62,7 +63,7 @@ export function discretizeProfileLoop(
 
       for (let step = 0; step < numSteps; step++) {
         const t = step / numSteps;
-        const currentAngle = isCW ? (sa - t * sweep) : (sa + t * sweep);
+        const currentAngle = sweepPos ? (sa + t * sweep) : (sa - t * sweep);
         result.push({
           x: center.x + radius * Math.cos(currentAngle),
           y: center.y + radius * Math.sin(currentAngle),

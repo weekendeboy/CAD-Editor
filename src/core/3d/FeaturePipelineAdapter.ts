@@ -28,6 +28,7 @@ import {
 } from '../../types/cad';
 import type { FeatureEvalOp } from './SolidEngine.types';
 import type { TopoReference } from './PersistentTopology.types';
+import { findClosedProfiles } from '../2d/TopologyEngine';
 
 /**
  * 向量正規化輔助函式

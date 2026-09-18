@@ -48,10 +48,11 @@ function getDistanceToArcSegment(
   center: Point2D,
   radius: number,
   startAngle: number,
-  endAngle: number
+  endAngle: number,
+  clockwise?: boolean
 ): number {
   const thetaP = Math.atan2(p.y - center.y, p.x - center.x);
-  if (isAngleOnArc(thetaP, startAngle, endAngle)) {
+  if (isAngleOnArc(thetaP, startAngle, endAngle, clockwise)) {
     const distToCenter = Math.hypot(p.x - center.x, p.y - center.y);
     return Math.abs(distToCenter - radius);
   } else {
@@ -73,7 +74,7 @@ function getDistanceToEntity(p: Point2D, entity: CADEntity2D): number {
   if (entity.type === 'line') {
     return getDistanceToLineSegment(p, entity.start, entity.end);
   } else if (entity.type === 'arc') {
-    return getDistanceToArcSegment(p, entity.center, entity.radius, entity.startAngle, entity.endAngle);
+    return getDistanceToArcSegment(p, entity.center, entity.radius, entity.startAngle, entity.endAngle, entity.clockwise);
   }
   return Infinity;
 }
@@ -91,9 +92,7 @@ function hitTest(p: Point2D, entities: CADEntity2D[], threshold: number): string
   return hitId;
 }
 
-const DEFAULT_PROJECTED_EDGES = [
-  { start: { x: -40, y: -40 }, end: { x: 40, y: -40 } }
-];
+const DEFAULT_PROJECTED_EDGES: any[] = [];
 
 export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -157,51 +156,6 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
   // 取得 3D 投影邊緣，若無則暫時提供一條測試線以便驗證功能
   const projected3DEdges = useCadStore((s: any) => s.projected3DEdges || DEFAULT_PROJECTED_EDGES);
 
-  const handleSelectEntity = useCallback(
-    (id: string, e: React.MouseEvent) => {
-      // 若當前正處於旋轉特徵對話框中或點選旋轉軸模式 (Pick Revolve Axis)
-      if (revolvePreview?.isOpen || isPickingRevolveAxis) {
-        const isSession =
-          sketchSession.isActive && sketchSession.sketchId === activeSketchId;
-        const activeEntities = isSession
-          ? sketchSession.draftEntities
-          : ((
-              document.featureTree?.find((f) => f.id === activeSketchId) as any
-            )?.entities || []);
-        const clickedEntity = activeEntities.find((ent: any) => ent.id === id);
-        if (clickedEntity && clickedEntity.type === 'line') {
-          e.stopPropagation();
-          setRevolveAxisEntityId(id);
-          setIsPickingRevolveAxis(false);
-          clearSelection();
-          selectEntity(id);
-          setViewMode('3D');
-          return;
-        }
-      }
-
-      if (currentTool === 'SELECT') {
-        if (!e.shiftKey) {
-          clearSelection();
-        }
-        selectEntity(id);
-      }
-    },
-    [
-      currentTool,
-      clearSelection,
-      selectEntity,
-      revolvePreview?.isOpen,
-      isPickingRevolveAxis,
-      setRevolveAxisEntityId,
-      setIsPickingRevolveAxis,
-      document.featureTree,
-      activeSketchId,
-      sketchSession,
-      setViewMode,
-    ]
-  );
-
   const {
     drawSession,
     currentSnap,
@@ -213,9 +167,11 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
     dimSelectedLineId,
     dimSelectedLineId2,
     filletFirstEntityId,
+    filletFirstPickPoint,
     filletRadius,
     setFilletRadius,
     chamferFirstEntityId,
+    chamferFirstPickPoint,
     chamferDistance,
     setChamferDistance,
     cancelDrawing,
@@ -418,12 +374,16 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
   const {
     pan,
     scale,
+    setPan,
+    setScale,
     worldToScreen,
     screenToWorld,
     zoomExtents,
     handlers: viewportHandlers,
   } = useViewport({
-    initialPan: { x: 0, y: 0 },
+    initialPan: typeof window !== 'undefined'
+      ? { x: window.innerWidth / 2, y: Math.max(200, (window.innerHeight - 56) / 2) }
+      : { x: 500, y: 400 },
     initialScale: 1.0,
     onMiddleDoubleClick: () => {
       handleZoomToFitRef.current?.();
@@ -672,6 +632,15 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
     handleZoomToFitRef.current = handleZoomToFit;
   }, [handleZoomToFit]);
 
+  const isCenteredOnMount = useRef(false);
+
+  useEffect(() => {
+    if (dimensions.width > 0 && dimensions.height > 0 && !isCenteredOnMount.current) {
+      isCenteredOnMount.current = true;
+      handleZoomToFit();
+    }
+  }, [dimensions.width, dimensions.height, handleZoomToFit]);
+
   useEffect(() => {
     const onZoomFit = () => {
       handleZoomToFit();
@@ -894,6 +863,86 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
     return [...entities, ...virtualEntities];
   }, [entities, virtualEntities]);
 
+  const handleSelectEntity = useCallback(
+    (id: string, e: React.MouseEvent) => {
+      // 若當前正處於旋轉特徵對話框中或點選旋轉軸模式 (Pick Revolve Axis)
+      if (revolvePreview?.isOpen || isPickingRevolveAxis) {
+        const isSession =
+          sketchSession.isActive && sketchSession.sketchId === activeSketchId;
+        const activeEntities = isSession
+          ? sketchSession.draftEntities
+          : ((
+              document.featureTree?.find((f) => f.id === activeSketchId) as any
+            )?.entities || []);
+        const clickedEntity = activeEntities.find((ent: any) => ent.id === id);
+        if (clickedEntity && clickedEntity.type === 'line') {
+          e.stopPropagation();
+          setRevolveAxisEntityId(id);
+          setIsPickingRevolveAxis(false);
+          clearSelection();
+          selectEntity(id);
+          setViewMode('3D');
+          return;
+        }
+      }
+
+      if (currentTool === 'SELECT') {
+        if (!e.shiftKey) {
+          clearSelection();
+        }
+        let pointIndex: number | undefined = undefined;
+        if (containerRef.current) {
+          const rect = containerRef.current.getBoundingClientRect();
+          const screenPt = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+          const clickWorld = screenToWorld(screenPt);
+          const clickedEnt = currentEntities.find((ent) => ent.id === id);
+          if (clickedEnt && clickedEnt.type === 'line') {
+            const d0 = Math.hypot(clickWorld.x - clickedEnt.start.x, clickWorld.y - clickedEnt.start.y);
+            const d1 = Math.hypot(clickWorld.x - clickedEnt.end.x, clickWorld.y - clickedEnt.end.y);
+            const threshold = 18 / scale;
+            if (d0 < threshold || d1 < threshold) {
+              pointIndex = d0 < d1 ? 0 : 1;
+            }
+          } else if (clickedEnt && clickedEnt.type === 'arc') {
+            const startPt = {
+              x: clickedEnt.center.x + clickedEnt.radius * Math.cos(clickedEnt.startAngle),
+              y: clickedEnt.center.y + clickedEnt.radius * Math.sin(clickedEnt.startAngle),
+            };
+            const endPt = {
+              x: clickedEnt.center.x + clickedEnt.radius * Math.cos(clickedEnt.endAngle),
+              y: clickedEnt.center.y + clickedEnt.radius * Math.sin(clickedEnt.endAngle),
+            };
+            const d0 = Math.hypot(clickWorld.x - startPt.x, clickWorld.y - startPt.y);
+            const d1 = Math.hypot(clickWorld.x - endPt.x, clickWorld.y - endPt.y);
+            const d2 = Math.hypot(clickWorld.x - clickedEnt.center.x, clickWorld.y - clickedEnt.center.y);
+            const threshold = 18 / scale;
+            if (d0 < threshold || d1 < threshold || d2 < threshold) {
+              if (d2 < d0 && d2 < d1) pointIndex = 2;
+              else pointIndex = d0 < d1 ? 0 : 1;
+            }
+          }
+        }
+        selectEntity(id, pointIndex);
+      }
+    },
+    [
+      currentTool,
+      clearSelection,
+      selectEntity,
+      screenToWorld,
+      scale,
+      currentEntities,
+      revolvePreview?.isOpen,
+      isPickingRevolveAxis,
+      setRevolveAxisEntityId,
+      setIsPickingRevolveAxis,
+      document.featureTree,
+      activeSketchId,
+      sketchSession,
+      setViewMode,
+    ]
+  );
+
   // 處理滑鼠移動時更新世界座標與繪圖狀態
   const handlePointerMove = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -1006,21 +1055,8 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
           }
 
           if (closestEntity && (closestEntity.type === 'line' || closestEntity.type === 'arc')) {
-            if (!filletFirstEntityId) {
-              setFilletError(null);
-              handleCanvasClick(worldPt, scale);
-            } else if (closestEntity.id !== filletFirstEntityId) {
-              const firstEnt = currentEntities.find((ent) => ent.id === filletFirstEntityId);
-              if (firstEnt && (firstEnt.type === 'line' || firstEnt.type === 'arc')) {
-                const filletResult = createFillet(firstEnt, closestEntity, filletRadius);
-                if (!filletResult) {
-                  setFilletError('Fillet radius too large or invalid geometry transition');
-                  return;
-                }
-              }
-              setFilletError(null);
-              handleCanvasClick(worldPt, scale);
-            }
+            setFilletError(null);
+            handleCanvasClick(worldPt, scale);
           } else {
             e.stopPropagation();
             if (filletFirstEntityId) {
@@ -1047,21 +1083,8 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
           }
 
           if (closestEntity && closestEntity.type === 'line') {
-            if (!chamferFirstEntityId) {
-              setChamferError(null);
-              handleCanvasClick(worldPt, scale);
-            } else if (closestEntity.id !== chamferFirstEntityId) {
-              const firstEnt = currentEntities.find((ent) => ent.id === chamferFirstEntityId);
-              if (firstEnt && firstEnt.type === 'line') {
-                const chamferResult = createChamfer(firstEnt, closestEntity, chamferDistance);
-                if (!chamferResult) {
-                  setChamferError('Chamfer distance too large or lines are parallel');
-                  return;
-                }
-              }
-              setChamferError(null);
-              handleCanvasClick(worldPt, scale);
-            }
+            setChamferError(null);
+            handleCanvasClick(worldPt, scale);
           } else {
             e.stopPropagation();
             if (chamferFirstEntityId) {
@@ -1267,11 +1290,13 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
       const start = worldToScreen(worldStart);
       const end = worldToScreen(worldEnd);
       const screenRadius = entity.radius * scale;
-      let diff = entity.endAngle - entity.startAngle;
+      const isCW = Boolean(entity.clockwise);
+      let diff = isCW ? entity.startAngle - entity.endAngle : entity.endAngle - entity.startAngle;
       while (diff < 0) diff += 2 * Math.PI;
       while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
       const largeArcFlag = diff > Math.PI ? 1 : 0;
-      const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} 0 ${end.x} ${end.y}`;
+      const sweepFlag = isCW ? 1 : 0;
+      const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
       return <path key={key} d={pathData} {...(extraProps as any)} />;
     } else if (entity.type === 'polyline') {
       const points = entity.points.map((pt) => worldToScreen(pt));

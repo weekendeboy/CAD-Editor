@@ -1,6 +1,6 @@
 {
   "name": "CAD Editor",
-  "description": "A 2D CAD application.",
+  "description": "A parametric 2D/3D CAD modeling application.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

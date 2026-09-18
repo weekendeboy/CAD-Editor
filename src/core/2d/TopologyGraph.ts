@@ -18,6 +18,7 @@ export interface GraphEdge {
     radius: number;
     startAngle: number;
     endAngle: number;
+    clockwise?: boolean;
     isReversed?: boolean;
   };
 }
@@ -324,8 +325,8 @@ export class PlanarGraph {
           x: entity.center.x + entity.radius * Math.cos(entity.endAngle),
           y: entity.center.y + entity.radius * Math.sin(entity.endAngle),
         };
-        const node1 = getNodeForEndpoint(entity.id, 0, startPt);
-        const node2 = getNodeForEndpoint(entity.id, 1, endPt);
+        const node1 = getNodeForEndpoint(entity.id, 1, startPt);
+        const node2 = getNodeForEndpoint(entity.id, 2, endPt);
 
         if (node1.id === node2.id) {
           continue;
@@ -333,7 +334,8 @@ export class PlanarGraph {
 
         const dx12 = node2.point.x - node1.point.x;
         const dy12 = node2.point.y - node1.point.y;
-        const angle12 = Math.atan2(dy12, dx12);
+        // 使用真實幾何出射切線角度 (Incident Tangent Angle) 而非弦向量
+        const angle12 = entity.clockwise ? entity.startAngle - Math.PI / 2 : entity.startAngle + Math.PI / 2;
         const edge12Id = `edge_${graph.nextEdgeId++}`;
 
         const edge12: GraphEdge = {
@@ -348,6 +350,7 @@ export class PlanarGraph {
             radius: entity.radius,
             startAngle: entity.startAngle,
             endAngle: entity.endAngle,
+            clockwise: entity.clockwise,
             isReversed: false,
           },
         };
@@ -356,7 +359,8 @@ export class PlanarGraph {
 
         const dx21 = node1.point.x - node2.point.x;
         const dy21 = node1.point.y - node2.point.y;
-        const angle21 = Math.atan2(dy21, dx21);
+        // 反向遍歷：從 end 走回 start，出射切線為原本 end 處切線的反向
+        const angle21 = entity.clockwise ? entity.endAngle + Math.PI / 2 : entity.endAngle - Math.PI / 2;
         const edge21Id = `edge_${graph.nextEdgeId++}`;
 
         const edge21: GraphEdge = {
@@ -371,6 +375,7 @@ export class PlanarGraph {
             radius: entity.radius,
             startAngle: entity.startAngle,
             endAngle: entity.endAngle,
+            clockwise: entity.clockwise,
             isReversed: true,
           },
         };

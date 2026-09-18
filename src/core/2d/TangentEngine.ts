@@ -7,6 +7,7 @@ import { isAngleOnArc } from './IntersectionEngine';
 export interface ArcSweepLimits {
   startAngle: number;
   endAngle: number;
+  clockwise?: boolean;
 }
 
 /**
@@ -61,7 +62,7 @@ export function isTangentPointOnArc(
   tolerance: number = 1e-5
 ): boolean {
   const theta = Math.atan2(point.y - center.y, point.x - center.x);
-  return isAngleOnArc(theta, arcLimits.startAngle, arcLimits.endAngle, tolerance);
+  return isAngleOnArc(theta, arcLimits.startAngle, arcLimits.endAngle, arcLimits.clockwise, tolerance);
 }
 
 /**
@@ -241,11 +242,11 @@ export function calculateEntityEntityTangents(
 ): TangentSegment[] {
   const arc1Limits: ArcSweepLimits | undefined =
     e1.type === 'arc'
-      ? { startAngle: e1.startAngle, endAngle: e1.endAngle }
+      ? { startAngle: e1.startAngle, endAngle: e1.endAngle, clockwise: e1.clockwise }
       : undefined;
   const arc2Limits: ArcSweepLimits | undefined =
     e2.type === 'arc'
-      ? { startAngle: e2.startAngle, endAngle: e2.endAngle }
+      ? { startAngle: e2.startAngle, endAngle: e2.endAngle, clockwise: e2.clockwise }
       : undefined;
 
   return calculateCircleCircleTangents(
@@ -269,11 +270,11 @@ export function findBestEntityTangentSegment(
 ): TangentSegment | null {
   const arc1Limits: ArcSweepLimits | undefined =
     e1.type === 'arc'
-      ? { startAngle: e1.startAngle, endAngle: e1.endAngle }
+      ? { startAngle: e1.startAngle, endAngle: e1.endAngle, clockwise: e1.clockwise }
       : undefined;
   const arc2Limits: ArcSweepLimits | undefined =
     e2.type === 'arc'
-      ? { startAngle: e2.startAngle, endAngle: e2.endAngle }
+      ? { startAngle: e2.startAngle, endAngle: e2.endAngle, clockwise: e2.clockwise }
       : undefined;
 
   return findBestTangentSegment(
@@ -366,16 +367,17 @@ export function calculatePointArcTangents(
   center: Point2D,
   radius: number,
   startAngle: number,
-  endAngle: number
+  endAngle: number,
+  clockwise?: boolean
 ): Point2D[] {
   // 1. 先以 calculatePointCircleTangents 取得候選切點
   const candidates = calculatePointCircleTangents(point, center, radius);
 
-  // 2. 檢驗每個切點相對於圓心的極角（atan2），驗證該角度是否落在圓弧的 startAngle 至 endAngle 逆時針有效角度區間內
+  // 2. 檢驗每個切點相對於圓心的極角（atan2），驗證該角度是否落在圓弧的有效角度區間內
   // 3. 只回傳落在圓弧範圍內的切點
   return candidates.filter((pt) => {
     const angle = Math.atan2(pt.y - center.y, pt.x - center.x);
-    return isAngleOnArc(angle, startAngle, endAngle);
+    return isAngleOnArc(angle, startAngle, endAngle, clockwise);
   });
 }
 
@@ -388,6 +390,7 @@ export function calculatePointArcTangents(
  * @param hintPoint 最初鎖點/點擊位置
  * @param startAngle 圓弧起始角度 (選填)
  * @param endAngle 圓弧終止角度 (選填)
+ * @param clockwise 圓弧旋向 (選填)
  * @returns 距離 hintPoint 最近的切點，若無切點則回傳 null
  */
 export function getBestTangentPoint(
@@ -396,12 +399,13 @@ export function getBestTangentPoint(
   radius: number,
   hintPoint: Point2D,
   startAngle?: number,
-  endAngle?: number
+  endAngle?: number,
+  clockwise?: boolean
 ): Point2D | null {
   let candidates: Point2D[] = [];
 
   if (startAngle !== undefined && endAngle !== undefined) {
-    candidates = calculatePointArcTangents(point, center, radius, startAngle, endAngle);
+    candidates = calculatePointArcTangents(point, center, radius, startAngle, endAngle, clockwise);
   } else {
     candidates = calculatePointCircleTangents(point, center, radius);
   }

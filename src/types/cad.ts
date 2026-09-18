@@ -48,6 +48,7 @@ export interface ArcEntity extends BaseCADEntity2D {
   radius: number;
   startAngle: number;
   endAngle: number;
+  clockwise: boolean;
 }
 
 export interface PolylineEntity extends BaseCADEntity2D {
@@ -146,6 +147,7 @@ export interface ProfileSegment {
   radius?: number;
   startAngle?: number;
   endAngle?: number;
+  clockwise?: boolean;
   isLargeArc?: boolean;
   sweepFlag?: number;
 }

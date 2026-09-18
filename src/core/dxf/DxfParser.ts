@@ -1212,13 +1212,9 @@ export function flattenBlockEntity(
       Math.atan2(pEndTrans.y - centerTrans.y, pEndTrans.x - centerTrans.x)
     );
 
-    // 鏡射反轉 (det < 0) 處理：交換起始與結束角度以維持逆時針方向定義
+    // 鏡射反轉 (det < 0) 處理：若行列式小於 0 則為順時針弧 (clockwise = true)
     const det = m.a * m.d - m.b * m.c;
-    if (det < 0) {
-      const temp = newStartAngle;
-      newStartAngle = newEndAngle;
-      newEndAngle = temp;
-    }
+    const isClockwise = det < 0;
 
     const arcEntity: ArcEntity = {
       id: generateEntityId('arc'),
@@ -1227,6 +1223,7 @@ export function flattenBlockEntity(
       radius: radiusTrans,
       startAngle: newStartAngle,
       endAngle: newEndAngle,
+      clockwise: isClockwise,
       layerId: resolvedLayer,
       visible: true,
       locked: false,

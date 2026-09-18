@@ -87,10 +87,13 @@ export class VariableSystem {
       } else if (ptIndex === 1) {
         return [this.getVariableIndex(entity.id, 'end.x'), this.getVariableIndex(entity.id, 'end.y')];
       }
-    } else if (entity.type === 'circle' || entity.type === 'arc') {
-      if (ptIndex === 0 || ptIndex === undefined) {
-        return [this.getVariableIndex(entity.id, 'center.x'), this.getVariableIndex(entity.id, 'center.y')];
+    } else if (entity.type === 'circle') {
+      return [this.getVariableIndex(entity.id, 'center.x'), this.getVariableIndex(entity.id, 'center.y')];
+    } else if (entity.type === 'arc') {
+      if (ptIndex === 1 || ptIndex === 2) {
+        throw new Error(`Arc start/end points are not direct variables.`);
       }
+      return [this.getVariableIndex(entity.id, 'center.x'), this.getVariableIndex(entity.id, 'center.y')];
     } else if (entity.type === 'polyline') {
       if (ptIndex !== undefined) {
         return [this.getVariableIndex(entity.id, `points[${ptIndex}].x`), this.getVariableIndex(entity.id, `points[${ptIndex}].y`)];

@@ -33,6 +33,40 @@ export function normalizeAngle(angle: number): number {
 }
 
 /**
+ * 使用光線投射法 (Ray-Casting Algorithm) 判定點是否位於多邊形內部。
+ */
+export function isPointInsidePolygon(point: Point2D, polygon: Point2D[]): boolean {
+  if (polygon.length < 3) return false;
+  let inside = false;
+  const n = polygon.length;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const xi = polygon[i].x, yi = polygon[i].y;
+    const xj = polygon[j].x, yj = polygon[j].y;
+    const intersect =
+      yi > point.y !== yj > point.y &&
+      point.x < ((xj - xi) * (point.y - yi)) / (yj - yi + 1e-12) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * 計算多邊形的有號面積 (Shoelace formula)。
+ * 若面積為正值 (>= 0)，頂點排列為逆時針方向 (CCW)；若為負值，為順時針方向 (CW)。
+ */
+export function getPolygonSignedArea(polygon: Point2D[]): number {
+  if (polygon.length < 3) return 0;
+  let area = 0;
+  const n = polygon.length;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    area += polygon[i].x * polygon[j].y;
+    area -= polygon[j].x * polygon[i].y;
+  }
+  return area * 0.5;
+}
+
+/**
  * 取得 Line 或 Arc 的起訖端點世界座標。
  * Line: start / end
  * Arc: startAngle 點 / endAngle 點
@@ -461,7 +495,8 @@ export function solveCornerIntersection(
     const vA = { x: curveA.end.x - curveA.start.x, y: curveA.end.y - curveA.start.y };
     const candidates = intersectLineCircleInfinite(curveA.start, vA, curveB.center, curveB.radius);
     if (candidates.length === 0) {
-      return { ...origCorner };
+      const endA = !elemA.isReversed ? curveA.end : curveA.start;
+      return { ...endA };
     }
     if (candidates.length === 1) return candidates[0];
     const d0 = Math.hypot(candidates[0].x - origCorner.x, candidates[0].y - origCorner.y);
@@ -471,7 +506,8 @@ export function solveCornerIntersection(
     const vB = { x: curveB.end.x - curveB.start.x, y: curveB.end.y - curveB.start.y };
     const candidates = intersectLineCircleInfinite(curveB.start, vB, curveA.center, curveA.radius);
     if (candidates.length === 0) {
-      return { ...origCorner };
+      const startB = !elemB.isReversed ? curveB.start : curveB.end;
+      return { ...startB };
     }
     if (candidates.length === 1) return candidates[0];
     const d0 = Math.hypot(candidates[0].x - origCorner.x, candidates[0].y - origCorner.y);
@@ -483,7 +519,11 @@ export function solveCornerIntersection(
     const arcB = curveB as ArcEntity;
     const candidates = intersectCircleCircleInfinite(arcA.center, arcA.radius, arcB.center, arcB.radius);
     if (candidates.length === 0) {
-      return { ...origCorner };
+      const endA = {
+        x: arcA.center.x + arcA.radius * Math.cos(!elemA.isReversed ? arcA.endAngle : arcA.startAngle),
+        y: arcA.center.y + arcA.radius * Math.sin(!elemA.isReversed ? arcA.endAngle : arcA.startAngle),
+      };
+      return endA;
     }
     if (candidates.length === 1) return candidates[0];
     const d0 = Math.hypot(candidates[0].x - origCorner.x, candidates[0].y - origCorner.y);
@@ -506,11 +546,21 @@ export function calculatePolylineOffset(
     return null;
   }
 
-  const pts = polyline.points;
   const isClosed = polyline.closed ?? false;
-  const bulges = polyline.bulges ?? [];
-  const numSegs = isClosed ? pts.length : pts.length - 1;
+  let pts = [...polyline.points];
+  let bulges = polyline.bulges ? [...polyline.bulges] : [];
 
+  // 若為閉合多段線且最後一個頂點與第一個頂點重合，移除末尾重複頂點以避免零長度段落導致幾何退化
+  if (isClosed && pts.length >= 3) {
+    if (Math.hypot(pts[pts.length - 1].x - pts[0].x, pts[pts.length - 1].y - pts[0].y) < 1e-4) {
+      pts = pts.slice(0, pts.length - 1);
+      if (bulges.length > pts.length) {
+        bulges = bulges.slice(0, pts.length);
+      }
+    }
+  }
+
+  const numSegs = isClosed ? pts.length : pts.length - 1;
   if (numSegs < 1) return null;
 
   // 1. 將多段線各段拆解為 Segment 幾何圖元 (LineEntity 或 ArcEntity)
@@ -538,12 +588,6 @@ export function calculatePolylineOffset(
       const arcDef = bulgeToArc(p1, p2, bulge);
       if (arcDef) {
         const isClockwise = bulge < 0;
-        let startAngle = arcDef.startAngle;
-        let endAngle = arcDef.endAngle;
-        if (isClockwise) {
-          startAngle = arcDef.endAngle;
-          endAngle = arcDef.startAngle;
-        }
         geom = {
           id: segId,
           type: 'arc',
@@ -552,8 +596,9 @@ export function calculatePolylineOffset(
           locked: polyline.locked,
           center: arcDef.center,
           radius: arcDef.radius,
-          startAngle,
-          endAngle,
+          startAngle: arcDef.startAngle,
+          endAngle: arcDef.endAngle,
+          clockwise: isClockwise,
         };
       } else {
         geom = {
@@ -571,23 +616,67 @@ export function calculatePolylineOffset(
     chainElems.push({ entity: geom, isReversed: false });
   }
 
-  // 2. 尋找與 sidePoint 最近的段落，推導全多段線統一的偏移側 ('left' 或 'right')
-  let closestSegIdx = 0;
-  let minDistance = Infinity;
+  // 2. 判定全多段線統一的偏移側 ('left' 或 'right')
+  let offsetSide: 'left' | 'right';
 
-  for (let i = 0; i < numSegs; i++) {
-    const p1 = pts[i];
-    const p2 = pts[(i + 1) % pts.length];
-    const midX = (p1.x + p2.x) / 2;
-    const midY = (p1.y + p2.y) / 2;
-    const dist = Math.hypot(sidePoint.x - midX, sidePoint.y - midY);
-    if (dist < minDistance) {
-      minDistance = dist;
-      closestSegIdx = i;
+  if (isClosed) {
+    // 取得離散化多邊形輪廓（若有圓弧凸度則細分採樣以精確判斷內外側）
+    const sampledPolygon: Point2D[] = [];
+    for (let i = 0; i < numSegs; i++) {
+      const p1 = pts[i];
+      const p2 = pts[(i + 1) % pts.length];
+      const bulge = bulges[i] ?? 0;
+      sampledPolygon.push(p1);
+      if (Math.abs(bulge) > 1e-6) {
+        const arcDef = bulgeToArc(p1, p2, bulge);
+        if (arcDef) {
+          const isCW = bulge < 0;
+          let sweep = arcDef.endAngle - arcDef.startAngle;
+          if (isCW && sweep > 0) sweep -= 2 * Math.PI;
+          if (!isCW && sweep < 0) sweep += 2 * Math.PI;
+          const steps = 8;
+          for (let s = 1; s < steps; s++) {
+            const theta = arcDef.startAngle + (sweep * s) / steps;
+            sampledPolygon.push({
+              x: arcDef.center.x + arcDef.radius * Math.cos(theta),
+              y: arcDef.center.y + arcDef.radius * Math.sin(theta),
+            });
+          }
+        }
+      }
     }
+
+    const isInside = isPointInsidePolygon(sidePoint, sampledPolygon);
+    const signedArea = getPolygonSignedArea(sampledPolygon);
+    const isCCW = signedArea >= 0;
+
+    // CCW 多邊形：前進方向左側為內部(Inward)，右側為外部(Outward)
+    // CW  多邊形：前進方向右側為內部(Inward)，左側為外部(Outward)
+    if (isInside) {
+      offsetSide = isCCW ? 'left' : 'right';
+    } else {
+      offsetSide = isCCW ? 'right' : 'left';
+    }
+  } else {
+    // 開放多段線：維持原有行為，尋找離 sidePoint 最近的段落推導偏移側
+    let closestSegIdx = 0;
+    let minDistance = Infinity;
+
+    for (let i = 0; i < numSegs; i++) {
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const midX = (p1.x + p2.x) / 2;
+      const midY = (p1.y + p2.y) / 2;
+      const dist = Math.hypot(sidePoint.x - midX, sidePoint.y - midY);
+      if (dist < minDistance) {
+        minDistance = dist;
+        closestSegIdx = i;
+      }
+    }
+
+    offsetSide = determineOffsetSide(chainElems[closestSegIdx], sidePoint);
   }
 
-  const offsetSide = determineOffsetSide(chainElems[closestSegIdx], sidePoint);
   const offsetSegs: (LineEntity | ArcEntity)[] = [];
 
   // 3. 獨立平行/同心偏移各個圖元段落
@@ -621,7 +710,12 @@ export function calculatePolylineOffset(
         radiusDelta = offsetSide === 'left' ? distance : -distance;
       }
 
-      const finalRadius = Math.max(1e-4, radius + radiusDelta);
+      const finalRadius = radius + radiusDelta;
+      if (finalRadius <= 0) {
+        // 向內偏移半徑崩塌，拒絕產生無效幾何
+        return null;
+      }
+
       offsetSegs.push({
         ...geom,
         id: `off-seg-${i}`,
@@ -631,6 +725,8 @@ export function calculatePolylineOffset(
   }
 
   // 4. 轉角 Miter 點集求解 (solveCornerIntersection)
+  // 若為閉合多段線，第一個頂點 cornerPt 是由最後一個偏移線段 (numSegs - 1) 與第一個偏移線段 (0)
+  // 求交所得的 corner 接合點，保證首尾線段閉合無縫
   const newPoints: Point2D[] = [];
 
   if (isClosed) {
@@ -760,7 +856,7 @@ export function calculateOffsetChain(
 
   // 尋找相鄰連接的整串圖元鏈
   const { chain, isClosed } = findConnectedChain(targetEntity, allEntities, constraints);
-  if (chain.length === 0) {
+  if (chain.length <= 1) {
     const singleResult = calculateOffsetEntity(targetEntity, options);
     if (!singleResult) return null;
     return {
@@ -769,9 +865,18 @@ export function calculateOffsetChain(
     };
   }
 
-  // 找到 targetEntity 在鏈中的元素以判定統一的偏移側 ('left' 或 'right')
-  const targetElem = chain.find((elem) => elem.entity.id === targetEntity.id) || chain[0];
-  const offsetSide = determineOffsetSide(targetElem, options.sidePoint);
+  // 判定連鎖路徑統一的偏移側 ('left' 或 'right')
+  let offsetSide: 'left' | 'right';
+  if (isClosed && chain.length >= 3) {
+    const chainPts = chain.map((elem) => getDirectedStart(elem));
+    const isInside = isPointInsidePolygon(options.sidePoint, chainPts);
+    const area = getPolygonSignedArea(chainPts);
+    const isCCW = area >= 0;
+    offsetSide = isInside ? (isCCW ? 'left' : 'right') : (isCCW ? 'right' : 'left');
+  } else {
+    const targetElem = chain.find((elem) => elem.entity.id === targetEntity.id) || chain[0];
+    offsetSide = determineOffsetSide(targetElem, options.sidePoint);
+  }
 
   const offsetEntities: (LineEntity | ArcEntity)[] = [];
   const generatedConstraints: Constraint[] = [];
@@ -812,20 +917,25 @@ export function calculateOffsetChain(
     } else {
       const { center, radius } = elem.entity;
       let radiusDelta = 0;
-      if (!elem.isReversed) {
+      const isCW = elem.entity.clockwise ?? false;
+      const effectiveCW = elem.isReversed ? !isCW : isCW;
+      if (!effectiveCW) {
         radiusDelta = offsetSide === 'left' ? -distance : distance;
       } else {
         radiusDelta = offsetSide === 'left' ? distance : -distance;
       }
 
       const newRadius = radius + radiusDelta;
-      const finalRadius = newRadius > 1e-4 ? newRadius : 1e-4;
+      if (newRadius <= 0) {
+        // 半徑退化/崩塌，拒絕產生無效幾何
+        return null;
+      }
 
       const newArcId = crypto.randomUUID();
       const newArc: ArcEntity = {
         ...elem.entity,
         id: newArcId,
-        radius: finalRadius,
+        radius: newRadius,
       };
 
       offsetEntities.push(newArc);
@@ -835,13 +945,13 @@ export function calculateOffsetChain(
         id: `c-coincident-${elem.entity.id}-${newArcId}-${uuid()}`,
         type: 'coincident',
         entityIds: [elem.entity.id, newArcId],
-        pointIndices: [2, 2],
+        pointIndices: [0, 0],
       });
       generatedConstraints.push({
         id: `c-radius-${newArcId}-${uuid()}`,
-        type: 'distance',
+        type: 'radius',
         entityIds: [newArcId],
-        value: finalRadius,
+        value: newRadius,
       });
     }
   }
@@ -1011,10 +1121,11 @@ export function calculateOffsetEntity(entity: CADEntity2D, options: OffsetOption
 
     case 'circle': {
       const { center, radius } = entity;
-      const dist = Math.hypot(sidePoint.x - center.x, sidePoint.y - center.y);
-      const R_new = dist >= radius ? radius + distance : radius - distance;
+      const D_click = Math.hypot(sidePoint.x - center.x, sidePoint.y - center.y);
+      const R_orig = radius;
+      const R_new = D_click > R_orig ? R_orig + distance : R_orig - distance;
 
-      if (R_new <= 1e-4) {
+      if (R_new <= 0) {
         return null;
       }
 
@@ -1022,6 +1133,7 @@ export function calculateOffsetEntity(entity: CADEntity2D, options: OffsetOption
       const newCircle: CircleEntity = {
         ...entity,
         id: newCircleId,
+        center: { x: center.x, y: center.y },
         radius: R_new,
       };
 
@@ -1034,7 +1146,7 @@ export function calculateOffsetEntity(entity: CADEntity2D, options: OffsetOption
 
       const radiusConstraint: Constraint = {
         id: `c-radius-${newCircleId}-${uuid()}`,
-        type: 'distance',
+        type: 'radius',
         entityIds: [newCircleId],
         value: R_new,
       };
@@ -1046,11 +1158,12 @@ export function calculateOffsetEntity(entity: CADEntity2D, options: OffsetOption
     }
 
     case 'arc': {
-      const { center, radius } = entity;
-      const dist = Math.hypot(sidePoint.x - center.x, sidePoint.y - center.y);
-      const R_new = dist >= radius ? radius + distance : radius - distance;
+      const { center, radius, startAngle, endAngle, clockwise } = entity;
+      const D_click = Math.hypot(sidePoint.x - center.x, sidePoint.y - center.y);
+      const R_orig = radius;
+      const R_new = D_click > R_orig ? R_orig + distance : R_orig - distance;
 
-      if (R_new <= 1e-4) {
+      if (R_new <= 0) {
         return null;
       }
 
@@ -1058,26 +1171,23 @@ export function calculateOffsetEntity(entity: CADEntity2D, options: OffsetOption
       const newArc: ArcEntity = {
         ...entity,
         id: newArcId,
+        center: { x: center.x, y: center.y },
         radius: R_new,
-      };
-
-      const coincidentConstraint: Constraint = {
-        id: `c-coincident-${entity.id}-${newArcId}-${uuid()}`,
-        type: 'coincident',
-        entityIds: [entity.id, newArcId],
-        pointIndices: [2, 2],
+        startAngle,
+        endAngle,
+        clockwise: clockwise ?? false,
       };
 
       const radiusConstraint: Constraint = {
         id: `c-radius-${newArcId}-${uuid()}`,
-        type: 'distance',
+        type: 'radius',
         entityIds: [newArcId],
         value: R_new,
       };
 
       return {
         entity: newArc,
-        generatedConstraints: [coincidentConstraint, radiusConstraint],
+        generatedConstraints: [radiusConstraint],
       };
     }
 

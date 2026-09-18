@@ -1,5 +1,6 @@
 import { Point2D, CADEntity2D, LineEntity, ArcEntity, Constraint, CircleEntity, PolylineEntity } from '../../types/cad';
 import { normalizeAngle, isAngleOnArc } from './IntersectionEngine';
+import { getArcSweepAngle } from './GeometryMath';
 
 export interface ExtendResult {
   originalEntityId: string;
@@ -152,7 +153,7 @@ function intersectRayArc(
 
   for (const cand of candidates) {
     const theta = Math.atan2(cand.point.y - arc.center.y, cand.point.x - arc.center.x);
-    if (isAngleOnArc(theta, arc.startAngle, arc.endAngle, 1e-5)) {
+    if (isAngleOnArc(theta, arc.startAngle, arc.endAngle, arc.clockwise, 1e-5)) {
       results.push(cand);
     }
   }
@@ -316,7 +317,7 @@ function intersectCircleArc(
   const pts = intersectCircleCircle(center, radius, arc.center, arc.radius);
   return pts.filter((p) => {
     const theta = Math.atan2(p.y - arc.center.y, p.x - arc.center.x);
-    return isAngleOnArc(theta, arc.startAngle, arc.endAngle, 1e-5);
+    return isAngleOnArc(theta, arc.startAngle, arc.endAngle, arc.clockwise, 1e-5);
   });
 }
 
@@ -548,11 +549,10 @@ export function calculateExtend(
     // 1. 決定要延伸的端點與方向
     const center = target.center;
     const radius = target.radius;
+    const isCW = Boolean(target.clockwise);
 
-    // 預先對輸入角度做正規化，解決跨越、纏繞等多圈問題
     const sAngle = normalizeAngle(target.startAngle);
-    const originalSweep = normalizeAngle(target.endAngle - target.startAngle);
-    const eAngle = sAngle + originalSweep; // eAngle 保證是 sAngle 順著逆時針掃掠後的角度
+    const eAngle = normalizeAngle(target.endAngle);
 
     const pStart = {
       x: center.x + radius * Math.cos(sAngle),
@@ -566,7 +566,8 @@ export function calculateExtend(
     const distStart = getDistance(pStart, clickPoint);
     const distEnd = getDistance(pEnd, clickPoint);
 
-    const unSweptRegion = normalizeAngle(sAngle - eAngle);
+    const originalSweep = getArcSweepAngle(sAngle, eAngle, isCW);
+    const unSweptRegion = 2 * Math.PI - originalSweep;
     let extendedPointIndex: number; // 0 for startAngle, 1 for endAngle
     let minSweep = Infinity;
     let targetPoint: Point2D | null = null;
@@ -595,11 +596,11 @@ export function calculateExtend(
 
         let sweep = 0;
         if (isExtendingEnd) {
-          // 延伸終點: 逆時針方向 (Increasing angle)
-          sweep = normalizeAngle(theta - eAngle);
+          // 延伸終點: 沿著圓弧既有方向向前延伸
+          sweep = isCW ? normalizeAngle(eAngle - theta) : normalizeAngle(theta - eAngle);
         } else {
-          // 延伸起點: 順時針方向 (Decreasing angle)
-          sweep = normalizeAngle(sAngle - theta);
+          // 延伸起點: 朝圓弧既有方向的反方向延伸
+          sweep = isCW ? normalizeAngle(theta - sAngle) : normalizeAngle(sAngle - theta);
         }
 
         // 交點必須落在未掃掠區間內 (sweep > 1e-4) 且小於等於未掃掠最大跨度
@@ -622,19 +623,16 @@ export function calculateExtend(
       let newStartAngle = sAngle;
       let newEndAngle = eAngle;
       if (isExtendingEnd) {
-        newEndAngle = eAngle + minSweep;
+        newEndAngle = isCW ? normalizeAngle(eAngle - minSweep) : normalizeAngle(eAngle + minSweep);
       } else {
-        newStartAngle = sAngle - minSweep;
+        newStartAngle = isCW ? normalizeAngle(sAngle + minSweep) : normalizeAngle(sAngle - minSweep);
       }
-
-      // 精準將最終產出的 startAngle 與 endAngle 進行二維正規化，避免翻轉或放大成外弧
-      const normalizedStart = normalizeAngle(newStartAngle);
-      const normalizedEnd = normalizedStart + (newEndAngle - newStartAngle);
 
       const extendedEntity: ArcEntity = {
         ...target,
-        startAngle: normalizedStart,
-        endAngle: normalizedEnd,
+        startAngle: newStartAngle,
+        endAngle: newEndAngle,
+        clockwise: isCW,
       };
 
       let generatedConstraint: Constraint | undefined = undefined;

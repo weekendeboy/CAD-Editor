@@ -17,12 +17,14 @@ export interface Arc3PResult {
   radius: number;
   startAngle: number;
   endAngle: number;
+  clockwise: boolean;
   isCCW?: boolean;
 }
 
 /**
  * 透過兩條中垂線交點精準求解外接圓心 (cx, cy) 與半徑 R。
- * 判定 p1 -> p3 -> p2 的旋轉方向，計算 CAD 逆時針標準的起始角與終止角。
+ * 判定 p1 -> p3 -> p2 的旋轉方向，依據明確的 clockwise 旗標標記順/逆時針，
+ * 嚴格保持 startAngle 為起點 p1 之角度，endAngle 為終點 p2 之角度，絕不對調端點。
  *
  * @param p1 圓弧起點 (Start point)
  * @param p2 圓弧終點 (End point)
@@ -32,7 +34,7 @@ export function calculate3PointArc(
   p1: Point2D,
   p2: Point2D,
   p3: Point2D
-): { center: Point2D; radius: number; startAngle: number; endAngle: number } | null {
+): Arc3PResult | null {
   // 1. 檢查點與點之間距離，避免重合點退化
   const d12 = Math.hypot(p2.x - p1.x, p2.y - p1.y);
   const d23 = Math.hypot(p3.x - p2.x, p3.y - p2.y);
@@ -82,29 +84,26 @@ export function calculate3PointArc(
   const a2 = normalizeAngle(theta2);
   const a3 = normalizeAngle(theta3);
 
-  // 以 a1 為基準，計算逆時針掃掠至 a2 與 a3 的角位移
+  // 以 a1 (起點) 為基準，計算逆時針掃掠至 a2 (終點) 與 a3 (通過點) 的角位移
   const diff12 = normalizeAngle(a2 - a1);
   const diff13 = normalizeAngle(a3 - a1);
 
   // 若從 a1 逆時針方向掃到 a2 的過程中包含 a3，表示 p1 -> p3 -> p2 為逆時針 (CCW)
   const isCCW = diff13 > 0 && diff13 < diff12;
+  const clockwise = !isCCW;
 
-  let startAngle: number;
-  let endAngle: number;
-
-  if (isCCW) {
-    startAngle = a1;
-    endAngle = a2;
-  } else {
-    startAngle = a2;
-    endAngle = a1;
-  }
+  // 永遠保持 startAngle = a1 (起點 p1), endAngle = a2 (終點 p2)
+  // 絕不對調端點，方向完全依賴 clockwise 旗標
+  const startAngle = a1;
+  const endAngle = a2;
 
   return {
     center,
     radius,
     startAngle,
     endAngle,
+    clockwise,
+    isCCW,
   };
 }
 
@@ -119,39 +118,134 @@ export function normalizeAngle(angle: number): number {
 
 /**
  * 驗證角度 angle 是否落在 startAngle 與 endAngle 的掃掠區間內。
+ * 100% 依賴 isCW (clockwise) 旗標，絕不根據 startAngle 與 endAngle 的大小關係猜測方向。
  */
 export function isAngleInArcSweep(
   angle: number,
   startAngle: number,
   endAngle: number,
-  isCW: boolean = false
+  isCW: boolean = false,
+  tolerance: number = 1e-5
 ): boolean {
-  const eps = 1e-7;
-  const a = normalizeAngle(angle);
-  const sa = normalizeAngle(startAngle);
-  const ea = normalizeAngle(endAngle);
+  if (Math.abs(endAngle - startAngle) >= 2 * Math.PI - tolerance) {
+    return true;
+  }
+  const start = normalizeAngle(startAngle);
+  const end = normalizeAngle(endAngle);
+  const target = normalizeAngle(angle);
 
   if (isCW) {
-    let sweep = sa - ea;
-    if (sweep <= eps) {
-      sweep += 2 * Math.PI;
+    let sweep = normalizeAngle(start - end);
+    if (Math.abs(sweep) < tolerance && Math.abs(startAngle - endAngle) >= 2 * Math.PI - tolerance) {
+      sweep = 2 * Math.PI;
     }
-    let diff = sa - a;
-    if (diff < -eps) {
-      diff += 2 * Math.PI;
-    }
-    return diff >= -eps && diff <= sweep + eps;
+    const targetSweep = normalizeAngle(start - target);
+    return targetSweep <= sweep + tolerance || (2 * Math.PI - targetSweep) <= tolerance;
   } else {
-    let sweep = ea - sa;
-    if (sweep <= eps) {
-      sweep += 2 * Math.PI;
+    let sweep = normalizeAngle(end - start);
+    if (Math.abs(sweep) < tolerance && Math.abs(endAngle - startAngle) >= 2 * Math.PI - tolerance) {
+      sweep = 2 * Math.PI;
     }
-    let diff = a - sa;
-    if (diff < -eps) {
-      diff += 2 * Math.PI;
-    }
-    return diff >= -eps && diff <= sweep + eps;
+    const targetSweep = normalizeAngle(target - start);
+    return targetSweep <= sweep + tolerance || (2 * Math.PI - targetSweep) <= tolerance;
   }
+}
+
+/**
+ * 判斷角度 theta 是否落在圓弧掃掠區間內（相容介面）
+ */
+export function isAngleOnArc(
+  theta: number,
+  startAngle: number,
+  endAngle: number,
+  clockwise: boolean = false,
+  tolerance: number = 1e-5
+): boolean {
+  return isAngleInArcSweep(theta, startAngle, endAngle, clockwise, tolerance);
+}
+
+/**
+ * 取得圓弧起點世界座標
+ */
+export function getArcStartPoint(arc: { center: Point2D; radius: number; startAngle: number }): Point2D {
+  return {
+    x: arc.center.x + arc.radius * Math.cos(arc.startAngle),
+    y: arc.center.y + arc.radius * Math.sin(arc.startAngle),
+  };
+}
+
+/**
+ * 取得圓弧終點世界座標
+ */
+export function getArcEndPoint(arc: { center: Point2D; radius: number; endAngle: number }): Point2D {
+  return {
+    x: arc.center.x + arc.radius * Math.cos(arc.endAngle),
+    y: arc.center.y + arc.radius * Math.sin(arc.endAngle),
+  };
+}
+
+/**
+ * 取得圓弧中點世界座標 (嚴格依據 clockwise 旗標計算)
+ */
+export function getArcMidPoint(
+  centerOrArc: Point2D | { center: Point2D; radius: number; startAngle: number; endAngle: number; clockwise?: boolean },
+  radius?: number,
+  startAngle?: number,
+  endAngle?: number,
+  clockwise?: boolean
+): Point2D {
+  if ('startAngle' in centerOrArc) {
+    const isCW = Boolean(centerOrArc.clockwise);
+    let sweep = normalizeAngle(isCW ? centerOrArc.startAngle - centerOrArc.endAngle : centerOrArc.endAngle - centerOrArc.startAngle);
+    if (sweep <= 1e-9 && Math.abs(centerOrArc.endAngle - centerOrArc.startAngle) > 1e-4) {
+      sweep = 2 * Math.PI;
+    }
+    const midAngle = normalizeAngle(isCW ? centerOrArc.startAngle - sweep / 2 : centerOrArc.startAngle + sweep / 2);
+    return {
+      x: centerOrArc.center.x + centerOrArc.radius * Math.cos(midAngle),
+      y: centerOrArc.center.y + centerOrArc.radius * Math.sin(midAngle),
+    };
+  }
+  const center = centerOrArc;
+  const r = radius ?? 0;
+  const sAngle = startAngle ?? 0;
+  const eAngle = endAngle ?? 0;
+  const isCW = Boolean(clockwise);
+  let sweep = normalizeAngle(isCW ? sAngle - eAngle : eAngle - sAngle);
+  if (sweep <= 1e-9 && Math.abs(eAngle - sAngle) > 1e-4) {
+    sweep = 2 * Math.PI;
+  }
+  const midAngle = normalizeAngle(isCW ? sAngle - sweep / 2 : sAngle + sweep / 2);
+  return {
+    x: center.x + r * Math.cos(midAngle),
+    y: center.y + r * Math.sin(midAngle),
+  };
+}
+
+/**
+ * 取得圓弧掃掠角度 (弧度，恆為正數 [0, 2π])
+ */
+export function getArcSweepAngle(
+  startOrArc: number | { startAngle: number; endAngle: number; clockwise?: boolean },
+  endAngle?: number,
+  clockwise?: boolean
+): number {
+  if (typeof startOrArc === 'object') {
+    const isCW = Boolean(startOrArc.clockwise);
+    let sweep = normalizeAngle(isCW ? startOrArc.startAngle - startOrArc.endAngle : startOrArc.endAngle - startOrArc.startAngle);
+    if (sweep <= 1e-9 && Math.abs(startOrArc.endAngle - startOrArc.startAngle) > 1e-4) {
+      sweep = 2 * Math.PI;
+    }
+    return sweep;
+  }
+  const isCW = Boolean(clockwise);
+  const start = startOrArc;
+  const end = endAngle ?? 0;
+  let sweep = normalizeAngle(isCW ? start - end : end - start);
+  if (sweep <= 1e-9 && Math.abs(end - start) > 1e-4) {
+    sweep = 2 * Math.PI;
+  }
+  return sweep;
 }
 
 /**

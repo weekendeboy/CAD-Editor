@@ -11,6 +11,7 @@ import {
   CADBlockDefinition,
   Point2D,
 } from '../types/cad';
+import { SketchSession, SketchDraftSnapshot } from './cadStore.types';
 import { solveConstraints, analyzeSketchDOF } from '../core/solver/NumericalConstraintSolver';
 import { findClosedProfiles } from '../core/2d/TopologyEngine';
 import { createFillet } from '../core/2d/FilletManager';
@@ -20,9 +21,51 @@ import { calculateOffsetEntity, calculateOffsetChain } from '../core/2d/OffsetEn
 import { calculateMirror } from '../core/2d/MirrorEngine';
 import { normalizeAngle } from '../core/2d/IntersectionEngine';
 
+/**
+ * 草圖專用微觀 Undo Snapshot 工具函式
+ * 僅在 sketchSession.isActive === true 時生效，
+ * 深拷貝當前草圖草稿資料 (draftEntities, draftConstraints, draftDimensions, draftProfiles)
+ * 推入 draftUndoStack，並清空 draftRedoStack，限制最大長度為 50。
+ */
+export function pushSketchUndoState(state: { sketchSession?: SketchSession }): void {
+  if (!state.sketchSession || !state.sketchSession.isActive) {
+    return;
+  }
+
+  const snapshot: SketchDraftSnapshot = {
+    draftEntities: JSON.parse(JSON.stringify(state.sketchSession.draftEntities || [])),
+    draftConstraints: JSON.parse(JSON.stringify(state.sketchSession.draftConstraints || [])),
+    draftDimensions: JSON.parse(JSON.stringify(state.sketchSession.draftDimensions || [])),
+    draftProfiles: JSON.parse(JSON.stringify(state.sketchSession.draftProfiles || [])),
+  };
+
+  if (!state.sketchSession.draftUndoStack) {
+    state.sketchSession.draftUndoStack = [];
+  }
+  state.sketchSession.draftUndoStack.push(snapshot);
+
+  if (state.sketchSession.draftUndoStack.length > 50) {
+    state.sketchSession.draftUndoStack.shift();
+  }
+
+  state.sketchSession.draftRedoStack = [];
+}
+
 export function applyConstraintsToSketch(sketch: SketchFeature): void {
   const solverResult = solveConstraints(sketch.entities, sketch.constraints);
   const dofState = analyzeSketchDOF(solverResult.entities, sketch.constraints);
+  
+  if (!solverResult.converged) {
+    dofState.state = 'OverDefined';
+    if (solverResult.conflictEntityIds && solverResult.conflictEntityIds.length > 0) {
+      solverResult.conflictEntityIds.forEach((id) => {
+        dofState.entityStates[id] = 'OverDefined';
+      });
+    } else {
+      sketch.entities.forEach(e => dofState.entityStates[e.id] = 'OverDefined');
+    }
+  }
+
   const profiles = findClosedProfiles(solverResult.entities, sketch.constraints);
 
   sketch.entities = solverResult.entities.map((e) => ({
@@ -140,8 +183,24 @@ export function applyFilletToSketch(
   sketch: SketchFeature,
   entityId1: string,
   entityId2: string,
-  radius: number
+  arg3?: Point2D | number,
+  arg4?: Point2D | number,
+  arg5?: number
 ): void {
+  let pickPt1: Point2D | undefined;
+  let pickPt2: Point2D | undefined;
+  let radius: number = 10;
+
+  if (typeof arg3 === 'number') {
+    radius = arg3;
+    pickPt1 = typeof arg4 === 'object' && arg4 !== null ? (arg4 as Point2D) : undefined;
+    pickPt2 = typeof arg5 === 'object' && arg5 !== null ? (arg5 as Point2D) : undefined;
+  } else {
+    pickPt1 = typeof arg3 === 'object' && arg3 !== null ? (arg3 as Point2D) : undefined;
+    pickPt2 = typeof arg4 === 'object' && arg4 !== null ? (arg4 as Point2D) : undefined;
+    radius = typeof arg5 === 'number' ? arg5 : (typeof arg4 === 'number' ? (arg4 as number) : 10);
+  }
+
   const ent1 = sketch.entities.find((e) => e.id === entityId1 && (e.type === 'line' || e.type === 'arc')) as LineEntity | ArcEntity | undefined;
   const ent2 = sketch.entities.find((e) => e.id === entityId2 && (e.type === 'line' || e.type === 'arc')) as LineEntity | ArcEntity | undefined;
 
@@ -149,7 +208,7 @@ export function applyFilletToSketch(
     return;
   }
 
-  const result = createFillet(ent1, ent2, radius);
+  const result = createFillet(ent1, ent2, radius, pickPt1, pickPt2);
   if (!result) {
     return;
   }
@@ -235,8 +294,24 @@ export function applyChamferToSketch(
   sketch: SketchFeature,
   entityId1: string,
   entityId2: string,
-  distance: number
+  arg3?: Point2D | number,
+  arg4?: Point2D | number,
+  arg5?: number
 ): void {
+  let pickPt1: Point2D | undefined;
+  let pickPt2: Point2D | undefined;
+  let distance: number = 10;
+
+  if (typeof arg3 === 'number') {
+    distance = arg3;
+    pickPt1 = typeof arg4 === 'object' && arg4 !== null ? (arg4 as Point2D) : undefined;
+    pickPt2 = typeof arg5 === 'object' && arg5 !== null ? (arg5 as Point2D) : undefined;
+  } else {
+    pickPt1 = typeof arg3 === 'object' && arg3 !== null ? (arg3 as Point2D) : undefined;
+    pickPt2 = typeof arg4 === 'object' && arg4 !== null ? (arg4 as Point2D) : undefined;
+    distance = typeof arg5 === 'number' ? arg5 : (typeof arg4 === 'number' ? (arg4 as number) : 10);
+  }
+
   const ent1 = sketch.entities.find((e) => e.id === entityId1) as LineEntity | undefined;
   const ent2 = sketch.entities.find((e) => e.id === entityId2) as LineEntity | undefined;
 
@@ -244,7 +319,7 @@ export function applyChamferToSketch(
     return;
   }
 
-  const result = createChamfer(ent1, ent2, distance);
+  const result = createChamfer(ent1, ent2, distance, pickPt1, pickPt2);
   if (!result) {
     return;
   }

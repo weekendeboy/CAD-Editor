@@ -84,6 +84,60 @@ export class ArcSegment2D implements ICurve2D {
     return this.pointAt(1);
   }
 
+  /** 取得中點 (t=0.5) */
+  getMidPoint(): Point2D {
+    return this.pointAt(0.5);
+  }
+
+  /**
+   * 判斷目標角度 theta 是否落在本弧的掃掠範圍內
+   */
+  isAngleOnArc(theta: number, tolerance: number = 1e-5): boolean {
+    const sweepMag = Math.abs(this.sweepAngle);
+    if (sweepMag >= 2 * Math.PI - tolerance) {
+      return true;
+    }
+
+    if (this.sweepAngle >= 0) {
+      // CCW
+      let diff = theta - this.startAngle;
+      while (diff < 0) diff += 2 * Math.PI;
+      while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
+      return diff <= sweepMag + tolerance || (2 * Math.PI - diff) <= tolerance;
+    } else {
+      // CW
+      let diff = this.startAngle - theta;
+      while (diff < 0) diff += 2 * Math.PI;
+      while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
+      return diff <= sweepMag + tolerance || (2 * Math.PI - diff) <= tolerance;
+    }
+  }
+
+  /**
+   * 計算本弧的精確外接矩形 (Bounding Box)
+   */
+  getBoundingBox(): { minX: number; maxX: number; minY: number; maxY: number } {
+    const pStart = this.getStartPoint();
+    const pEnd = this.getEndPoint();
+    let minX = Math.min(pStart.x, pEnd.x);
+    let maxX = Math.max(pStart.x, pEnd.x);
+    let minY = Math.min(pStart.y, pEnd.y);
+    let maxY = Math.max(pStart.y, pEnd.y);
+
+    const testAngles = [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2];
+    for (const angle of testAngles) {
+      if (this.isAngleOnArc(angle)) {
+        const px = this.center.x + this.radius * Math.cos(angle);
+        const py = this.center.y + this.radius * Math.sin(angle);
+        minX = Math.min(minX, px);
+        maxX = Math.max(maxX, px);
+        minY = Math.min(minY, py);
+        maxY = Math.max(maxY, py);
+      }
+    }
+    return { minX, maxX, minY, maxY };
+  }
+
   /**
    * 由兩頂點與 Bulge 凸度值建立 ArcSegment2D
    * @param p1 起點
@@ -106,7 +160,7 @@ export class ArcSegment2D implements ICurve2D {
   }
 
   /**
-   * 由圓心、半徑與起訖角建立 ArcSegment2D (可指定順逆時針)
+   * 由圓心、半徑與起訖角建立 ArcSegment2D (依據明確的 isClockwise 旗標，絕不猜測方向)
    */
   static fromCenterAngles(
     center: Point2D,
@@ -115,20 +169,49 @@ export class ArcSegment2D implements ICurve2D {
     endAngle: number,
     isClockwise: boolean = false
   ): ArcSegment2D {
+    if (Math.abs(endAngle - startAngle) >= 2 * Math.PI - 1e-7) {
+      return new ArcSegment2D(
+        center,
+        radius,
+        startAngle,
+        isClockwise ? -2 * Math.PI : 2 * Math.PI,
+        'arc'
+      );
+    }
+
     if (!isClockwise) {
       // CCW 掃掠
       let sweep = endAngle - startAngle;
-      while (sweep <= 0) {
-        sweep += 2 * Math.PI;
-      }
+      while (sweep < 0) sweep += 2 * Math.PI;
+      while (sweep >= 2 * Math.PI) sweep -= 2 * Math.PI;
+      if (sweep <= 1e-9) sweep = 2 * Math.PI;
       return new ArcSegment2D(center, radius, startAngle, sweep, 'arc');
     } else {
       // CW 掃掠
       let sweep = startAngle - endAngle;
-      while (sweep <= 0) {
-        sweep += 2 * Math.PI;
-      }
+      while (sweep < 0) sweep += 2 * Math.PI;
+      while (sweep >= 2 * Math.PI) sweep -= 2 * Math.PI;
+      if (sweep <= 1e-9) sweep = 2 * Math.PI;
       return new ArcSegment2D(center, radius, startAngle, -sweep, 'arc');
     }
+  }
+
+  /**
+   * 從 ArcEntity 物件直接建構規範化 ArcSegment2D
+   */
+  static fromArcEntity(arc: {
+    center: Point2D;
+    radius: number;
+    startAngle: number;
+    endAngle: number;
+    clockwise?: boolean;
+  }): ArcSegment2D {
+    return ArcSegment2D.fromCenterAngles(
+      arc.center,
+      arc.radius,
+      arc.startAngle,
+      arc.endAngle,
+      Boolean(arc.clockwise)
+    );
   }
 }

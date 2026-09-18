@@ -1,5 +1,5 @@
 import { CADEntity2D, Point2D } from '../../types/cad';
-import { findAllIntersections, isAngleOnArc } from './IntersectionEngine';
+import { findAllIntersections, isAngleOnArc, normalizeAngle } from './IntersectionEngine';
 
 export type SnapType =
   | 'endpoint'
@@ -258,13 +258,13 @@ export function findSnapPoint(
       checkSnap(arcEnd, 'endpoint', entity.id, 1);
       checkSnap(entity.center, 'center', entity.id, 2);
 
-      // Arc midpoint snap calculation
-      const startAngle = entity.startAngle;
-      const endAngle = entity.endAngle;
-      const sweep = endAngle < startAngle
-        ? (endAngle + 2 * Math.PI) - startAngle
-        : endAngle - startAngle;
-      const midAngle = (startAngle + sweep / 2) % (2 * Math.PI);
+      // Arc midpoint snap calculation (100% 依據 clockwise 旗標，絕不依賴 endAngle < startAngle 猜測)
+      const isCW = Boolean(entity.clockwise);
+      let sweep = normalizeAngle(isCW ? entity.startAngle - entity.endAngle : entity.endAngle - entity.startAngle);
+      if (sweep <= 1e-9 && Math.abs(entity.endAngle - entity.startAngle) > 1e-4) {
+        sweep = 2 * Math.PI;
+      }
+      const midAngle = normalizeAngle(isCW ? entity.startAngle - sweep / 2 : entity.startAngle + sweep / 2);
       const arcMid = {
         x: entity.center.x + entity.radius * Math.cos(midAngle),
         y: entity.center.y + entity.radius * Math.sin(midAngle),
@@ -274,7 +274,7 @@ export function findSnapPoint(
       // Quadrants: 0, pi/2, pi, 3pi/2 (check if angle lies on arc)
       const angles = [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2];
       for (const angle of angles) {
-        if (isAngleOnArc(angle, entity.startAngle, entity.endAngle)) {
+        if (isAngleOnArc(angle, entity.startAngle, entity.endAngle, entity.clockwise)) {
           const quadPoint = {
             x: entity.center.x + entity.radius * Math.cos(angle),
             y: entity.center.y + entity.radius * Math.sin(angle),
@@ -296,7 +296,7 @@ export function findSnapPoint(
           const theta1 = theta + alpha;
           const theta2 = theta - alpha;
 
-          if (isAngleOnArc(theta1, entity.startAngle, entity.endAngle)) {
+          if (isAngleOnArc(theta1, entity.startAngle, entity.endAngle, entity.clockwise)) {
             const t1 = {
               x: C.x + R * Math.cos(theta1),
               y: C.y + R * Math.sin(theta1),
@@ -304,7 +304,7 @@ export function findSnapPoint(
             checkSnap(t1, 'tangent', entity.id);
           }
 
-          if (isAngleOnArc(theta2, entity.startAngle, entity.endAngle)) {
+          if (isAngleOnArc(theta2, entity.startAngle, entity.endAngle, entity.clockwise)) {
             const t2 = {
               x: C.x + R * Math.cos(theta2),
               y: C.y + R * Math.sin(theta2),
@@ -319,7 +319,7 @@ export function findSnapPoint(
         const distToCircumference = Math.abs(d - R);
         if (distToCircumference <= worldThreshold) {
           const angle = Math.atan2(mouseWorld.y - C.y, mouseWorld.x - C.x);
-          if (isAngleOnArc(angle, entity.startAngle, entity.endAngle)) {
+          if (isAngleOnArc(angle, entity.startAngle, entity.endAngle, entity.clockwise)) {
             const projPt = {
               x: C.x + R * Math.cos(angle),
               y: C.y + R * Math.sin(angle),

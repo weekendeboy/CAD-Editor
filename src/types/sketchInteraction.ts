@@ -10,6 +10,9 @@ export interface DrawSession {
   inferredConstraint?: 'horizontal' | 'vertical' | null;
   polySegments?: Array<{ entityId: string; endPt: Point2D; type: 'line' | 'arc'; bulge?: number }>;
   bulges?: number[];
+  arcClockwise?: boolean;
+  accumulatedAngle?: number;
+  lastCursorAngle?: number;
 }
 
 export type PreviewEntity =

@@ -167,7 +167,7 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
     const secondScreen = worldToScreen(session.secondPoint);
     const arc = calculate3PointArc(session.startPoint, session.secondPoint, session.currentCursor);
 
-    if (arc) {
+    if (arc && arc.radius * scale < 1e5) {
       const screenRadius = arc.radius * scale;
       const worldStart = {
         x: arc.center.x + arc.radius * Math.cos(arc.startAngle),
@@ -180,12 +180,13 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
       const start = worldToScreen(worldStart);
       const end = worldToScreen(worldEnd);
 
-      let diff = arc.endAngle - arc.startAngle;
-      while (diff < 0) diff += 2 * Math.PI;
-      while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
+      const isCW = Boolean(arc.clockwise);
+      let sweep = isCW ? arc.startAngle - arc.endAngle : arc.endAngle - arc.startAngle;
+      while (sweep < 0) sweep += 2 * Math.PI;
+      while (sweep >= 2 * Math.PI) sweep -= 2 * Math.PI;
 
-      const largeArcFlag = diff > Math.PI ? 1 : 0;
-      const sweepFlag = 0;
+      const largeArcFlag = sweep > Math.PI ? 1 : 0;
+      const sweepFlag = isCW ? 1 : 0;
 
       const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
 
@@ -282,13 +283,14 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
     };
     const endPtScreen = worldToScreen(worldEnd);
 
-    // 計算逆時針夾角以決定是否為大弧 (Large Arc)
-    let diff = currAngle - startAngle;
-    while (diff < 0) diff += 2 * Math.PI;
-    while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
+    // 計算掃掠角以決定是否為大弧 (100% 依據 session.arcClockwise)
+    const isCW = Boolean(session.arcClockwise);
+    let sweep = isCW ? startAngle - currAngle : currAngle - startAngle;
+    while (sweep < 0) sweep += 2 * Math.PI;
+    while (sweep >= 2 * Math.PI) sweep -= 2 * Math.PI;
 
-    const largeArcFlag = diff > Math.PI ? 1 : 0;
-    const sweepFlag = 0; // CAD 標準逆時針在 SVG 畫面中對應 sweepFlag = 0
+    const largeArcFlag = sweep > Math.PI ? 1 : 0;
+    const sweepFlag = isCW ? 1 : 0;
 
     const arcPathData = `M ${startPtScreen.x} ${startPtScreen.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${endPtScreen.x} ${endPtScreen.y}`;
     const sectorPathData = `M ${centerScreen.x} ${centerScreen.y} L ${startPtScreen.x} ${startPtScreen.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${endPtScreen.x} ${endPtScreen.y} Z`;
@@ -296,7 +298,7 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
     return (
       <g>
         {/* 扇形半透明填充 */}
-        {diff > 0.005 && screenRadius > 1 && (
+        {sweep > 0.005 && screenRadius > 1 && (
           <path d={sectorPathData} fill="rgba(245, 158, 11, 0.08)" />
         )}
 
@@ -338,7 +340,7 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
         />
 
         {/* 掃掠區間的圓弧虛線預覽 */}
-        {diff > 0.005 && screenRadius > 1 && (
+        {sweep > 0.005 && screenRadius > 1 && (
           <path
             d={arcPathData}
             stroke={strokeColor}
@@ -374,12 +376,13 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
         const start = worldToScreen(worldStart);
         const end = worldToScreen(worldEnd);
 
-        let diff = arcData.endAngle - arcData.startAngle;
-        while (diff < 0) diff += 2 * Math.PI;
-        while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
+        const isCW = Boolean(arcData.clockwise);
+        let sweep = isCW ? arcData.startAngle - arcData.endAngle : arcData.endAngle - arcData.startAngle;
+        while (sweep < 0) sweep += 2 * Math.PI;
+        while (sweep >= 2 * Math.PI) sweep -= 2 * Math.PI;
 
-        const largeArcFlag = diff > Math.PI ? 1 : 0;
-        const sweepFlag = 0;
+        const largeArcFlag = sweep > Math.PI ? 1 : 0;
+        const sweepFlag = isCW ? 1 : 0;
 
         const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
 
@@ -876,12 +879,13 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
               const end = worldToScreen(worldEnd);
               const screenRadius = entity.radius * scale;
 
-              let diff = entity.endAngle - entity.startAngle;
-              while (diff < 0) diff += 2 * Math.PI;
-              while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
+              const isCW = Boolean(entity.clockwise);
+              let sweep = isCW ? entity.startAngle - entity.endAngle : entity.endAngle - entity.startAngle;
+              while (sweep < 0) sweep += 2 * Math.PI;
+              while (sweep >= 2 * Math.PI) sweep -= 2 * Math.PI;
 
-              const largeArcFlag = diff > Math.PI ? 1 : 0;
-              const sweepFlag = 0;
+              const largeArcFlag = sweep > Math.PI ? 1 : 0;
+              const sweepFlag = isCW ? 1 : 0;
 
               const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
 
@@ -1016,12 +1020,13 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
               const end = worldToScreen(worldEnd);
               const screenRadius = entity.radius * scale;
 
-              let diff = entity.endAngle - entity.startAngle;
-              while (diff < 0) diff += 2 * Math.PI;
-              while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
+              const isCW = Boolean(entity.clockwise);
+              let sweep = isCW ? entity.startAngle - entity.endAngle : entity.endAngle - entity.startAngle;
+              while (sweep < 0) sweep += 2 * Math.PI;
+              while (sweep >= 2 * Math.PI) sweep -= 2 * Math.PI;
 
-              const largeArcFlag = diff > Math.PI ? 1 : 0;
-              const sweepFlag = 0;
+              const largeArcFlag = sweep > Math.PI ? 1 : 0;
+              const sweepFlag = isCW ? 1 : 0;
 
               const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
 
@@ -1199,12 +1204,13 @@ export const RubberbandPreview: React.FC<RubberbandPreviewProps> = ({
               const end = worldToScreen(worldEnd);
               const screenRadius = entity.radius * scale;
 
-              let diff = entity.endAngle - entity.startAngle;
-              while (diff < 0) diff += 2 * Math.PI;
-              while (diff >= 2 * Math.PI) diff -= 2 * Math.PI;
+              const isCW = Boolean(entity.clockwise);
+              let sweep = isCW ? entity.startAngle - entity.endAngle : entity.endAngle - entity.startAngle;
+              while (sweep < 0) sweep += 2 * Math.PI;
+              while (sweep >= 2 * Math.PI) sweep -= 2 * Math.PI;
 
-              const largeArcFlag = diff > Math.PI ? 1 : 0;
-              const sweepFlag = 0;
+              const largeArcFlag = sweep > Math.PI ? 1 : 0;
+              const sweepFlag = isCW ? 1 : 0;
 
               const pathData = `M ${start.x} ${start.y} A ${screenRadius} ${screenRadius} 0 ${largeArcFlag} ${sweepFlag} ${end.x} ${end.y}`;
 

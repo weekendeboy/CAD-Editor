@@ -432,9 +432,9 @@ export function findClosedProfiles(
         const endPoint = { x: toNode.point.x, y: toNode.point.y };
 
         if (edge.curveType === 'arc' && edge.arcData) {
-          const { center, radius, startAngle, endAngle, isReversed = false } = edge.arcData;
+          const { center, radius, startAngle, endAngle, clockwise = false, isReversed = false } = edge.arcData;
 
-          let diffAngle = endAngle - startAngle;
+          let diffAngle = clockwise ? startAngle - endAngle : endAngle - startAngle;
           while (diffAngle < 0) {
             diffAngle += 2 * Math.PI;
           }
@@ -443,7 +443,7 @@ export function findClosedProfiles(
           }
 
           const isLargeArc = diffAngle > Math.PI;
-          const sweepFlag = isReversed ? 1 : 0;
+          const sweepFlag = (clockwise !== isReversed) ? 1 : 0;
 
           const segment: ProfileSegment = {
             type: 'arc',
@@ -458,12 +458,14 @@ export function findClosedProfiles(
           };
           loopSegments.push(segment);
 
-          // 圓弧弓形面積調整：A_seg = 0.5 * R^2 * (diffAngle - sin(diffAngle))
+          // 圓弧弓形面積調整：A_seg = 0.5 * R^2 * (diffAngle - Math.sin(diffAngle))
           const A_seg = 0.5 * radius * radius * (diffAngle - Math.sin(diffAngle));
-          if (isReversed) {
-            totalArea -= A_seg;
-          } else {
+          // 若 sweepFlag === 0 (逆時針繪製)，弓形位於弦的左側（增加多邊形面積）
+          // 若 sweepFlag === 1 (順時針繪製)，弓形位於弦的右側（減少多邊形面積）
+          if (sweepFlag === 0) {
             totalArea += A_seg;
+          } else {
+            totalArea -= A_seg;
           }
         } else {
           loopSegments.push({

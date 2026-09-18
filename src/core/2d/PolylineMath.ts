@@ -5,6 +5,7 @@ export interface PolylineSegmentArcResult {
   radius: number;
   startAngle: number;
   endAngle: number;
+  clockwise: boolean;
   isStartPointMatchingPStart: boolean;
 }
 
@@ -83,29 +84,18 @@ export function calculateTangentArcSegment(
   const aEnd = normalize(thetaEnd);
 
   // If lambda > 0, the tangent vector T represents CCW direction around center C.
-  // Thus, the arc should be traversed from pStart to pEnd CCW.
   // If lambda < 0, the tangent vector T represents CW direction around center C.
-  // Thus, the arc should be traversed from pStart to pEnd CW, which is represented
-  // in CCW-only CAD systems as traversing from pEnd to pStart CCW.
-  let startAngle: number;
-  let endAngle: number;
-  let isStartPointMatchingPStart: boolean;
-
-  if (lambda > 0) {
-    startAngle = aStart;
-    endAngle = aEnd;
-    isStartPointMatchingPStart = true;
-  } else {
-    startAngle = aEnd;
-    endAngle = aStart;
-    isStartPointMatchingPStart = false;
-  }
+  const clockwise = lambda < 0;
+  const startAngle = aStart;
+  const endAngle = aEnd;
+  const isStartPointMatchingPStart = true;
 
   return {
     center,
     radius,
     startAngle,
     endAngle,
+    clockwise,
     isStartPointMatchingPStart,
   };
 }
@@ -128,19 +118,16 @@ export function getSegmentEndTangent(seg: LineEntity | ArcEntity, isCCW: boolean
     }
     return { x: dx / len, y: dy / len };
   } else if (seg.type === 'arc') {
-    // Standard CAD arc sweeps CCW from startAngle to endAngle.
-    // Therefore, if the path is CCW, the forward unit tangent at endAngle is:
-    // T(theta) = (-sin(theta), cos(theta)) where theta = endAngle.
-    // If the path is CW, the forward unit tangent at startAngle is:
-    // T(theta) = (sin(theta), -cos(theta)) where theta = startAngle.
-    if (isCCW) {
-      const theta = seg.endAngle;
+    const isCW = seg.clockwise !== undefined ? seg.clockwise : !isCCW;
+    const theta = seg.endAngle;
+    if (!isCW) {
+      // CCW tangent at endAngle: (-sin(theta), cos(theta))
       return {
         x: -Math.sin(theta),
         y: Math.cos(theta),
       };
     } else {
-      const theta = seg.startAngle;
+      // CW tangent at endAngle: (sin(theta), -cos(theta))
       return {
         x: Math.sin(theta),
         y: -Math.cos(theta),

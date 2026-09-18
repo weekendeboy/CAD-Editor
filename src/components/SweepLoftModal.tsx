@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useCADStore } from '../store/cadStore';
 import { SketchFeature, SweepFeature, LoftFeature } from '../types/cad';
+import { findClosedProfiles } from '../core/2d/TopologyEngine';
 import {
   Route,
   Layers,
@@ -50,7 +51,9 @@ export const SweepLoftModal: React.FC<SweepLoftModalProps> = ({
 
   // 篩選具備封閉輪廓的草圖清單（可用於截面 profile）
   const profileSketches = allSketches.filter(
-    (s) => s.profiles && s.profiles.length > 0
+    (s) =>
+      (s.profiles && s.profiles.length > 0) ||
+      (s.entities && findClosedProfiles(s.entities, s.constraints).length > 0)
   );
 
   // 篩選具備可用路徑幾何圖元的草圖清單（非建構線）
