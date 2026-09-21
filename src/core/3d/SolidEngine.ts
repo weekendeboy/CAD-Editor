@@ -206,6 +206,11 @@ export class SolidEngine {
     return result;
   }
 
+  public async previewOperation(operation: FeatureEvalOp): Promise<MeshResult> {
+    await this.init();
+    return this.dispatch<MeshResult>('PREVIEW_OPERATION', { operation });
+  }
+
   public async extrudeProfile(profile: SketchProfile, depth: number): Promise<ExtrudeProfileResponseData> {
     return this.extrudeProfiles([profile], depth);
   }

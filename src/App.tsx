@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useCADStore } from './store/cadStore';
 import { useCadShortcuts } from './hooks/useCadShortcuts';
 import { CADSketchCanvas } from './components/CADSketchCanvas';
 const CAD3DCanvas = React.lazy(() => import('./components/CAD3DCanvas'));
-import { SketchFeature, BoundingBox2D, CADEntity2D } from './types/cad';
+import { SketchFeature, BoundingBox2D, CADEntity2D, FeatureType } from './types/cad';
 import { OsnapSettingsModal } from './components/OsnapSettingsModal';
 import { PolarSettingsModal } from './components/PolarSettingsModal';
 import { LayerControlBar } from './components/LayerControlBar';
@@ -91,10 +91,28 @@ export default function App() {
   const [extrudeModalConfig, setExtrudeModalConfig] = useState<{
     isOpen: boolean;
     mode: 'EXTRUDE' | 'CUT_EXTRUDE';
+    featureId?: string;
   }>({
     isOpen: false,
     mode: 'EXTRUDE',
   });
+
+  // 特徵樹編輯特徵回呼
+  const handleEditFeature = useCallback((featureId: string, featureType: FeatureType) => {
+    if (featureType === 'EXTRUDE' || featureType === 'CUT_EXTRUDE') {
+      setExtrudeModalConfig({
+        isOpen: true,
+        mode: featureType,
+        featureId,
+      });
+    } else if (featureType === 'SHELL_3D' || featureType === 'FILLET_3D' || featureType === 'CHAMFER_3D') {
+      setFilletChamferShellModalConfig({
+        isOpen: true,
+        mode: featureType,
+        featureId,
+      });
+    }
+  }, []);
 
   // 旋轉長料 (Revolve Boss) / 旋轉除料 (Revolve Cut) 參數設定彈窗狀態
   const [revolveModalConfig, setRevolveModalConfig] = useState<{
@@ -130,6 +148,7 @@ export default function App() {
   const [filletChamferShellModalConfig, setFilletChamferShellModalConfig] = useState<{
     isOpen: boolean;
     mode: 'FILLET_3D' | 'CHAMFER_3D' | 'SHELL_3D';
+    featureId?: string;
   }>({
     isOpen: false,
     mode: 'FILLET_3D',
@@ -173,6 +192,7 @@ export default function App() {
   } = useCADStore();
 
   // 清除彈窗 Timer 清理機制
+
   useEffect(() => {
     return () => {
       if (toastTimerRef.current) {
@@ -1454,7 +1474,7 @@ export default function App() {
       {/* Main Workspace */}
       <main className="flex-1 relative flex overflow-hidden">
         {/* 左側 SolidWorks 特徵樹面板 */}
-        <FeatureTreePanel />
+        <FeatureTreePanel onEditFeature={handleEditFeature} />
 
         {/* 右側繪圖與 3D 視圖區域 */}
         <div className="flex-1 relative overflow-hidden">
@@ -1536,7 +1556,8 @@ export default function App() {
       <ExtrudeFeatureModal
         isOpen={extrudeModalConfig.isOpen}
         mode={extrudeModalConfig.mode}
-        onClose={() => setExtrudeModalConfig((prev) => ({ ...prev, isOpen: false }))}
+        featureId={extrudeModalConfig.featureId}
+        onClose={() => setExtrudeModalConfig((prev) => ({ ...prev, isOpen: false, featureId: undefined }))}
       />
       <RevolveFeatureModal
         isOpen={revolveModalConfig.isOpen}
@@ -1560,7 +1581,8 @@ export default function App() {
       <FilletChamferShellModal
         isOpen={filletChamferShellModalConfig.isOpen}
         mode={filletChamferShellModalConfig.mode}
-        onClose={() => setFilletChamferShellModalConfig((prev) => ({ ...prev, isOpen: false }))}
+        featureId={filletChamferShellModalConfig.featureId}
+        onClose={() => setFilletChamferShellModalConfig((prev) => ({ ...prev, isOpen: false, featureId: undefined }))}
       />
     </div>
   );

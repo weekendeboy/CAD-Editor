@@ -248,6 +248,7 @@ export const useCADStore = create<CADState>()(
     isPolarModalOpen: false,
     extrudePreview: null,
     revolvePreview: null,
+    datumPlanePreview: null,
 
     // ==========================================
     // 3. InteractionState (互動與編輯器狀態)
@@ -258,6 +259,9 @@ export const useCADStore = create<CADState>()(
     selectedPointIndices: {},
     selectedFeatureId: null,
     selectedFaceInfo: null,
+    selectedEdgeInfo: null,
+    selectedEdgeList: [],
+    filletChamferPreview: null,
     selectedMeshSelection: null,
     activeLayerId: "0",
     isPickingRevolveAxis: false,
@@ -313,6 +317,7 @@ export const useCADStore = create<CADState>()(
     // 4. RuntimeState (運行時狀態)
     // ==========================================
     cumulativePartMesh: null,
+    cumulativeSubshapeMapping: null,
     featureResults: {},
     bodies: [],
     kernelDiagnostics: [],
@@ -340,6 +345,20 @@ export const useCADStore = create<CADState>()(
     setRevolvePreview: (preview) =>
       set((state) => {
         state.revolvePreview = preview;
+      }),
+    setDatumPlanePreview: (preview) =>
+      set((state) => {
+        state.datumPlanePreview = preview;
+      }),
+    setCumulativeSubshapeMapping: (mapping) =>
+      set((state) => {
+        state.cumulativeSubshapeMapping = mapping;
+      }),
+    setDatumPickerTarget: (target) =>
+      set((state) => {
+        if (state.datumPlanePreview) {
+          state.datumPlanePreview.activePicker = target;
+        }
       }),
     setIsPickingRevolveAxis: (isPicking) =>
       set((state) => {
@@ -418,7 +437,7 @@ export const useCADStore = create<CADState>()(
           }
         }
       }),
-    addFeature: (feature) =>
+    addFeature: (feature) => {
       set((state) => {
         const currentRollback = Math.max(
           0,
@@ -451,9 +470,11 @@ export const useCADStore = create<CADState>()(
           state.activeSketchId = feature.id;
         }
         state.selectedFeatureId = feature.id;
-      }),
+      });
+      get().regenerateFeatureTree();
+    },
 
-    removeFeature: (id) =>
+    removeFeature: (id) => {
       set((state) => {
         const featureIndex = state.document.featureTree.findIndex(
           (f) => f.id === id,
@@ -521,8 +542,10 @@ export const useCADStore = create<CADState>()(
             state.selectedFeatureId === id ? null : state.selectedFeatureId,
           activeSketchId: nextActiveSketchId,
         });
-      }),
-    updateFeature: (id, updates) =>
+      });
+      get().regenerateFeatureTree();
+    },
+    updateFeature: (id, updates) => {
       set((state) => {
         const exists = state.document.featureTree.some((f) => f.id === id);
         if (!exists) return;
@@ -530,6 +553,12 @@ export const useCADStore = create<CADState>()(
         const updatedTree = state.document.featureTree.map((f) =>
           f.id === id ? ({ ...f, ...updates, isDirty: true } as CADFeature) : f,
         );
+
+        const targetIndex = state.document.featureTree.findIndex((f) => f.id === id);
+        let nextRollbackIndex = state.document.rollbackIndex;
+        if (targetIndex !== -1 && targetIndex >= state.document.rollbackIndex) {
+          nextRollbackIndex = updatedTree.length;
+        }
 
         const dirtyTree = markDownstreamDirty(updatedTree, id);
         const validationMap = validateFeatureDependencies(dirtyTree);
@@ -542,6 +571,7 @@ export const useCADStore = create<CADState>()(
           };
         });
 
+        const oldFeature = state.document.featureTree.find((f) => f.id === id);
         const targetFeature = finalTree.find((f) => f.id === id);
         const nextActiveSketchId =
           targetFeature && targetFeature.type === "SKETCH"
@@ -555,11 +585,14 @@ export const useCADStore = create<CADState>()(
           activeSketchId: nextActiveSketchId,
           document: {
             ...state.document,
+            rollbackIndex: nextRollbackIndex,
             featureTree: finalTree,
           },
         });
-      }),
-    toggleFeatureSuppression: (id) =>
+      });
+      get().regenerateFeatureTree();
+    },
+    toggleFeatureSuppression: (id) => {
       set((state) => {
         const feature = state.document.featureTree.find((f) => f.id === id);
         if (!feature) return;
@@ -591,7 +624,9 @@ export const useCADStore = create<CADState>()(
             featureTree: dirtyTree,
           },
         });
-      }),
+      });
+      get().regenerateFeatureTree();
+    },
     renameFeature: (id, newName) =>
       set((state) => {
         const trimmed = newName.trim();
@@ -622,7 +657,8 @@ export const useCADStore = create<CADState>()(
           });
         }
       }),
-    reorderFeature: (sourceIndex, targetIndex) =>
+    reorderFeature: (sourceIndex, targetIndex) => {
+      let isReordered = false;
       set((state) => {
         const tree = [...state.document.featureTree];
         if (
@@ -645,6 +681,7 @@ export const useCADStore = create<CADState>()(
           return;
         }
 
+        isReordered = true;
         const movedId = moved.id;
         const dirtyTree = markDownstreamDirty(tree, movedId);
 
@@ -657,8 +694,13 @@ export const useCADStore = create<CADState>()(
             featureTree: dirtyTree,
           },
         });
-      }),
-    setRollbackIndex: (index) =>
+      });
+      if (isReordered) {
+        get().regenerateFeatureTree();
+      }
+    },
+    setRollbackIndex: (index) => {
+      let isChanged = false;
       set((state) => {
         const clamped = Math.max(
           0,
@@ -666,6 +708,7 @@ export const useCADStore = create<CADState>()(
         );
         if (state.document.rollbackIndex === clamped) return;
 
+        isChanged = true;
         const activeFeatures = state.document.featureTree.slice(0, clamped);
         let nextActiveSketchId = state.activeSketchId;
         if (nextActiveSketchId) {
@@ -687,7 +730,11 @@ export const useCADStore = create<CADState>()(
             rollbackIndex: clamped,
           },
         });
-      }),
+      });
+      if (isChanged) {
+        get().regenerateFeatureTree();
+      }
+    },
     regenerateFeatureTree: async () => {
       const state = get();
       const { featureTree, rollbackIndex, planes } = state.document;
@@ -803,6 +850,14 @@ export const useCADStore = create<CADState>()(
         const isSuccess =
           result.success !== false && featureErrorMap.size === 0;
 
+        if (!isSuccess) {
+          console.error("[CADStore Diagnostic] SolidWorker evaluation failed/has errors:", {
+            resultSuccess: result.success,
+            diagnostics: result.diagnostics,
+            featureErrorMap: Array.from(featureErrorMap.entries()),
+          });
+        }
+
         if (isSuccess) {
           const opsResults = ops.map((op) => ({
             featureId: op.featureId,
@@ -827,6 +882,7 @@ export const useCADStore = create<CADState>()(
               featureTree: regeneratedTree,
             },
             cumulativePartMesh: result.finalMesh || null,
+            cumulativeSubshapeMapping: result.finalMesh?.mapping || null,
             featureResults: result.featureResults || {},
             bodies: result.bodies || [],
             kernelDiagnostics: result.diagnostics || [],
@@ -858,6 +914,7 @@ export const useCADStore = create<CADState>()(
               featureTree: failedTree,
             },
             cumulativePartMesh: result.finalMesh || null,
+            cumulativeSubshapeMapping: result.finalMesh?.mapping || null,
             featureResults: result.featureResults || {},
             bodies: result.bodies || [],
             kernelDiagnostics: result.diagnostics || [],
@@ -962,9 +1019,10 @@ export const useCADStore = create<CADState>()(
 
         retId = newFeatureId;
       });
+      get().regenerateFeatureTree();
       return retId;
     },
-    updateDatumPlaneOffset: (planeFeatureId, distance) =>
+    updateDatumPlaneOffset: (planeFeatureId, distance) => {
       set((state) => {
         const tree = state.document.featureTree;
         const featureIndex = tree.findIndex(
@@ -1040,7 +1098,9 @@ export const useCADStore = create<CADState>()(
         state.undoStack = undoState.undoStack;
         state.redoStack = undoState.redoStack;
         Object.assign(state, { document: updatedDocument });
-      }),
+      });
+      get().regenerateFeatureTree();
+    },
     toggleFeatureVisibility: (featureId) =>
       set((state) => {
         const feature = state.document.featureTree.find(
@@ -1137,6 +1197,113 @@ export const useCADStore = create<CADState>()(
     setSelectedFaceInfo: (face) =>
       set((state) => {
         state.selectedFaceInfo = face;
+        if (face) {
+          state.selectedEdgeInfo = null;
+          if (face.faceRef) {
+            state.selectedMeshSelection = {
+              kind: 'face',
+              triangleIndex: face.triangleIndex ?? 0,
+              faceRef: face.faceRef,
+              generation: face.faceRef.topoRef?.generation ?? 0,
+            };
+          }
+        } else if (state.selectedMeshSelection?.kind === 'face') {
+          state.selectedMeshSelection = null;
+        }
+      }),
+    setSelectedEdgeInfo: (edge, isShift) =>
+      set((state) => {
+        if (!edge) {
+          state.selectedEdgeInfo = null;
+          state.selectedEdgeList = [];
+          if (state.selectedMeshSelection?.kind === 'edge') {
+            state.selectedMeshSelection = null;
+          }
+          return;
+        }
+
+        state.selectedFaceInfo = null;
+
+        if (isShift) {
+          const existingIdx = state.selectedEdgeList.findIndex(
+            (e) => e.edgeRef.edgeIndex === edge.edgeRef.edgeIndex
+          );
+          if (existingIdx >= 0) {
+            state.selectedEdgeList.splice(existingIdx, 1);
+            state.selectedEdgeInfo =
+              state.selectedEdgeList.length > 0
+                ? state.selectedEdgeList[state.selectedEdgeList.length - 1]
+                : null;
+          } else {
+            state.selectedEdgeList.push(edge);
+            state.selectedEdgeInfo = edge;
+          }
+        } else {
+          state.selectedEdgeList = [edge];
+          state.selectedEdgeInfo = edge;
+        }
+
+        if (state.selectedEdgeInfo) {
+          state.selectedMeshSelection = {
+            kind: 'edge',
+            meshEdgeIndex: state.selectedEdgeInfo.meshEdgeIndex ?? state.selectedEdgeInfo.edgeRef.edgeIndex,
+            edgeRef: state.selectedEdgeInfo.edgeRef,
+            generation: state.selectedEdgeInfo.edgeRef.topoRef?.generation ?? 0,
+          };
+        } else {
+          state.selectedMeshSelection = null;
+        }
+      }),
+
+    setSelectedEdgeList: (edges) =>
+      set((state) => {
+        state.selectedEdgeList = edges;
+        state.selectedEdgeInfo = edges.length > 0 ? edges[edges.length - 1] : null;
+        if (state.selectedEdgeInfo) {
+          state.selectedMeshSelection = {
+            kind: 'edge',
+            meshEdgeIndex: state.selectedEdgeInfo.meshEdgeIndex ?? state.selectedEdgeInfo.edgeRef.edgeIndex,
+            edgeRef: state.selectedEdgeInfo.edgeRef,
+            generation: state.selectedEdgeInfo.edgeRef.topoRef?.generation ?? 0,
+          };
+        } else if (state.selectedMeshSelection?.kind === 'edge') {
+          state.selectedMeshSelection = null;
+        }
+      }),
+
+    removeSelectedEdge: (edgeIndex) =>
+      set((state) => {
+        state.selectedEdgeList = state.selectedEdgeList.filter(
+          (e) => e.edgeRef.edgeIndex !== edgeIndex
+        );
+        state.selectedEdgeInfo =
+          state.selectedEdgeList.length > 0
+            ? state.selectedEdgeList[state.selectedEdgeList.length - 1]
+            : null;
+        if (state.selectedEdgeInfo) {
+          state.selectedMeshSelection = {
+            kind: 'edge',
+            meshEdgeIndex: state.selectedEdgeInfo.meshEdgeIndex ?? state.selectedEdgeInfo.edgeRef.edgeIndex,
+            edgeRef: state.selectedEdgeInfo.edgeRef,
+            generation: state.selectedEdgeInfo.edgeRef.topoRef?.generation ?? 0,
+          };
+        } else if (state.selectedMeshSelection?.kind === 'edge') {
+          state.selectedMeshSelection = null;
+        }
+      }),
+
+    clearSelectedEdges: () =>
+      set((state) => {
+        state.selectedEdgeInfo = null;
+        state.selectedEdgeList = [];
+        if (state.selectedMeshSelection?.kind === 'edge') {
+          state.selectedMeshSelection = null;
+        }
+      }),
+
+    setFilletChamferPreview: (preview) =>
+      set((state) => {
+        state.filletChamferPreview = preview;
       }),
     setSelectedMeshSelection: (selection) =>
       set((state) => {
@@ -1438,7 +1605,16 @@ export const useCADStore = create<CADState>()(
       }),
     setSelectedEntityIds: (ids) => set({ selectedEntityIds: ids }),
     clearSelection: () =>
-      set({ selectedEntityIds: [], selectedPointIndices: {}, selectedFeatureId: null }),
+      set({
+        selectedEntityIds: [],
+        selectedPointIndices: {},
+        selectedFeatureId: null,
+        selectedFaceInfo: null,
+        selectedEdgeInfo: null,
+        selectedEdgeList: [],
+        filletChamferPreview: null,
+        selectedMeshSelection: null,
+      }),
     setActiveLayer: (layerId: string) => set({ activeLayerId: layerId }),
 
     // ------------------------------------------
@@ -3121,6 +3297,7 @@ export const useCADStore = create<CADState>()(
 
         if (isSession) {
           state.sketchSession.draftEntities = updatedEntities;
+          state.sketchSession.draftProfiles = updatedSketchTemp.profiles || [];
           state.sketchSession.draftConstraints = updatedConstraints;
           state.sketchSession.draftDimensions = updatedDimensions;
           state.sketchSession.isDirty = true;
@@ -3136,6 +3313,7 @@ export const useCADStore = create<CADState>()(
         const updatedSketch: SketchFeature = {
           ...sketch,
           entities: updatedEntities,
+          profiles: updatedSketchTemp.profiles || [],
           constraints: updatedConstraints,
           dimensions: updatedDimensions,
         };
@@ -4272,7 +4450,8 @@ export const useCADStore = create<CADState>()(
     // Undo / Redo (包含防呆機制)
     // ------------------------------------------
 
-    undo: () =>
+    undo: () => {
+      let isDocUndo = false;
       set((state) => {
         if (state.sketchSession.isActive) {
           const undoStack = state.sketchSession.draftUndoStack || [];
@@ -4331,8 +4510,14 @@ export const useCADStore = create<CADState>()(
         state.activeSketchId = safeActiveSketchId;
         state.selectedEntityIds = [];
         state.selectedFeatureId = null;
-      }),
-    redo: () =>
+        isDocUndo = true;
+      });
+      if (isDocUndo) {
+        get().regenerateFeatureTree();
+      }
+    },
+    redo: () => {
+      let isDocRedo = false;
       set((state) => {
         if (state.sketchSession.isActive) {
           const redoStack = state.sketchSession.draftRedoStack || [];
@@ -4389,7 +4574,12 @@ export const useCADStore = create<CADState>()(
         state.activeSketchId = safeActiveSketchId;
         state.selectedEntityIds = [];
         state.selectedFeatureId = null;
-      }),
+        isDocRedo = true;
+      });
+      if (isDocRedo) {
+        get().regenerateFeatureTree();
+      }
+    },
     canUndo: () => {
       const state = get();
       if (state.sketchSession.isActive) {
@@ -4419,6 +4609,7 @@ export const useCADStore = create<CADState>()(
         selectedFaceInfo: null,
         extrudePreview: null,
         revolvePreview: null,
+        datumPlanePreview: null,
         isPickingRevolveAxis: false,
         undoStack: [],
         redoStack: [],

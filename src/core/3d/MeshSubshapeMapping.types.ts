@@ -47,6 +47,18 @@ export interface RuntimeBRepEdgeRef {
   endPoint?: { x: number; y: number; z: number };
   /** 對應之持久化拓撲參照 */
   topoRef?: TopoReference;
+  /** 圓弧/圓形圓心 (mm) */
+  center?: { x: number; y: number; z: number };
+  /** 圓弧/圓形半徑 (mm) */
+  radius?: number;
+  /** 圓弧所處平面的法向量 (單位向量) */
+  normal?: { x: number; y: number; z: number };
+  /** 圓弧起始參數 / 弧度 */
+  startAngle?: number;
+  /** 圓弧終止參數 / 弧度 */
+  endAngle?: number;
+  /** 沿曲線精確取樣的 3D 空間點序列 (供前端 Hitbox 與平滑高亮繪製直接使用) */
+  sampledPoints?: { x: number; y: number; z: number }[];
 }
 
 /**

@@ -59,7 +59,7 @@ export class NumericalConstraintSolver {
         A[i][i] += lambda * Math.max(A[i][i], 1e-5) + anchorWeight; 
       }
 
-      const b = JTF.map((val, i) => -(val + anchorWeight * (x[i] - initialX[i])));
+      const b = JTF.map((val) => -val);
 
       // 3. 求解線性方程組 A * delta = b
       let delta: number[];

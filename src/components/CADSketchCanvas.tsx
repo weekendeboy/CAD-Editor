@@ -23,8 +23,6 @@ import { RectangularArrayPanel } from './RectangularArrayPanel';
 import { GripRenderer } from './GripRenderer';
 import { EntityGrip, applyGripDrag, applyGripDragWithConstraints } from '../core/2d/GripManager';
 import { project3DTo2DPlane } from '../core/3d/DatumPlaneEngine';
-import { solidEngine } from '../core/3d/SolidEngine';
-import { buildFeatureEvalOps } from '../core/3d/FeaturePipelineAdapter';
 import type { MeshResult } from '../core/3d/SolidEngine.types';
 
 // 輔助函式：計算點到線段的最短距離
@@ -540,55 +538,8 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
     cancelDrawing();
   }, [rectArraySourceIds, cancelDrawing]);
 
-  // 3D 實體模型幾何快取
-  const [solidMesh, setSolidMesh] = useState<MeshResult | null>(null);
-
-  // 訂閱特徵樹、回退棒與基準面，計算已生成的 3D 實體幾何資料
-  useEffect(() => {
-    let active = true;
-
-    const evaluate3DSolids = async () => {
-      if (!document?.featureTree || document.featureTree.length === 0) {
-        if (active) setSolidMesh(null);
-        return;
-      }
-
-      try {
-        await solidEngine.init();
-
-        const ops = buildFeatureEvalOps(
-          document.featureTree,
-          document.rollbackIndex,
-          document.planes
-        );
-
-        if (!ops || ops.length === 0) {
-          if (active) setSolidMesh(null);
-          return;
-        }
-
-        const kernelResult = await solidEngine.evaluateFeatureTree(ops);
-        const meshData = kernelResult?.finalMesh;
-
-        if (active) {
-          if (meshData && meshData.vertices && meshData.vertices.length > 0) {
-            setSolidMesh(meshData);
-          } else {
-            setSolidMesh(null);
-          }
-        }
-      } catch (err) {
-        console.warn('CADSketchCanvas: Failed to evaluate 3D solid for projection background:', err);
-        if (active) setSolidMesh(null);
-      }
-    };
-
-    evaluate3DSolids();
-
-    return () => {
-      active = false;
-    };
-  }, [document?.featureTree, document?.rollbackIndex, document?.planes]);
+  // 3D 實體模型幾何資料（取自 Store 正式 Feature Regen 產生的 cumulativePartMesh，避免重複評估與 revision 競爭）
+  const solidMesh = useCadStore((s: any) => s.cumulativePartMesh as MeshResult | null);
 
   // 取得目前草圖內的 entities, profiles, constraints, dimensions 與 solverState
   let rawEntities: CADEntity2D[] = [];
@@ -882,6 +833,7 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
         const clickedEntity = activeEntities.find((ent: any) => ent.id === id);
         if (clickedEntity && clickedEntity.type === 'line') {
           e.stopPropagation();
+          window.dispatchEvent(new CustomEvent('cad-set-revolve-axis', { detail: id }));
           setRevolveAxisEntityId(id);
           setIsPickingRevolveAxis(false);
           clearSelection();

@@ -63,8 +63,10 @@ export function computeSignatureSimilarity(
       } else {
         scoreDir = 0.5;
       }
+    } else if (!target.normal && !candidate.normal) {
+      scoreDir = 1.0;
     } else {
-      scoreDir = 0.5;
+      scoreDir = 0.0;
     }
   } else if (subShapeType === 'EDGE') {
     if (target.direction && candidate.direction) {
@@ -76,8 +78,10 @@ export function computeSignatureSimilarity(
       } else {
         scoreDir = 0.5;
       }
+    } else if (!target.direction && !candidate.direction) {
+      scoreDir = 1.0;
     } else {
-      scoreDir = 0.5;
+      scoreDir = 0.0;
     }
   } else {
     scoreDir = 1.0;

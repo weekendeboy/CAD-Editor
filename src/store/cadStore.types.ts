@@ -6,9 +6,12 @@ import {
   FeatureResult,
   MeshResult,
   RuntimeBRepFaceRef,
+  RuntimeBRepEdgeRef,
+  RuntimeBRepVertexRef,
   MeshSubshapeMapping,
   MeshSelection,
 } from '../core/3d/SolidEngine.types';
+import type { DatumPickerTarget } from '../core/3d/UnifiedReferencePicker.types';
 
 export interface ExtrudePreviewState {
   isOpen: boolean;
@@ -26,6 +29,45 @@ export interface RevolvePreviewState {
   axisEntityId: string;
   angle: number; // in radians
   reversed?: boolean;
+}
+
+export interface DatumPlanePreviewState {
+  isOpen: boolean;
+  mode: 'offset' | 'angle' | 'three-point';
+  referencePlaneId?: string;
+  offsetDistance?: number;
+  rotationAngleDeg?: number;
+  rotationAngleRad?: number;
+  axisSourceMode?: 'standard' | 'sketch_edge' | 'brep_edge';
+  standardAxis?: 'X' | 'Y' | 'Z';
+  axisOrigin?: Point3D;
+  axisDirection?: Point3D;
+  selectedLineEntityId?: string;
+  selectedEdgeRef?: RuntimeBRepEdgeRef | null;
+  selectedFaceRef?: RuntimeBRepFaceRef | null;
+  customRefPlane?: CustomPlane | null;
+  customRefPlaneName?: string | null;
+  point1?: Point3D | null;
+  point2?: Point3D | null;
+  point3?: Point3D | null;
+  activePointIndex?: 1 | 2 | 3;
+  isValid?: boolean;
+  errorMessage?: string | null;
+  plane?: CustomPlane | null;
+  activePicker?: DatumPickerTarget | null;
+}
+
+export interface SelectedEdgeItem {
+  edgeRef: RuntimeBRepEdgeRef;
+  startPoint: Point3D;
+  endPoint: Point3D;
+  meshEdgeIndex?: number;
+}
+
+export interface FilletChamferPreviewState {
+  type: 'FILLET_3D' | 'CHAMFER_3D';
+  mesh: MeshResult | null;
+  error?: string;
 }
 
 export type OsnapMode = 
@@ -120,6 +162,14 @@ export interface CADActions {
       faceRef?: RuntimeBRepFaceRef;
     } | null
   ) => void;
+  setSelectedEdgeInfo: (
+    edge: SelectedEdgeItem | null,
+    isShift?: boolean
+  ) => void;
+  setSelectedEdgeList: (edges: SelectedEdgeItem[]) => void;
+  removeSelectedEdge: (edgeIndex: number) => void;
+  clearSelectedEdges: () => void;
+  setFilletChamferPreview: (preview: FilletChamferPreviewState | null) => void;
   setSelectedMeshSelection: (selection: MeshSelection | null) => void;
 
   // 3D 特徵管理
@@ -244,12 +294,15 @@ export interface CADActions {
   // 上一次使用半徑 (AutoCAD 風格)
   setLastRadius: (r: number) => void;
 
-  // 3D 邊線顯示與即時拉伸/旋轉預覽
+  // 3D 邊線顯示與即時拉伸/旋轉/基準面預覽
   toggleShow3DEdges: () => void;
   setExtrudePreview: (preview: ExtrudePreviewState | null) => void;
   setRevolvePreview: (preview: RevolvePreviewState | null) => void;
+  setDatumPlanePreview: (preview: DatumPlanePreviewState | null) => void;
   setIsPickingRevolveAxis: (isPicking: boolean) => void;
   setRevolveAxisEntityId: (axisId: string) => void;
+  setCumulativeSubshapeMapping: (mapping: MeshSubshapeMapping | null) => void;
+  setDatumPickerTarget: (target: DatumPickerTarget | null) => void;
 }
 
 export interface CADState extends CADActions {
@@ -267,6 +320,9 @@ export interface CADState extends CADActions {
     triangleIndex?: number;
     faceRef?: RuntimeBRepFaceRef;
   } | null;
+  selectedEdgeInfo: SelectedEdgeItem | null;
+  selectedEdgeList: SelectedEdgeItem[];
+  filletChamferPreview: FilletChamferPreviewState | null;
   selectedMeshSelection: MeshSelection | null;
   osnapEnabled: boolean;
   orthoEnabled: boolean;
@@ -274,10 +330,12 @@ export interface CADState extends CADActions {
   show3DEdges: boolean;
   extrudePreview: ExtrudePreviewState | null;
   revolvePreview: RevolvePreviewState | null;
+  datumPlanePreview: DatumPlanePreviewState | null;
   isPickingRevolveAxis: boolean;
 
   // 3D Kernel Cache & Diagnostics
   cumulativePartMesh: MeshResult | null;
+  cumulativeSubshapeMapping: MeshSubshapeMapping | null;
   featureResults: Record<string, FeatureResult>;
   bodies: BodyResult[];
   kernelDiagnostics: KernelDiagnostic[];

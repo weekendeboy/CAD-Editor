@@ -321,6 +321,50 @@ export function createAngledPlane(
 }
 
 /**
+ * 檢查三點是否能構成合法的 3D 空間基準面
+ * 1. 任意兩點不能重合 (距離 > eps)
+ * 2. 三點不能共線 (向量叉積模長 > eps)
+ */
+export function validateThreePoints(
+  p1: Point3D,
+  p2: Point3D,
+  p3: Point3D,
+  eps = 1e-6
+): { isValid: boolean; error?: string } {
+  if (!p1 || !p2 || !p3) {
+    return { isValid: false, error: '三點資料不完整' };
+  }
+
+  const v12 = sub3D(p2, p1);
+  const v13 = sub3D(p3, p1);
+  const v23 = sub3D(p3, p2);
+
+  const len12 = length3D(v12);
+  const len13 = length3D(v13);
+  const len23 = length3D(v23);
+
+  if (len12 < eps) {
+    return { isValid: false, error: '點 1 與 點 2 重合，無法唯一定義基準面' };
+  }
+  if (len13 < eps) {
+    return { isValid: false, error: '點 1 與 點 3 重合，無法唯一定義基準面' };
+  }
+  if (len23 < eps) {
+    return { isValid: false, error: '點 2 與 點 3 重合，無法唯一定義基準面' };
+  }
+
+  const cross = cross3D(v12, v13);
+  const crossLen = length3D(cross);
+  const normalizedCrossLen = crossLen / (len12 * len13);
+
+  if (crossLen < eps || normalizedCrossLen < 1e-5) {
+    return { isValid: false, error: '三點共線，無法構成唯一定義的空間基準面' };
+  }
+
+  return { isValid: true };
+}
+
+/**
  * 三點建基準面 (Three-Point Plane)
  * 由不共線的三點 P1, P2, P3 建立 CustomPlane
  * P1 作為原點, P1->P2 作為 xAxis, (P1->P2) × (P1->P3) 作為 Normal
@@ -332,6 +376,11 @@ export function createThreePointPlane(
   name?: string,
   id?: string
 ): CustomPlane {
+  const validation = validateThreePoints(p1, p2, p3);
+  if (!validation.isValid) {
+    throw new Error(validation.error || 'Invalid three points for datum plane');
+  }
+
   const v12 = sub3D(p2, p1);
   const v13 = sub3D(p3, p1);
 

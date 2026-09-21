@@ -20,14 +20,17 @@ import {
   DatumTopPlane,
   DatumRightPlane,
   DatumPlaneFeature,
+  Point3D,
 } from '../types/cad';
 import { solidEngine } from '../core/3d/SolidEngine';
-import { buildFeatureEvalOps } from '../core/3d/FeaturePipelineAdapter';
 import { createPlaneFromFaceNormal } from '../core/3d/DatumPlaneEngine';
-import { resolveTriangleToFace } from '../core/3d/MeshSubshapeResolver';
-import type { RuntimeBRepFaceRef, MeshSubshapeMapping } from '../core/3d/SolidEngine.types';
+import { resolveTriangleToFace, resolveMeshEdgeToEdge } from '../core/3d/MeshSubshapeResolver';
+import { resolveBRepFaceToReference, resolveBRepEdgeToAxis } from '../core/3d/UnifiedReferenceResolver';
+import { sampleArcPoints, generateArcHitboxSegments } from '../core/3d/ArcGeometryHelper';
+import type { RuntimeBRepFaceRef, RuntimeBRepEdgeRef, MeshSubshapeMapping } from '../core/3d/SolidEngine.types';
 import { ExtrudePreviewRenderer } from './ExtrudePreviewRenderer';
 import { RevolvePreviewRenderer } from './RevolvePreviewRenderer';
+import { DatumPlanePreviewRenderer } from './DatumPlanePreviewRenderer';
 import { Sketch3DRenderer } from './Sketch3DRenderer';
 
 // Error Boundary 元件，防止 3D Canvas 渲染或 WebGL 錯誤導致整個 React 畫面白屏
@@ -211,33 +214,63 @@ const DatumPlaneMesh: React.FC<DatumPlaneMeshProps> = ({
     };
   }, [trihedronGroup]);
 
+  const datumPreview = useCADStore((state) => state.datumPlanePreview);
+  const isPickingRefPlane = datumPreview?.isOpen && datumPreview.activePicker === 'reference_plane';
+  const [hovered, setHovered] = useState(false);
+
   if (!visible) return null;
 
   return (
     <group
       ref={groupRef}
+      onPointerOver={(e) => {
+        if (isPickingRefPlane) {
+          e.stopPropagation();
+          setHovered(true);
+          document.body.style.cursor = 'pointer';
+        }
+      }}
+      onPointerOut={() => {
+        if (isPickingRefPlane) {
+          setHovered(false);
+          document.body.style.cursor = 'auto';
+        }
+      }}
       onClick={(e) => {
         e.stopPropagation();
+        if (isPickingRefPlane) {
+          window.dispatchEvent(
+            new CustomEvent('cad-set-datum-reference-plane', {
+              detail: {
+                plane,
+                planeId: plane.id,
+                name,
+              },
+            })
+          );
+          useCADStore.getState().setDatumPickerTarget(null);
+          return;
+        }
         if (onSelect) onSelect();
       }}
     >
-      {/* 半透明平面 (尺寸 200x200 mm，天藍色 #0284c7，未選中透明度 0.08，選中時 0.2) */}
+      {/* 半透明平面 (尺寸 200x200 mm，天藍色 #0284c7，未選中透明度 0.08，選中時 0.2，拾取懸停時 0.35) */}
       <mesh>
         <planeGeometry args={[200, 200]} />
         <meshBasicMaterial
-          color="#0284c7"
+          color={isPickingRefPlane && hovered ? '#10b981' : '#0284c7'}
           side={THREE.DoubleSide}
           transparent
-          opacity={isSelected ? 0.2 : 0.08}
+          opacity={isPickingRefPlane && hovered ? 0.35 : isSelected ? 0.2 : 0.08}
           depthWrite={false}
         />
       </mesh>
 
-      {/* 邊框線 (Border Wireframe)：選中時黃色 #facc15，未選中深藍色 #0369a1 */}
+      {/* 邊框線 (Border Wireframe)：選中或拾取懸停時金黃/綠色 */}
       <lineLoop geometry={borderGeometry}>
         <lineBasicMaterial
-          color={isSelected ? '#facc15' : '#0369a1'}
-          linewidth={2}
+          color={isPickingRefPlane && hovered ? '#34d399' : isSelected ? '#facc15' : '#0369a1'}
+          linewidth={isPickingRefPlane && hovered ? 3 : 2}
         />
       </lineLoop>
 
@@ -248,7 +281,7 @@ const DatumPlaneMesh: React.FC<DatumPlaneMeshProps> = ({
       <Text
         position={[-95, 92, 0.5]}
         fontSize={9}
-        color={isSelected ? '#fde047' : '#38bdf8'}
+        color={isPickingRefPlane && hovered ? '#34d399' : isSelected ? '#fde047' : '#38bdf8'}
         anchorX="left"
         anchorY="top"
         outlineWidth={0.6}
@@ -256,6 +289,19 @@ const DatumPlaneMesh: React.FC<DatumPlaneMeshProps> = ({
       >
         {name}
       </Text>
+
+      {/* 3D 拾取參考面提示 */}
+      {isPickingRefPlane && hovered && (
+        <Html position={[0, 0, 0]} center distanceFactor={140} zIndexRange={[160, 0]}>
+          <div
+            className="bg-emerald-950/95 border-2 border-emerald-400 text-emerald-300 px-2.5 py-1 rounded-lg text-xs font-mono font-bold shadow-2xl backdrop-blur flex items-center gap-1.5 pointer-events-none select-none animate-in fade-in zoom-in-90 duration-150 whitespace-nowrap"
+            style={{ transform: 'translate3d(0, -20px, 0)' }}
+          >
+            <span>🎯 點擊設定為 Reference Plane</span>
+            <span className="text-[10px] text-emerald-200/70">({name})</span>
+          </div>
+        </Html>
+      )}
     </group>
   );
 };
@@ -267,8 +313,181 @@ export interface SelectedFaceState {
   faceRef?: RuntimeBRepFaceRef;
 }
 
+export interface SelectedEdgeState {
+  edgeRef: RuntimeBRepEdgeRef;
+  startPoint: Point3D;
+  endPoint: Point3D;
+  meshEdgeIndex?: number;
+}
+
+interface InteractiveBRepEdgeProps {
+  edgeRef: RuntimeBRepEdgeRef;
+  mapping: MeshSubshapeMapping;
+  edgeVertices: Float32Array | null;
+  isSelected: boolean;
+  isHovered: boolean;
+  onHover: (edgeIndex: number | null) => void;
+  onSelect: (edge: SelectedEdgeState, isShift: boolean) => void;
+}
+
+/**
+ * 3D 視圖中的實體邊線 (Solid B-Rep Edge) 獨立拾取與高亮元件
+ */
+const InteractiveBRepEdge: React.FC<InteractiveBRepEdgeProps> = ({
+  edgeRef,
+  mapping,
+  edgeVertices,
+  isSelected,
+  isHovered,
+  onHover,
+  onSelect,
+}) => {
+  const start = edgeRef.startPoint || { x: 0, y: 0, z: 0 };
+  const end = edgeRef.endPoint || { x: 0, y: 0, z: 0 };
+
+  // 1. 取得真實曲線上之高密度取樣點 (圓弧/曲線取樣 32 段，直線則為起訖兩點)
+  const arcPoints = useMemo(() => sampleArcPoints(edgeRef, 32), [edgeRef]);
+
+  // 2. 依據真實幾何生成一組或多組 Fat Hitbox 圓柱段落 (半徑 6mm)
+  const hitboxSegments = useMemo(() => generateArcHitboxSegments(arcPoints), [arcPoints]);
+
+  // 3. 幾何渲染線：若 mapping 有提供連續頂點段落則使用，否則使用 arcPoints 建立連續線段
+  const lineGeom = useMemo(() => {
+    const range = mapping.edgeSegmentRanges?.find((r) => r.edgeIndex === edgeRef.edgeIndex);
+    if (range && range.segmentCount > 0 && edgeVertices) {
+      const startFloat = range.startSegment * 6;
+      const endFloat = startFloat + range.segmentCount * 6;
+      if (edgeVertices.length >= endFloat) {
+        const segmentFloats = edgeVertices.subarray(startFloat, endFloat);
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(segmentFloats), 3));
+        return geom;
+      }
+    }
+    // 由 arcPoints 建立連續線段
+    const lineFloats: number[] = [];
+    for (let i = 0; i < arcPoints.length - 1; i++) {
+      lineFloats.push(arcPoints[i].x, arcPoints[i].y, arcPoints[i].z, arcPoints[i + 1].x, arcPoints[i + 1].y, arcPoints[i + 1].z);
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(lineFloats), 3));
+    return geom;
+  }, [mapping, edgeRef, edgeVertices, arcPoints]);
+
+  useEffect(() => {
+    return () => {
+      lineGeom.dispose();
+    };
+  }, [lineGeom]);
+
+  // 4. 懸停標籤位置：落在真實圓弧的中間頂點 (Apex)，而非 chord 中間
+  const labelPos = useMemo(() => {
+    if (arcPoints.length > 0) {
+      const midIdx = Math.floor(arcPoints.length / 2);
+      return new THREE.Vector3(arcPoints[midIdx].x, arcPoints[midIdx].y, arcPoints[midIdx].z);
+    }
+    return new THREE.Vector3((start.x + end.x) * 0.5, (start.y + end.y) * 0.5, (start.z + end.z) * 0.5);
+  }, [arcPoints, start, end]);
+
+  const handlePointerOver = (e: any) => {
+    e.stopPropagation();
+    onHover(edgeRef.edgeIndex);
+    document.body.style.cursor = 'pointer';
+  };
+
+  const handlePointerOut = (e: any) => {
+    e.stopPropagation();
+    onHover(null);
+    document.body.style.cursor = 'auto';
+  };
+
+  const handleClick = (e: any) => {
+    e.stopPropagation();
+    if (e.nativeEvent?.stopImmediatePropagation) {
+      e.nativeEvent.stopImmediatePropagation();
+    }
+    const isShift = !!(e.shiftKey || e.nativeEvent?.shiftKey);
+    onSelect({
+      edgeRef,
+      startPoint: start,
+      endPoint: end,
+      meshEdgeIndex: edgeRef.edgeIndex,
+    }, isShift);
+  };
+
+  const lineColor = isSelected ? '#facc15' : isHovered ? '#38bdf8' : '#334155';
+  const lineWidth = isSelected ? 4 : isHovered ? 3 : 1.5;
+
+  return (
+    <group name={`brep-edge-${edgeRef.edgeIndex}`}>
+      {/* 寬容度拾取圓柱體組 (Fat Hitbox Cylinders, 半徑 6mm, 沿真實圓弧/直線分段包覆) */}
+      {hitboxSegments.map((seg) => {
+        const q = new THREE.Quaternion().setFromUnitVectors(
+          new THREE.Vector3(0, 1, 0),
+          new THREE.Vector3(seg.direction.x, seg.direction.y, seg.direction.z)
+        );
+        return (
+          <mesh
+            key={`hitbox-seg-${seg.segmentIndex}`}
+            position={[seg.mid.x, seg.mid.y, seg.mid.z]}
+            quaternion={q}
+            onPointerOver={handlePointerOver}
+            onPointerOut={handlePointerOut}
+            onPointerDown={handleClick}
+            onClick={handleClick}
+          >
+            <cylinderGeometry args={[6, 6, seg.length, 8]} />
+            <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+          </mesh>
+        );
+      })}
+
+      {/* 邊線可見幾何 (平滑圓弧或直線) */}
+      <lineSegments geometry={lineGeom}>
+        <lineBasicMaterial
+          color={lineColor}
+          linewidth={lineWidth}
+          depthTest={true}
+        />
+      </lineSegments>
+
+      {/* 選取狀態下的端點高亮指示球 */}
+      {isSelected && (
+        <>
+          <mesh position={[start.x, start.y, start.z]}>
+            <sphereGeometry args={[1.5, 16, 16]} />
+            <meshBasicMaterial color="#facc15" />
+          </mesh>
+          <mesh position={[end.x, end.y, end.z]}>
+            <sphereGeometry args={[1.5, 16, 16]} />
+            <meshBasicMaterial color="#facc15" />
+          </mesh>
+        </>
+      )}
+
+      {/* 懸停提示標籤 (置於圓弧本體 Apex 處) */}
+      {isHovered && !isSelected && (
+        <Html position={labelPos} center distanceFactor={140} zIndexRange={[160, 0]}>
+          <div
+            className="bg-slate-900/95 border border-sky-400 text-sky-300 px-2.5 py-1 rounded-lg text-xs font-mono font-bold shadow-2xl backdrop-blur flex items-center gap-1.5 pointer-events-none select-none animate-in fade-in zoom-in-90 duration-150 whitespace-nowrap"
+            style={{ transform: 'translate3d(0, -20px, 0)' }}
+          >
+            <span>
+              {edgeRef.curveType === 'circle' ? '圓弧邊線' : '邊線'} #{edgeRef.edgeIndex}
+            </span>
+            <span className="text-[10px] text-slate-400">
+              {edgeRef.radius ? `(R: ${edgeRef.radius.toFixed(1)}mm)` : edgeRef.length ? `(長度: ${edgeRef.length.toFixed(1)}mm)` : ''}
+            </span>
+          </div>
+        </Html>
+      )}
+    </group>
+  );
+};
+
 interface CumulativePartMeshProps {
   onFaceSelect: (selection: SelectedFaceState) => void;
+  onEdgeSelect?: (selection: SelectedEdgeState, isShift: boolean) => void;
 }
 
 /**
@@ -276,11 +495,17 @@ interface CumulativePartMeshProps {
  * 訂閱 document.featureTree 與 document.rollbackIndex
  * 當特徵樹或回退棒變更時，透過 OpenCASCADE 執行完整 CSG 布林運算（含 Boolean Cut 除料）
  */
-const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect }) => {
+const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect, onEdgeSelect }) => {
   const document = useCADStore((state) => state.document);
   const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [mapping, setMapping] = useState<MeshSubshapeMapping | null>(null);
+  const [edgeVertices, setEdgeVertices] = useState<Float32Array | null>(null);
+  const [hoveredEdgeIndex, setHoveredEdgeIndex] = useState<number | null>(null);
+
+  const selectedEdgeInfo = useCADStore((state) => state.selectedEdgeInfo);
+  const selectedEdgeList = useCADStore((state) => state.selectedEdgeList);
+  const filletChamferPreview = useCADStore((state) => state.filletChamferPreview);
 
   const featureTree = document?.featureTree ?? [];
   const rollbackIndex = document?.rollbackIndex ?? 0;
@@ -307,6 +532,69 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect })
     };
   }, [material]);
 
+  // 即時 3D Live Preview Mesh (Fillet / Chamfer)
+  const previewGeometry = useMemo(() => {
+    if (!filletChamferPreview?.mesh?.vertices || filletChamferPreview.mesh.vertices.length === 0) {
+      return null;
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(filletChamferPreview.mesh.vertices, 3));
+    geom.setAttribute('normal', new THREE.BufferAttribute(filletChamferPreview.mesh.normals, 3));
+    geom.setIndex(new THREE.BufferAttribute(filletChamferPreview.mesh.indices, 1));
+    return geom;
+  }, [filletChamferPreview?.mesh]);
+
+  useEffect(() => {
+    return () => {
+      if (previewGeometry) previewGeometry.dispose();
+    };
+  }, [previewGeometry]);
+
+  const previewMaterial = useMemo(() => {
+    const isFillet = filletChamferPreview?.type === 'FILLET_3D';
+    return new THREE.MeshStandardMaterial({
+      color: isFillet ? '#34d399' : '#818cf8',
+      metalness: 0.2,
+      roughness: 0.4,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.85,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+  }, [filletChamferPreview?.type]);
+
+  useEffect(() => {
+    return () => {
+      previewMaterial.dispose();
+    };
+  }, [previewMaterial]);
+
+  const previewEdgesGeometry = useMemo(() => {
+    if (!previewGeometry) return null;
+    return new THREE.EdgesGeometry(previewGeometry, 24);
+  }, [previewGeometry]);
+
+  useEffect(() => {
+    return () => {
+      if (previewEdgesGeometry) previewEdgesGeometry.dispose();
+    };
+  }, [previewEdgesGeometry]);
+
+  useEffect(() => {
+    if (filletChamferPreview?.mesh) {
+      material.transparent = true;
+      material.opacity = 0.25;
+      material.depthWrite = false;
+    } else {
+      material.transparent = false;
+      material.opacity = 1.0;
+      material.depthWrite = true;
+    }
+    material.needsUpdate = true;
+  }, [material, filletChamferPreview?.mesh]);
+
   // 提取實體模型的特徵幾何邊線 (閾值 24 度，過濾掉曲面內部三角化網格，只呈現真正的特徵線與分模邊界)
   const edgesGeometry = useMemo(() => {
     if (!geometry) return null;
@@ -319,81 +607,47 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect })
     };
   }, [edgesGeometry]);
 
-  // 當特徵樹、回退棒或基準面變更時重新計算實體網格
+  const cumulativePartMesh = useCADStore((state) => state.cumulativePartMesh);
+  const isRegenerating = useCADStore((state: any) => state.isRegenerating || false);
+
   useEffect(() => {
-    let active = true;
+    setLoading(isRegenerating);
+  }, [isRegenerating]);
 
-    const evaluateTree = async () => {
-      setLoading(true);
+  // 當 Store 中的 cumulativePartMesh 更新時，轉換為 Three.js BufferGeometry 供 Canvas 渲染
+  useEffect(() => {
+    if (!cumulativePartMesh || !cumulativePartMesh.vertices || cumulativePartMesh.vertices.length === 0) {
+      setGeometry((prev) => {
+        if (prev) prev.dispose();
+        return null;
+      });
+      setEdgeVertices(null);
+      setMapping(null);
+      useCADStore.getState().setCumulativeSubshapeMapping(null);
+      return;
+    }
 
-      try {
-        await solidEngine.init();
+    setMapping(cumulativePartMesh.mapping || null);
+    setEdgeVertices(cumulativePartMesh.edgeVertices || cumulativePartMesh.edges || null);
+    useCADStore.getState().setCumulativeSubshapeMapping(cumulativePartMesh.mapping || null);
 
-        const ops = buildFeatureEvalOps(featureTree, rollbackIndex, planes);
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(cumulativePartMesh.vertices, 3));
+    geom.setAttribute('normal', new THREE.BufferAttribute(cumulativePartMesh.normals, 3));
+    geom.setIndex(new THREE.BufferAttribute(cumulativePartMesh.indices, 1));
 
-        if (!ops || ops.length === 0) {
-          if (active) {
-            setGeometry((prev) => {
-              if (prev) prev.dispose();
-              return null;
-            });
-            setLoading(false);
-          }
-          return;
-        }
+    setGeometry((prev) => {
+      if (prev) prev.dispose();
+      return geom;
+    });
+  }, [cumulativePartMesh]);
 
-        const kernelResult = await solidEngine.evaluateFeatureTree(ops);
-        const meshData = kernelResult?.finalMesh;
-
-        if (!active) return;
-
-        if (!meshData || !meshData.vertices || meshData.vertices.length === 0) {
-          setGeometry((prev) => {
-            if (prev) prev.dispose();
-            return null;
-          });
-          setMapping(null);
-          setLoading(false);
-          return;
-        }
-
-        setMapping(meshData.mapping || null);
-
-        const geom = new THREE.BufferGeometry();
-        geom.setAttribute('position', new THREE.BufferAttribute(meshData.vertices, 3));
-        geom.setAttribute('normal', new THREE.BufferAttribute(meshData.normals, 3));
-        geom.setIndex(new THREE.BufferAttribute(meshData.indices, 1));
-
-        if (active) {
-          setGeometry((prev) => {
-            if (prev) prev.dispose();
-            return geom;
-          });
-          setLoading(false);
-        } else {
-          geom.dispose();
-        }
-      } catch (error: any) {
-        if (error?.message === 'RegenJobCancelled' || error?.name === 'AbortError') {
-          return;
-        }
-        console.error('Failed to evaluate cumulative solid part mesh:', error);
-        if (active) {
-          setGeometry((prev) => {
-            if (prev) prev.dispose();
-            return null;
-          });
-          setLoading(false);
-        }
-      }
-    };
-
-    evaluateTree();
-
-    return () => {
-      active = false;
-    };
-  }, [featureTree, rollbackIndex, planes]);
+  // 初次載入或當 Store 尚無累積網格但有特徵時，觸發 Store 重算
+  useEffect(() => {
+    if (!cumulativePartMesh && featureTree.length > 0) {
+      useCADStore.getState().regenerateFeatureTree();
+    }
+  }, [cumulativePartMesh, featureTree.length]);
 
   // 卸載時清理 Geometry 記憶體
   useEffect(() => {
@@ -438,6 +692,39 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect })
                   }
                 }
 
+                // 檢查是否處於 Datum Plane 3D 參考面選取模式 (activePicker === 'reference_plane')
+                const datumPreview = useCADStore.getState().datumPlanePreview;
+                if (datumPreview?.isOpen && datumPreview.activePicker === 'reference_plane') {
+                  if (faceRef) {
+                    const resolvedRef = resolveBRepFaceToReference(faceRef, hitPoint);
+                    if (!resolvedRef.isValid || !resolvedRef.reference) {
+                      alert(resolvedRef.error || '選取的表面非平面，無法作為基準面參考');
+                      return;
+                    }
+                    window.dispatchEvent(
+                      new CustomEvent('cad-set-datum-reference-face', {
+                        detail: {
+                          plane: resolvedRef.reference.plane,
+                          faceRef,
+                          name: `實體表面 #${faceRef.faceIndex}`,
+                        },
+                      })
+                    );
+                  } else {
+                    const plane = createPlaneFromFaceNormal(hitPoint, worldNormal, '實體表面');
+                    window.dispatchEvent(
+                      new CustomEvent('cad-set-datum-reference-face', {
+                        detail: {
+                          plane,
+                          name: '實體表面',
+                        },
+                      })
+                    );
+                  }
+                  useCADStore.getState().setDatumPickerTarget(null);
+                  return;
+                }
+
                 onFaceSelect({
                   point: hitPoint,
                   normal: worldNormal,
@@ -447,14 +734,54 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect })
               }
             }}
           />
-          {show3DEdges && edgesGeometry && (
-            <lineSegments geometry={edgesGeometry}>
-              <lineBasicMaterial
-                color="#0f172a"
-                linewidth={1.5}
-                depthTest={true}
+
+          {/* Fillet / Chamfer 即時 3D Live Preview Mesh */}
+          {previewGeometry && (
+            <group name="fillet-chamfer-preview">
+              <mesh
+                geometry={previewGeometry}
+                material={previewMaterial}
               />
-            </lineSegments>
+              {previewEdgesGeometry && (
+                <lineSegments geometry={previewEdgesGeometry}>
+                  <lineBasicMaterial
+                    color={filletChamferPreview?.type === 'FILLET_3D' ? '#059669' : '#4f46e5'}
+                    linewidth={2}
+                    depthTest={true}
+                  />
+                </lineSegments>
+              )}
+            </group>
+          )}
+
+          {/* 交互式 B-Rep 邊線渲染 (支援獨立選取、懸停提示與高亮) */}
+          {show3DEdges && mapping?.edges && mapping.edges.length > 0 ? (
+            mapping.edges.map((edgeRef) => (
+              <InteractiveBRepEdge
+                key={`edge-${edgeRef.edgeIndex}`}
+                edgeRef={edgeRef}
+                mapping={mapping}
+                edgeVertices={edgeVertices}
+                isSelected={selectedEdgeList.some((e) => e.edgeRef.edgeIndex === edgeRef.edgeIndex)}
+                isHovered={hoveredEdgeIndex === edgeRef.edgeIndex}
+                onHover={setHoveredEdgeIndex}
+                onSelect={(edge, isShift) => {
+                  if (onEdgeSelect) {
+                    onEdgeSelect(edge, isShift);
+                  }
+                }}
+              />
+            ))
+          ) : (
+            show3DEdges && edgesGeometry && (
+              <lineSegments geometry={edgesGeometry}>
+                <lineBasicMaterial
+                  color="#0f172a"
+                  linewidth={1.5}
+                  depthTest={true}
+                />
+              </lineSegments>
+            )
           )}
         </group>
       )}
@@ -777,8 +1104,8 @@ const CanvasContent: React.FC = () => {
 
   // 滑鼠中鍵雙擊 (Middle Double Click) 監聽與 cad-zoom-to-fit 全域事件
   useEffect(() => {
-    const dom = gl.domElement;
-    if (!dom) return;
+    const dom = gl?.domElement;
+    if (!dom || typeof dom.addEventListener !== 'function') return;
 
     let lastClickTime = 0;
     let lastClickX = 0;
@@ -818,8 +1145,10 @@ const CanvasContent: React.FC = () => {
     window.addEventListener('cad-zoom-to-fit', handleGlobalZoom);
 
     return () => {
-      dom.removeEventListener('pointerdown', handlePointerDown);
-      dom.removeEventListener('auxclick', handleAuxClick);
+      if (dom && typeof dom.removeEventListener === 'function') {
+        dom.removeEventListener('pointerdown', handlePointerDown);
+        dom.removeEventListener('auxclick', handleAuxClick);
+      }
       window.removeEventListener('cad-zoom-to-fit', handleGlobalZoom);
       if (animFrameRef.current) {
         cancelAnimationFrame(animFrameRef.current);
@@ -887,7 +1216,9 @@ const CanvasContent: React.FC = () => {
       <Suspense fallback={null}>
         <Environment preset="city" />
       </Suspense>
-      <OrbitControls ref={controlsRef} makeDefault minDistance={1} maxDistance={5000} />
+      {gl?.domElement && (
+        <OrbitControls ref={controlsRef} makeDefault minDistance={1} maxDistance={5000} domElement={gl.domElement} />
+      )}
       
       {/* 基準面渲染 */}
       {renderDefaultPlanes}
@@ -902,6 +1233,9 @@ const CanvasContent: React.FC = () => {
       {/* 3D 即時旋轉長料 / 除料幾何、旋轉軸心與軌跡預覽 */}
       <RevolvePreviewRenderer />
 
+      {/* 3D 即時空間基準面偏移姿態預覽 */}
+      <DatumPlanePreviewRenderer />
+
       {/* 實體網格渲染 */}
       <CumulativePartMesh
         onFaceSelect={(face) => {
@@ -912,13 +1246,33 @@ const CanvasContent: React.FC = () => {
             triangleIndex: face.triangleIndex,
             faceRef: face.faceRef,
           });
-          if (face.faceRef && typeof face.triangleIndex === 'number') {
-            useCADStore.getState().setSelectedMeshSelection({
-              kind: 'face',
-              triangleIndex: face.triangleIndex,
-              faceRef: face.faceRef,
-              generation: 1,
-            });
+        }}
+        onEdgeSelect={(edge, isShift) => {
+          setSelectedFace(null);
+          useCADStore.getState().setSelectedEdgeInfo({
+            edgeRef: edge.edgeRef,
+            startPoint: edge.startPoint,
+            endPoint: edge.endPoint,
+            meshEdgeIndex: edge.meshEdgeIndex,
+          }, isShift);
+
+          // 檢查是否處於 Datum Plane 旋轉軸選取模式 (activePicker === 'rotation_axis')
+          const datumPreview = useCADStore.getState().datumPlanePreview;
+          if (datumPreview?.isOpen && datumPreview.activePicker === 'rotation_axis') {
+            const resolved = resolveBRepEdgeToAxis(edge.edgeRef);
+            if (resolved.isValid && resolved.reference) {
+              window.dispatchEvent(
+                new CustomEvent('cad-set-datum-rotation-axis', {
+                  detail: {
+                    axisOrigin: resolved.reference.axisOrigin,
+                    axisDirection: resolved.reference.axisDirection,
+                    edgeRef: edge.edgeRef,
+                    name: `實體邊線 #${edge.edgeRef.edgeIndex}`,
+                  },
+                })
+              );
+              useCADStore.getState().setDatumPickerTarget(null);
+            }
           }
         }}
       />
@@ -952,6 +1306,9 @@ const CanvasContent: React.FC = () => {
 const CAD3DCanvas: React.FC = () => {
   const selectedFaceInfo = useCADStore((state) => state.selectedFaceInfo);
   const setSelectedFaceInfo = useCADStore((state) => state.setSelectedFaceInfo);
+  const selectedEdgeInfo = useCADStore((state) => state.selectedEdgeInfo);
+  const selectedEdgeList = useCADStore((state) => state.selectedEdgeList);
+  const setSelectedEdgeInfo = useCADStore((state) => state.setSelectedEdgeInfo);
   const createSketchOnFacePlane = useCADStore((state) => state.createSketchOnFacePlane);
 
   const handleCreateSketchFromBar = () => {
@@ -1002,8 +1359,52 @@ const CAD3DCanvas: React.FC = () => {
             <button
               id="btn-bar-dismiss-face"
               onClick={() => setSelectedFaceInfo(null)}
-              className="p-1 hover:bg-slate-800 text-slate-400 hover:text-white rounded transition-colors"
+              className="p-1 hover:bg-slate-800 text-slate-400 hover:text-white rounded transition-colors cursor-pointer"
               title="取消選取"
+            >
+              <X size={15} />
+            </button>
+          </div>
+        )}
+
+        {/* 選取邊線固定浮動提示列 (保證 100% 可點擊且清晰呈現 Edge 拓撲資訊，支援多選模式) */}
+        {selectedEdgeList.length > 0 && (
+          <div
+            id="bar-selected-edge-action"
+            className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-slate-900/95 border border-amber-400/90 text-white px-4 py-2 rounded-xl shadow-2xl backdrop-blur flex items-center gap-3 select-none pointer-events-auto"
+          >
+            <div className="flex items-center gap-2 text-xs font-mono text-amber-300">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse inline-block" />
+              {selectedEdgeList.length === 1 ? (
+                <>
+                  <span className="font-semibold">
+                    B-Rep Edge #{selectedEdgeList[0].edgeRef.edgeIndex} ({selectedEdgeList[0].edgeRef.curveType === 'circle' ? `Arc/Circle${selectedEdgeList[0].edgeRef.radius ? ` R=${selectedEdgeList[0].edgeRef.radius.toFixed(1)}mm` : ''}` : 'Line'})
+                  </span>
+                  <span className="text-slate-400 hidden md:inline">
+                    長度: {selectedEdgeList[0].edgeRef.length ? `${selectedEdgeList[0].edgeRef.length.toFixed(2)} mm` : '—'}
+                  </span>
+                  <span className="text-slate-400 text-[10px] ml-1 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700">
+                    Shift+Click 多選
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="font-semibold">
+                    已選取 {selectedEdgeList.length} 條邊線 (
+                    {selectedEdgeList.map((e) => `#${e.edgeRef.edgeIndex}`).join(', ')}
+                    )
+                  </span>
+                  <span className="text-slate-400 text-[10px] ml-1 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700">
+                    Shift+Click 切換/多選
+                  </span>
+                </>
+              )}
+            </div>
+            <button
+              id="btn-bar-dismiss-edge"
+              onClick={() => useCADStore.getState().clearSelectedEdges()}
+              className="p-1 hover:bg-slate-800 text-slate-400 hover:text-white rounded transition-colors cursor-pointer"
+              title="清除所有邊線選取"
             >
               <X size={15} />
             </button>

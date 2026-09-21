@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { resolveTopoReference, resolveBatchTopoReferences } from '../TopologyMapper';
-import type { TopoReference, TopologyMap } from '../PersistentTopology.types';
+import {
+  resolveTopoReference,
+  resolveBatchTopoReferences,
+  computeSignatureSimilarity,
+} from '../TopologyMapper';
+import type { TopoReference, TopologyMap, GeometrySignature } from '../PersistentTopology.types';
 
 // Mocks
 const mockTargetRef = (kind: any, persistentId: string, generation: number, bodyId = 'main-body'): TopoReference => ({
@@ -138,3 +142,96 @@ test('Test L — No OCC Object Leakage', () => {
     assert.fail('Result must be JSON serializable');
   }
 });
+
+test('Test Arc Semantics A — Line identical signature similarity is 1.0', () => {
+  const lineSig: GeometrySignature = {
+    centroid: { x: 50, y: 0, z: 0 },
+    boundingBox: { min: { x: 0, y: 0, z: 0 }, max: { x: 100, y: 0, z: 0 } },
+    measure: 100,
+    direction: { x: 1, y: 0, z: 0 },
+    curveType: 'line',
+  };
+  const similarity = computeSignatureSimilarity(lineSig, lineSig, 'EDGE');
+  assert.strictEqual(similarity, 1.0, 'Identical line signatures must produce similarity 1.0');
+});
+
+test('Test Arc Semantics B — Arc identical signature (direction=undefined) similarity is 1.0', () => {
+  const arcSig: GeometrySignature = {
+    centroid: { x: 35.35, y: 35.35, z: 0 },
+    boundingBox: { min: { x: 0, y: 0, z: 0 }, max: { x: 50, y: 50, z: 0 } },
+    measure: 78.54,
+    direction: undefined, // Arc does not have a single fixed direction
+    curveType: 'circle',
+  };
+  const similarity = computeSignatureSimilarity(arcSig, arcSig, 'EDGE');
+  assert.strictEqual(similarity, 1.0, 'Identical arc signatures with direction undefined must produce similarity 1.0 instead of 0.875');
+});
+
+test('Test Arc Semantics C — Arc Resolve returns status = resolved', () => {
+  const arcSig: GeometrySignature = {
+    centroid: { x: 35.35, y: 35.35, z: 0 },
+    boundingBox: { min: { x: 0, y: 0, z: 0 }, max: { x: 50, y: 50, z: 0 } },
+    measure: 78.54,
+    direction: undefined,
+    curveType: 'circle',
+  };
+  const arcRef: TopoReference = {
+    persistentId: 'topo_EDGE_feat-1_1_hash_circle',
+    featureId: 'feat-1',
+    bodyId: 'main-body',
+    subShapeType: 'EDGE',
+    signature: arcSig,
+    generation: 1,
+  };
+  const map: TopologyMap = {
+    bodyId: 'main-body',
+    generation: 1,
+    faces: [],
+    edges: [arcRef],
+    vertices: [],
+    version: 1,
+  };
+
+  const result = resolveTopoReference(arcRef, map);
+  assert.strictEqual(result.status, 'resolved', 'Arc reference must be resolved successfully instead of signature_mismatch');
+  assert.strictEqual(result.resolvedIndex, 0);
+});
+
+test('Test Arc Semantics D — Mixed direction mismatch (one has direction, other does not)', () => {
+  const lineSig: GeometrySignature = {
+    centroid: { x: 0, y: 0, z: 0 },
+    boundingBox: { min: { x: 0, y: 0, z: 0 }, max: { x: 10, y: 0, z: 0 } },
+    measure: 10,
+    direction: { x: 1, y: 0, z: 0 },
+    curveType: 'line',
+  };
+  const noDirSig: GeometrySignature = {
+    centroid: { x: 0, y: 0, z: 0 },
+    boundingBox: { min: { x: 0, y: 0, z: 0 }, max: { x: 10, y: 0, z: 0 } },
+    measure: 10,
+    direction: undefined,
+    curveType: 'line',
+  };
+  const similarity = computeSignatureSimilarity(lineSig, noDirSig, 'EDGE');
+  assert.ok(similarity < 0.95, `Mixed direction signature similarity must be < 0.95 (got ${similarity})`);
+});
+
+test('Test Arc Semantics E — Curve type safety (Line vs Circle)', () => {
+  const lineSig: GeometrySignature = {
+    centroid: { x: 0, y: 0, z: 0 },
+    boundingBox: { min: { x: 0, y: 0, z: 0 }, max: { x: 10, y: 10, z: 0 } },
+    measure: 10,
+    direction: { x: 1, y: 0, z: 0 },
+    curveType: 'line',
+  };
+  const circleSig: GeometrySignature = {
+    centroid: { x: 0, y: 0, z: 0 },
+    boundingBox: { min: { x: 0, y: 0, z: 0 }, max: { x: 10, y: 10, z: 0 } },
+    measure: 10,
+    direction: undefined,
+    curveType: 'circle',
+  };
+  const similarity = computeSignatureSimilarity(lineSig, circleSig, 'EDGE');
+  assert.ok(similarity < 0.8, `Line vs Circle similarity must be low (got ${similarity})`);
+});
+

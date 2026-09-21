@@ -16,6 +16,7 @@ import {
   Play,
   Trash2,
   Edit3,
+  Sliders,
 } from 'lucide-react';
 
 export interface FeatureTreeItemProps {
@@ -27,6 +28,7 @@ export interface FeatureTreeItemProps {
   onToggleVisibility: (id: string) => void;
   onRename: (id: string, newName: string) => void;
   onDelete: (id: string) => void;
+  onEditFeature?: (id: string, type: FeatureType) => void;
 }
 
 /**
@@ -69,6 +71,7 @@ export const FeatureTreeItem: React.FC<FeatureTreeItemProps> = ({
   onToggleVisibility,
   onRename,
   onDelete,
+  onEditFeature,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editingName, setEditingName] = useState(feature.name);
@@ -311,6 +314,20 @@ export const FeatureTreeItem: React.FC<FeatureTreeItemProps> = ({
               >
                 <Pencil className="w-3.5 h-3.5" />
                 <span>編輯草圖 (Edit Sketch)</span>
+              </button>
+            )}
+
+            {(feature.type === 'EXTRUDE' || feature.type === 'CUT_EXTRUDE' || feature.type === 'SHELL_3D') && !isPastRollback && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowContextMenu(false);
+                  onEditFeature?.(feature.id, feature.type);
+                }}
+                className="w-full text-left px-3 py-1.5 flex items-center gap-2 hover:bg-neutral-800 text-sky-400 font-semibold hover:text-sky-300"
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>編輯特徵 (Edit Feature)</span>
               </button>
             )}
 

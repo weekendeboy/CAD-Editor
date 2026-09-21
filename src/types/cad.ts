@@ -293,14 +293,22 @@ export type DatumPlaneType = 'offset' | 'angle' | 'three-point' | 'face_referenc
 export interface DatumPlaneFeature extends BaseCADFeature {
   type: 'DATUM_PLANE';
   planeType: DatumPlaneType;
-  referencePlaneId: string;       // 參照的基準面 ID（預設面或自訂面）
+  referencePlaneId?: string;       // 參照的基準面 ID（預設面或自訂面）
   referenceFeatureId?: string;    // 參照特徵/基準面 ID（向下相容）
-  offsetDistance: number;          // 平面法向偏移距離 (mm)
+  offsetDistance?: number;         // 平面法向偏移距離 (mm)
   rotationAngle?: number;          // 旋轉弧度 (rad)
   rotationAngleDeg?: number;       // 旋轉度數 (deg，便於 UI 雙向綁定)
   axisOrigin?: Point3D;            // 旋轉軸起點
   axisDirection?: Point3D;         // 旋轉軸單位方向向量
   referenceEdgeEntityId?: string;  // 參照的空間邊或草圖直線圖元 ID (選填)
+  referenceFaceRef?: TopoReference;       // 參照的模型實體表面拓撲參照 (選填)
+  referenceEdgeRef?: TopoReference;       // 參照的模型實體邊線拓撲參照 (選填)
+  point1?: Point3D;                // 三點基準面：第 1 點
+  point2?: Point3D;                // 三點基準面：第 2 點
+  point3?: Point3D;                // 三點基準面：第 3 點
+  point1Ref?: TopoReference;       // 拓撲參照 (選填)
+  point2Ref?: TopoReference;       // 拓撲參照 (選填)
+  point3Ref?: TopoReference;       // 拓撲參照 (選填)
   plane: CustomPlane;              // 由 DatumPlaneEngine 求解出的空間姿態
 }
 

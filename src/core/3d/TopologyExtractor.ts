@@ -219,11 +219,20 @@ export function extractFaceSignatures(
       let adaptor: any = null;
 
       try {
-        gprops = new occ.GProp_GProps();
+        const GPropCtor = occ.GProp_GProps_1 || occ.GProp_GProps;
+        gprops = new GPropCtor();
         if (typeof occ.BRepGProp.SurfaceProperties_1 === 'function') {
-          occ.BRepGProp.SurfaceProperties_1(face, gprops);
-        } else {
-          occ.BRepGProp.SurfaceProperties(face, gprops);
+          try {
+            occ.BRepGProp.SurfaceProperties_1(face, gprops, false, false);
+          } catch (_) {
+            occ.BRepGProp.SurfaceProperties_1(face, gprops);
+          }
+        } else if (typeof occ.BRepGProp.SurfaceProperties === 'function') {
+          try {
+            occ.BRepGProp.SurfaceProperties(face, gprops, false, false);
+          } catch (_) {
+            occ.BRepGProp.SurfaceProperties(face, gprops);
+          }
         }
 
         const area = gprops.Mass();
@@ -235,8 +244,21 @@ export function extractFaceSignatures(
         };
         safeDelete(cMass);
 
-        bbox = new occ.Bnd_Box();
-        occ.BRepBndLib.Add(face, bbox);
+        const BoxCtor = occ.Bnd_Box_1 || occ.Bnd_Box;
+        bbox = new BoxCtor();
+        if (typeof occ.BRepBndLib?.Add === 'function') {
+          try {
+            occ.BRepBndLib.Add(face, bbox, false);
+          } catch (_) {
+            try {
+              occ.BRepBndLib.Add(face, bbox);
+            } catch (_) {}
+          }
+        } else if (typeof occ.BRepBndLib?.Add_1 === 'function') {
+          try {
+            occ.BRepBndLib.Add_1(face, bbox, false);
+          } catch (_) {}
+        }
         const pMin = bbox.CornerMin();
         const pMax = bbox.CornerMax();
         const boundingBox: BoundingBox3D = {
@@ -375,8 +397,15 @@ export function extractEdgeSignatures(
       let curveAdaptor: any = null;
 
       try {
-        gprops = new occ.GProp_GProps();
-        occ.BRepGProp.LinearProperties(edge, gprops);
+        const GPropCtor = occ.GProp_GProps_1 || occ.GProp_GProps;
+        gprops = new GPropCtor();
+        if (typeof occ.BRepGProp.LinearProperties === 'function') {
+          try {
+            occ.BRepGProp.LinearProperties(edge, gprops, false, false);
+          } catch (_) {
+            occ.BRepGProp.LinearProperties(edge, gprops);
+          }
+        }
 
         const length = gprops.Mass();
         const cMass = gprops.CentreOfMass();
@@ -387,8 +416,21 @@ export function extractEdgeSignatures(
         };
         safeDelete(cMass);
 
-        bbox = new occ.Bnd_Box();
-        occ.BRepBndLib.Add(edge, bbox);
+        const BoxCtor = occ.Bnd_Box_1 || occ.Bnd_Box;
+        bbox = new BoxCtor();
+        if (typeof occ.BRepBndLib?.Add === 'function') {
+          try {
+            occ.BRepBndLib.Add(edge, bbox, false);
+          } catch (_) {
+            try {
+              occ.BRepBndLib.Add(edge, bbox);
+            } catch (_) {}
+          }
+        } else if (typeof occ.BRepBndLib?.Add_1 === 'function') {
+          try {
+            occ.BRepBndLib.Add_1(edge, bbox, false);
+          } catch (_) {}
+        }
         const pMin = bbox.CornerMin();
         const pMax = bbox.CornerMax();
         const boundingBox: BoundingBox3D = {

@@ -449,6 +449,9 @@ function createFaceFromProfile(profile: SketchProfile, occ: any): any {
     for (const innerSegs of profile.innerSegments) {
       if (innerSegs.length > 0) {
         const innerWire = buildWireFromSegments(innerSegs, occ);
+        if (typeof innerWire.Reverse === 'function') {
+          innerWire.Reverse();
+        }
         faceMaker.Add(innerWire);
         safeDelete(innerWire);
       }
@@ -457,6 +460,9 @@ function createFaceFromProfile(profile: SketchProfile, occ: any): any {
     for (const innerLoop of profile.innerLoops) {
       if (innerLoop.length > 1) {
         const innerWire = buildWireFromPoints(innerLoop, occ);
+        if (typeof innerWire.Reverse === 'function') {
+          innerWire.Reverse();
+        }
         faceMaker.Add(innerWire);
         safeDelete(innerWire);
       }
@@ -905,6 +911,14 @@ function tessellateSolid(
 
   const mesher = new occ.BRepMesh_IncrementalMesh_2(solid, 0.1, false, 0.5, false);
 
+  const featureId = options?.featureId || 'feature';
+  let topologyMap: any = null;
+  try {
+    topologyMap = extractTopologyMap(solid, occ, featureId, bodyId, generation);
+  } catch (_) {
+    topologyMap = null;
+  }
+
   const vertices: number[] = [];
   const normals: number[] = [];
   const indices: number[] = [];
@@ -998,6 +1012,7 @@ function tessellateSolid(
       normal,
       area: typeof area === 'number' ? Math.round(area * 10000) / 10000 : undefined,
       centroid,
+      topoRef: topologyMap?.faces?.[faceIndex],
     };
     brepFaces.push(runtimeFaceRef);
 
@@ -1142,6 +1157,97 @@ function tessellateSolid(
         }
       }
 
+      let curveType: RuntimeBRepEdgeRef['curveType'] = 'other';
+      let curveAdaptor: any = null;
+      let direction: { x: number; y: number; z: number } | undefined = undefined;
+      let center: { x: number; y: number; z: number } | undefined = undefined;
+      let radius: number | undefined = undefined;
+      let normal: { x: number; y: number; z: number } | undefined = undefined;
+      let startAngle: number | undefined = undefined;
+      let endAngle: number | undefined = undefined;
+      let sampledArcPoints: { x: number; y: number; z: number }[] | undefined = undefined;
+
+      try {
+        curveAdaptor = new occ.BRepAdaptor_Curve_2(edge);
+        const cType = curveAdaptor.GetType();
+        if (cType === occ.GeomAbs_CurveType.GeomAbs_Line) {
+          curveType = 'line';
+          const lineObj = curveAdaptor.Line();
+          const dir = lineObj.Direction();
+          direction = {
+            x: Math.round(dir.X() * 10000) / 10000,
+            y: Math.round(dir.Y() * 10000) / 10000,
+            z: Math.round(dir.Z() * 10000) / 10000,
+          };
+          safeDelete(dir);
+          safeDelete(lineObj);
+        } else if (cType === occ.GeomAbs_CurveType.GeomAbs_Circle) {
+          curveType = 'circle';
+          try {
+            const circ = curveAdaptor.Circle();
+            const locPt = circ.Location();
+            center = {
+              x: Math.round(locPt.X() * 10000) / 10000,
+              y: Math.round(locPt.Y() * 10000) / 10000,
+              z: Math.round(locPt.Z() * 10000) / 10000,
+            };
+            radius = Math.round(circ.Radius() * 10000) / 10000;
+            const ax = circ.Axis();
+            const axDir = ax.Direction();
+            normal = {
+              x: Math.round(axDir.X() * 10000) / 10000,
+              y: Math.round(axDir.Y() * 10000) / 10000,
+              z: Math.round(axDir.Z() * 10000) / 10000,
+            };
+            startAngle = curveAdaptor.FirstParameter();
+            endAngle = curveAdaptor.LastParameter();
+
+            safeDelete(axDir);
+            safeDelete(ax);
+            safeDelete(locPt);
+            safeDelete(circ);
+
+            // 使用 curveAdaptor.Value 沿曲線精密取樣 32 段
+            if (typeof curveAdaptor.Value === 'function' && typeof startAngle === 'number' && typeof endAngle === 'number') {
+              const numSegs = 32;
+              sampledArcPoints = [];
+              for (let s = 0; s <= numSegs; s++) {
+                const u = startAngle + (endAngle - startAngle) * (s / numSegs);
+                const pVal = curveAdaptor.Value(u);
+                sampledArcPoints.push({
+                  x: Math.round(pVal.X() * 10000) / 10000,
+                  y: Math.round(pVal.Y() * 10000) / 10000,
+                  z: Math.round(pVal.Z() * 10000) / 10000,
+                });
+                safeDelete(pVal);
+              }
+            }
+          } catch (eCirc) {
+            console.warn('Failed to extract circle parameters from curveAdaptor:', eCirc);
+          }
+        } else if (cType === occ.GeomAbs_CurveType.GeomAbs_Ellipse) {
+          curveType = 'ellipse';
+        } else if (
+          cType === occ.GeomAbs_CurveType.GeomAbs_BSplineCurve ||
+          cType === occ.GeomAbs_CurveType.GeomAbs_BezierCurve
+        ) {
+          curveType = 'bspline';
+        }
+      } catch (_) {
+        curveType = 'other';
+      } finally {
+        safeDelete(curveAdaptor);
+      }
+
+      if (!extracted && sampledArcPoints && sampledArcPoints.length >= 2) {
+        for (let s = 0; s < sampledArcPoints.length - 1; s++) {
+          const p1 = sampledArcPoints[s];
+          const p2 = sampledArcPoints[s + 1];
+          edges.push(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
+        }
+        extracted = true;
+      }
+
       if (!extracted) {
         const vExp = new occ.TopExp_Explorer_2(
           edge,
@@ -1175,39 +1281,6 @@ function tessellateSolid(
       }
 
       const segmentCount = edges.length / 6 - startSegment;
-
-      let curveType: RuntimeBRepEdgeRef['curveType'] = 'other';
-      let curveAdaptor: any = null;
-      let direction: { x: number; y: number; z: number } | undefined = undefined;
-      try {
-        curveAdaptor = new occ.BRepAdaptor_Curve_2(edge);
-        const cType = curveAdaptor.GetType();
-        if (cType === occ.GeomAbs_CurveType.GeomAbs_Line) {
-          curveType = 'line';
-          const lineObj = curveAdaptor.Line();
-          const dir = lineObj.Direction();
-          direction = {
-            x: Math.round(dir.X() * 10000) / 10000,
-            y: Math.round(dir.Y() * 10000) / 10000,
-            z: Math.round(dir.Z() * 10000) / 10000,
-          };
-          safeDelete(dir);
-          safeDelete(lineObj);
-        } else if (cType === occ.GeomAbs_CurveType.GeomAbs_Circle) {
-          curveType = 'circle';
-        } else if (cType === occ.GeomAbs_CurveType.GeomAbs_Ellipse) {
-          curveType = 'ellipse';
-        } else if (
-          cType === occ.GeomAbs_CurveType.GeomAbs_BSplineCurve ||
-          cType === occ.GeomAbs_CurveType.GeomAbs_BezierCurve
-        ) {
-          curveType = 'bspline';
-        }
-      } catch (_) {
-        curveType = 'other';
-      } finally {
-        safeDelete(curveAdaptor);
-      }
 
       let length: number | undefined = undefined;
       try {
@@ -1243,6 +1316,13 @@ function tessellateSolid(
         direction,
         startPoint,
         endPoint,
+        center,
+        radius,
+        normal,
+        startAngle,
+        endAngle,
+        sampledPoints: sampledArcPoints,
+        topoRef: topologyMap?.edges?.[edgeIndex],
       };
       brepEdges.push(runtimeEdgeRef);
 
@@ -1299,6 +1379,7 @@ function tessellateSolid(
           y: Math.round(pt.Y() * 10000) / 10000,
           z: Math.round(pt.Z() * 10000) / 10000,
         },
+        topoRef: topologyMap?.vertices?.[vertexIndex],
       });
       safeDelete(pt);
       vertexIndex++;
@@ -1417,7 +1498,19 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               let boundingBox: BodyResult['boundingBox'] = undefined;
               try {
                 const bbox = new occ.Bnd_Box_1();
-                occ.BRepBndLib.Add(currentSolid, bbox);
+                if (typeof occ.BRepBndLib?.Add === 'function') {
+                  try {
+                    occ.BRepBndLib.Add(currentSolid, bbox, false);
+                  } catch (_) {
+                    try {
+                      occ.BRepBndLib.Add(currentSolid, bbox);
+                    } catch (_) {}
+                  }
+                } else if (typeof occ.BRepBndLib?.Add_1 === 'function') {
+                  try {
+                    occ.BRepBndLib.Add_1(currentSolid, bbox, false);
+                  } catch (_) {}
+                }
                 const minPnt = bbox.CornerMin();
                 const maxPnt = bbox.CornerMax();
                 boundingBox = {
@@ -2182,6 +2275,89 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 });
               }
 
+              // 2. 若傳入 edgeIndices 但沒有 edgeRefs，進行向下相容映射
+              if (validOccEdges.length === 0 && op.fillet3D?.edgeIndices && op.fillet3D.edgeIndices.length > 0) {
+                for (const idx of op.fillet3D.edgeIndices) {
+                  if (idx >= 0 && idx < topologyMap.edges.length) {
+                    const fallbackRef = topologyMap.edges[idx];
+                    const res = resolveTopoReferenceToOCC(fallbackRef, topologyMap, occ, currentSolid);
+                    if (res.status === 'resolved' && res.occShape && !res.occShape.IsNull()) {
+                      validOccEdges.push(res.occShape);
+                    }
+                  }
+                }
+              }
+
+              // 3. 若均未選取特定邊線，依照 edgeSelectionMode (all / vertical / horizontal) 自動篩選
+              if (validOccEdges.length === 0 && (!edgeRefs || edgeRefs.length === 0) && (!op.fillet3D?.edgeIndices || op.fillet3D.edgeIndices.length === 0)) {
+                const mode = op.fillet3D?.edgeSelectionMode || 'all';
+                for (const edgeRef of topologyMap.edges) {
+                  let matches = false;
+                  if (mode === 'all') {
+                    matches = true;
+                  } else if (mode === 'vertical' && edgeRef.signature?.direction) {
+                    matches = Math.abs(edgeRef.signature.direction.z) > 0.9;
+                  } else if (mode === 'horizontal' && edgeRef.signature?.direction) {
+                    matches = Math.abs(edgeRef.signature.direction.z) < 0.1;
+                  }
+                  if (matches) {
+                    const res = resolveTopoReferenceToOCC(edgeRef, topologyMap, occ, currentSolid);
+                    if (res.status === 'resolved' && res.occShape && !res.occShape.IsNull()) {
+                      if (!occ.BRep_Tool.Degenerated(res.occShape)) {
+                        validOccEdges.push(res.occShape);
+                      } else {
+                        safeDelete(res.occShape);
+                      }
+                    }
+                  }
+                }
+
+                // 備援方案：若 topologyMap 提取邊線為空，直接透過 OCC TopExp_Explorer 遍歷實體所有 Edge
+                if (validOccEdges.length === 0) {
+                  const edgeExp = new occ.TopExp_Explorer_2(
+                    currentSolid,
+                    occ.TopAbs_ShapeEnum.TopAbs_EDGE,
+                    occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+                  );
+                  const visitedEdgeHashes = new Set<number>();
+                  while (edgeExp.More()) {
+                    const candidateEdge = occ.TopoDS.Edge_1(edgeExp.Current());
+                    const h = candidateEdge.HashCode(1000000);
+                    if (!visitedEdgeHashes.has(h) && !occ.BRep_Tool.Degenerated(candidateEdge)) {
+                      visitedEdgeHashes.add(h);
+                      let matches = true;
+                      if (mode === 'vertical' || mode === 'horizontal') {
+                        try {
+                          const curveAdaptor = new occ.BRepAdaptor_Curve_2(candidateEdge);
+                          if (curveAdaptor.GetType() === occ.GeomAbs_CurveType.GeomAbs_Line) {
+                            const p1 = curveAdaptor.Value(curveAdaptor.FirstParameter());
+                            const p2 = curveAdaptor.Value(curveAdaptor.LastParameter());
+                            const dz = Math.abs(p2.Z() - p1.Z());
+                            const dist = p1.Distance(p2);
+                            if (dist > 1e-4) {
+                              const isVert = (dz / dist) > 0.9;
+                              matches = mode === 'vertical' ? isVert : !isVert;
+                            }
+                            safeDelete(p1);
+                            safeDelete(p2);
+                          }
+                          safeDelete(curveAdaptor);
+                        } catch (_) {}
+                      }
+                      if (matches) {
+                        validOccEdges.push(candidateEdge);
+                      } else {
+                        safeDelete(candidateEdge);
+                      }
+                    } else {
+                      safeDelete(candidateEdge);
+                    }
+                    edgeExp.Next();
+                  }
+                  safeDelete(edgeExp);
+                }
+              }
+
               if (validOccEdges.length === 0) {
                 featureDiag.push({
                   level: 'error',
@@ -2200,6 +2376,8 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   for (const edge of validOccEdges) {
                     if (typeof fillet.Add_2 === 'function') {
                       fillet.Add_2(radius, edge);
+                    } else if (typeof fillet.Add_1 === 'function') {
+                      fillet.Add_1(radius, edge);
                     } else {
                       fillet.Add(radius, edge);
                     }
@@ -2303,6 +2481,89 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 });
               }
 
+              // 2. 若傳入 edgeIndices 但沒有 edgeRefs，進行向下相容映射
+              if (validOccEdges.length === 0 && op.chamfer3D?.edgeIndices && op.chamfer3D.edgeIndices.length > 0) {
+                for (const idx of op.chamfer3D.edgeIndices) {
+                  if (idx >= 0 && idx < topologyMap.edges.length) {
+                    const fallbackRef = topologyMap.edges[idx];
+                    const res = resolveTopoReferenceToOCC(fallbackRef, topologyMap, occ, currentSolid);
+                    if (res.status === 'resolved' && res.occShape && !res.occShape.IsNull()) {
+                      validOccEdges.push(res.occShape);
+                    }
+                  }
+                }
+              }
+
+              // 3. 若均未選取特定邊線，依照 edgeSelectionMode (all / vertical / horizontal) 自動篩選
+              if (validOccEdges.length === 0 && (!edgeRefs || edgeRefs.length === 0) && (!op.chamfer3D?.edgeIndices || op.chamfer3D.edgeIndices.length === 0)) {
+                const mode = op.chamfer3D?.edgeSelectionMode || 'all';
+                for (const edgeRef of topologyMap.edges) {
+                  let matches = false;
+                  if (mode === 'all') {
+                    matches = true;
+                  } else if (mode === 'vertical' && edgeRef.signature?.direction) {
+                    matches = Math.abs(edgeRef.signature.direction.z) > 0.9;
+                  } else if (mode === 'horizontal' && edgeRef.signature?.direction) {
+                    matches = Math.abs(edgeRef.signature.direction.z) < 0.1;
+                  }
+                  if (matches) {
+                    const res = resolveTopoReferenceToOCC(edgeRef, topologyMap, occ, currentSolid);
+                    if (res.status === 'resolved' && res.occShape && !res.occShape.IsNull()) {
+                      if (!occ.BRep_Tool.Degenerated(res.occShape)) {
+                        validOccEdges.push(res.occShape);
+                      } else {
+                        safeDelete(res.occShape);
+                      }
+                    }
+                  }
+                }
+
+                // 備援方案：若 topologyMap 提取邊線為空，直接透過 OCC TopExp_Explorer 遍歷實體所有 Edge
+                if (validOccEdges.length === 0) {
+                  const edgeExp = new occ.TopExp_Explorer_2(
+                    currentSolid,
+                    occ.TopAbs_ShapeEnum.TopAbs_EDGE,
+                    occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+                  );
+                  const visitedEdgeHashes = new Set<number>();
+                  while (edgeExp.More()) {
+                    const candidateEdge = occ.TopoDS.Edge_1(edgeExp.Current());
+                    const h = candidateEdge.HashCode(1000000);
+                    if (!visitedEdgeHashes.has(h) && !occ.BRep_Tool.Degenerated(candidateEdge)) {
+                      visitedEdgeHashes.add(h);
+                      let matches = true;
+                      if (mode === 'vertical' || mode === 'horizontal') {
+                        try {
+                          const curveAdaptor = new occ.BRepAdaptor_Curve_2(candidateEdge);
+                          if (curveAdaptor.GetType() === occ.GeomAbs_CurveType.GeomAbs_Line) {
+                            const p1 = curveAdaptor.Value(curveAdaptor.FirstParameter());
+                            const p2 = curveAdaptor.Value(curveAdaptor.LastParameter());
+                            const dz = Math.abs(p2.Z() - p1.Z());
+                            const dist = p1.Distance(p2);
+                            if (dist > 1e-4) {
+                              const isVert = (dz / dist) > 0.9;
+                              matches = mode === 'vertical' ? isVert : !isVert;
+                            }
+                            safeDelete(p1);
+                            safeDelete(p2);
+                          }
+                          safeDelete(curveAdaptor);
+                        } catch (_) {}
+                      }
+                      if (matches) {
+                        validOccEdges.push(candidateEdge);
+                      } else {
+                        safeDelete(candidateEdge);
+                      }
+                    } else {
+                      safeDelete(candidateEdge);
+                    }
+                    edgeExp.Next();
+                  }
+                  safeDelete(edgeExp);
+                }
+              }
+
               if (validOccEdges.length === 0) {
                 featureDiag.push({
                   level: 'error',
@@ -2389,6 +2650,17 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
               for (const ref of removedFaceRefs) {
                 const res = resolveTopoReferenceToOCC(ref, topologyMap, occ, currentSolid);
+                console.log(`[SolidWorker SHELL_3D Diagnostic] Ref resolution:`, {
+                  refPersistentId: ref?.persistentId,
+                  refFeatureId: ref?.featureId,
+                  refGeneration: ref?.generation,
+                  status: res.status,
+                  error: res.error,
+                  resMessage: res.resolution?.message,
+                  mapBodyId: topologyMap?.bodyId,
+                  mapGeneration: (topologyMap as any)?.generation,
+                  mapFaceCount: topologyMap?.faces?.length,
+                });
                 if (
                   res.status === 'resolved' &&
                   res.occShape &&
@@ -2406,6 +2678,8 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   });
                 }
               }
+
+              console.log(`[SolidWorker SHELL_3D Diagnostic] Total removedFaceRefs: ${removedFaceRefs.length}, validOccFaces: ${validOccFaces.length}, unresolved: ${unresolvedCount}`);
 
               if (unresolvedCount > 0 && removedFaceRefs.length > 0) {
                 featureDiag.push({
@@ -2485,7 +2759,9 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
                   if (hollow) {
                     hollow.Build();
-                    if (hollow.IsDone()) {
+                    const isDone = hollow.IsDone();
+                    console.log(`[SolidWorker SHELL_3D Diagnostic] BRepOffsetAPI_MakeThickSolid Build complete, IsDone: ${isDone}`);
+                    if (isDone) {
                       const newSolid = hollow.Shape();
                       safeDelete(currentSolid);
                       currentSolid = newSolid;
@@ -2617,7 +2893,19 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           let boundingBox: BodyResult['boundingBox'] = undefined;
           try {
             const bbox = new occ.Bnd_Box_1();
-            occ.BRepBndLib.Add(currentSolid, bbox);
+            if (typeof occ.BRepBndLib?.Add === 'function') {
+              try {
+                occ.BRepBndLib.Add(currentSolid, bbox, false);
+              } catch (_) {
+                try {
+                  occ.BRepBndLib.Add(currentSolid, bbox);
+                } catch (_) {}
+              }
+            } else if (typeof occ.BRepBndLib?.Add_1 === 'function') {
+              try {
+                occ.BRepBndLib.Add_1(currentSolid, bbox, false);
+              } catch (_) {}
+            }
             const minPnt = bbox.CornerMin();
             const maxPnt = bbox.CornerMax();
             boundingBox = {
@@ -2769,6 +3057,430 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           } as SolidTaskResponse,
           transferBuffers
         );
+        break;
+      }
+
+      case 'PREVIEW_OPERATION': {
+        if (!oc) throw new Error('Worker not initialized');
+        if (!currentSolid || (typeof currentSolid.IsNull === 'function' && currentSolid.IsNull())) {
+          throw new Error('No active solid body available for preview');
+        }
+        const occ = oc;
+        const op = req.payload?.operation as FeatureEvalOp;
+        if (!op) {
+          throw new Error('No operation provided for preview');
+        }
+
+        let tempSolid: any = null;
+        try {
+          const copyMaker = new occ.BRepBuilderAPI_Copy_2(currentSolid, true, false);
+          tempSolid = copyMaker.Shape();
+          safeDelete(copyMaker);
+        } catch (_) {
+          const copyMaker = new occ.BRepBuilderAPI_Copy_1(currentSolid, true);
+          tempSolid = copyMaker.Shape();
+          safeDelete(copyMaker);
+        }
+
+        const validOccEdges: any[] = [];
+        let previewMaker: any = null;
+
+        try {
+          if (op.type === 'FILLET_3D') {
+            const radius = typeof op.fillet3D?.radius === 'number' && !isNaN(op.fillet3D.radius) ? op.fillet3D.radius : 2.0;
+            const edgeRefs = op.fillet3D?.edgeRefs || [];
+            const edgeIndices = op.fillet3D?.edgeIndices || [];
+            const mode = op.fillet3D?.edgeSelectionMode || 'all';
+
+            // 1. Resolve explicit edgeRefs
+            if (edgeRefs.length > 0) {
+              const refFeatId = edgeRefs[0]?.featureId || 'preview-base';
+              const refGen = edgeRefs[0]?.generation ?? 1;
+              const topologyMap = extractTopologyMap(tempSolid, occ, refFeatId, 'main-body', refGen);
+              for (const ref of edgeRefs) {
+                const res = resolveTopoReferenceToOCC(ref, topologyMap, occ, tempSolid);
+                if (res.status === 'resolved' && res.occShape && !res.occShape.IsNull()) {
+                  if (!occ.BRep_Tool.Degenerated(res.occShape)) {
+                    validOccEdges.push(res.occShape);
+                  } else {
+                    safeDelete(res.occShape);
+                  }
+                }
+              }
+            }
+
+            // 2. Resolve edgeIndices fallback
+            if (validOccEdges.length === 0 && edgeIndices.length > 0) {
+              const topologyMap = extractTopologyMap(tempSolid, occ, 'preview-base', 'main-body', 0);
+              for (const idx of edgeIndices) {
+                if (idx >= 0 && idx < topologyMap.edges.length) {
+                  const fallbackRef = topologyMap.edges[idx];
+                  const res = resolveTopoReferenceToOCC(fallbackRef, topologyMap, occ, tempSolid);
+                  if (res.status === 'resolved' && res.occShape && !res.occShape.IsNull()) {
+                    validOccEdges.push(res.occShape);
+                  }
+                }
+              }
+            }
+
+            // 3. Fallback to mode (all, vertical, horizontal)
+            if (validOccEdges.length === 0 && edgeRefs.length === 0 && edgeIndices.length === 0) {
+              const edgeExp = new occ.TopExp_Explorer_2(
+                tempSolid,
+                occ.TopAbs_ShapeEnum.TopAbs_EDGE,
+                occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+              );
+              const visited = new Set<number>();
+              while (edgeExp.More()) {
+                const candidateEdge = occ.TopoDS.Edge_1(edgeExp.Current());
+                const h = candidateEdge.HashCode(1000000);
+                if (!visited.has(h) && !occ.BRep_Tool.Degenerated(candidateEdge)) {
+                  visited.add(h);
+                  let matches = true;
+                  if (mode === 'vertical' || mode === 'horizontal') {
+                    try {
+                      const curveAdaptor = new occ.BRepAdaptor_Curve_2(candidateEdge);
+                      if (curveAdaptor.GetType() === occ.GeomAbs_CurveType.GeomAbs_Line) {
+                        const p1 = curveAdaptor.Value(curveAdaptor.FirstParameter());
+                        const p2 = curveAdaptor.Value(curveAdaptor.LastParameter());
+                        const dz = Math.abs(p2.Z() - p1.Z());
+                        const dist = p1.Distance(p2);
+                        if (dist > 1e-4) {
+                          const isVert = (dz / dist) > 0.9;
+                          matches = mode === 'vertical' ? isVert : !isVert;
+                        }
+                        safeDelete(p1);
+                        safeDelete(p2);
+                      }
+                      safeDelete(curveAdaptor);
+                    } catch (_) {}
+                  }
+                  if (matches) {
+                    validOccEdges.push(candidateEdge);
+                  } else {
+                    safeDelete(candidateEdge);
+                  }
+                } else {
+                  safeDelete(candidateEdge);
+                }
+                edgeExp.Next();
+              }
+              safeDelete(edgeExp);
+            }
+
+            if (validOccEdges.length === 0) {
+              throw new Error('No valid edges found for Fillet preview');
+            }
+
+            previewMaker = typeof occ.BRepFilletAPI_MakeFillet_1 === 'function'
+              ? new occ.BRepFilletAPI_MakeFillet_1(tempSolid, 0)
+              : new occ.BRepFilletAPI_MakeFillet(tempSolid, 0);
+
+            for (const edge of validOccEdges) {
+              if (typeof previewMaker.Add_2 === 'function') {
+                previewMaker.Add_2(radius, edge);
+              } else if (typeof previewMaker.Add_1 === 'function') {
+                previewMaker.Add_1(radius, edge);
+              } else {
+                previewMaker.Add(radius, edge);
+              }
+            }
+
+            previewMaker.Build();
+            if (!previewMaker.IsDone()) {
+              throw new Error(`Fillet preview failed to build with radius ${radius}`);
+            }
+
+            const filletedShape = previewMaker.Shape();
+            safeDelete(tempSolid);
+            tempSolid = filletedShape;
+
+          } else if (op.type === 'CHAMFER_3D') {
+            const distance = typeof op.chamfer3D?.distance === 'number' && !isNaN(op.chamfer3D.distance) ? op.chamfer3D.distance : 2.0;
+            const edgeRefs = op.chamfer3D?.edgeRefs || [];
+            const edgeIndices = op.chamfer3D?.edgeIndices || [];
+            const mode = op.chamfer3D?.edgeSelectionMode || 'all';
+
+            // 1. Resolve explicit edgeRefs
+            if (edgeRefs.length > 0) {
+              const refFeatId = edgeRefs[0]?.featureId || 'preview-base';
+              const refGen = edgeRefs[0]?.generation ?? 1;
+              const topologyMap = extractTopologyMap(tempSolid, occ, refFeatId, 'main-body', refGen);
+              for (const ref of edgeRefs) {
+                const res = resolveTopoReferenceToOCC(ref, topologyMap, occ, tempSolid);
+                if (res.status === 'resolved' && res.occShape && !res.occShape.IsNull()) {
+                  if (!occ.BRep_Tool.Degenerated(res.occShape)) {
+                    validOccEdges.push(res.occShape);
+                  } else {
+                    safeDelete(res.occShape);
+                  }
+                }
+              }
+            }
+
+            // 2. Resolve edgeIndices fallback
+            if (validOccEdges.length === 0 && edgeIndices.length > 0) {
+              const topologyMap = extractTopologyMap(tempSolid, occ, 'preview-base', 'main-body', 0);
+              for (const idx of edgeIndices) {
+                if (idx >= 0 && idx < topologyMap.edges.length) {
+                  const fallbackRef = topologyMap.edges[idx];
+                  const res = resolveTopoReferenceToOCC(fallbackRef, topologyMap, occ, tempSolid);
+                  if (res.status === 'resolved' && res.occShape && !res.occShape.IsNull()) {
+                    validOccEdges.push(res.occShape);
+                  }
+                }
+              }
+            }
+
+            // 3. Fallback to mode (all, vertical, horizontal)
+            if (validOccEdges.length === 0 && edgeRefs.length === 0 && edgeIndices.length === 0) {
+              const edgeExp = new occ.TopExp_Explorer_2(
+                tempSolid,
+                occ.TopAbs_ShapeEnum.TopAbs_EDGE,
+                occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+              );
+              const visited = new Set<number>();
+              while (edgeExp.More()) {
+                const candidateEdge = occ.TopoDS.Edge_1(edgeExp.Current());
+                const h = candidateEdge.HashCode(1000000);
+                if (!visited.has(h) && !occ.BRep_Tool.Degenerated(candidateEdge)) {
+                  visited.add(h);
+                  let matches = true;
+                  if (mode === 'vertical' || mode === 'horizontal') {
+                    try {
+                      const curveAdaptor = new occ.BRepAdaptor_Curve_2(candidateEdge);
+                      if (curveAdaptor.GetType() === occ.GeomAbs_CurveType.GeomAbs_Line) {
+                        const p1 = curveAdaptor.Value(curveAdaptor.FirstParameter());
+                        const p2 = curveAdaptor.Value(curveAdaptor.LastParameter());
+                        const dz = Math.abs(p2.Z() - p1.Z());
+                        const dist = p1.Distance(p2);
+                        if (dist > 1e-4) {
+                          const isVert = (dz / dist) > 0.9;
+                          matches = mode === 'vertical' ? isVert : !isVert;
+                        }
+                        safeDelete(p1);
+                        safeDelete(p2);
+                      }
+                      safeDelete(curveAdaptor);
+                    } catch (_) {}
+                  }
+                  if (matches) {
+                    validOccEdges.push(candidateEdge);
+                  } else {
+                    safeDelete(candidateEdge);
+                  }
+                } else {
+                  safeDelete(candidateEdge);
+                }
+                edgeExp.Next();
+              }
+              safeDelete(edgeExp);
+            }
+
+            if (validOccEdges.length === 0) {
+              throw new Error('No valid edges found for Chamfer preview');
+            }
+
+            previewMaker = typeof occ.BRepFilletAPI_MakeChamfer_1 === 'function'
+              ? new occ.BRepFilletAPI_MakeChamfer_1(tempSolid)
+              : new occ.BRepFilletAPI_MakeChamfer(tempSolid);
+
+            for (const edge of validOccEdges) {
+              if (typeof previewMaker.Add_2 === 'function') {
+                previewMaker.Add_2(distance, edge);
+              } else {
+                previewMaker.Add(distance, edge);
+              }
+            }
+
+            previewMaker.Build();
+            if (!previewMaker.IsDone()) {
+              throw new Error(`Chamfer preview failed to build with distance ${distance}`);
+            }
+
+            const chamferedShape = previewMaker.Shape();
+            safeDelete(tempSolid);
+            tempSolid = chamferedShape;
+          } else if (op.type === 'SHELL_3D') {
+            const rawThickness =
+              typeof op.shell3D?.thickness === 'number' && !isNaN(op.shell3D.thickness)
+                ? Math.max(0.1, op.shell3D.thickness)
+                : 1.5;
+            const isInside = op.shell3D?.direction !== 'outside';
+            const offset = isInside ? -Math.abs(rawThickness) : Math.abs(rawThickness);
+
+            const removedFaceRefs = op.shell3D?.removedFaceRefs || [];
+            const faceIndices = op.shell3D?.faceIndices || [];
+            const topologyMap = extractTopologyMap(
+              tempSolid,
+              occ,
+              'preview-base',
+              'main-body',
+              0
+            );
+
+            const validOccFaces: any[] = [];
+            for (const ref of removedFaceRefs) {
+              const targetRef = (ref as any)?.topoRef || ref;
+              if (targetRef) {
+                const res = resolveTopoReferenceToOCC(targetRef, topologyMap, occ, tempSolid);
+                if (
+                  res.status === 'resolved' &&
+                  res.occShape &&
+                  (typeof res.occShape.IsNull !== 'function' || !res.occShape.IsNull())
+                ) {
+                  validOccFaces.push(res.occShape);
+                }
+              }
+            }
+
+            // 索引 Fallback 機制（當依據 Topology Reference 解析失敗時，退回使用面索引從 topologyMap 提面）
+            if (validOccFaces.length === 0 && faceIndices.length > 0) {
+              for (const idx of faceIndices) {
+                if (idx >= 0 && idx < topologyMap.faces.length) {
+                  const fallbackRef = topologyMap.faces[idx];
+                  const res = resolveTopoReferenceToOCC(fallbackRef, topologyMap, occ, tempSolid);
+                  if (
+                    res.status === 'resolved' &&
+                    res.occShape &&
+                    (typeof res.occShape.IsNull !== 'function' || !res.occShape.IsNull())
+                  ) {
+                    validOccFaces.push(res.occShape);
+                  }
+                }
+              }
+            }
+
+            // 防呆判斷：若仍無有效開口面，直接拋出例外，避免產生看似沒開口的全封閉空心網格
+            if (validOccFaces.length === 0) {
+              throw new Error('薄殼預覽尚未解析出有效的開口面 (Shell preview requires resolved open face)');
+            }
+
+            const closingFaces = new occ.TopTools_ListOfShape_1();
+            for (const face of validOccFaces) {
+              if (typeof closingFaces.Append_1 === 'function') {
+                closingFaces.Append_1(face);
+              } else {
+                closingFaces.Append(face);
+              }
+            }
+
+            let hollow: any = null;
+            try {
+              if (typeof occ.BRepOffsetAPI_MakeThickSolid_ByJoin === 'function') {
+                hollow = new occ.BRepOffsetAPI_MakeThickSolid_ByJoin(
+                  tempSolid,
+                  closingFaces,
+                  offset,
+                  1e-4,
+                  0,
+                  false,
+                  false,
+                  0,
+                  false
+                );
+              } else if (typeof occ.BRepOffsetAPI_MakeThickSolid_1 === 'function') {
+                hollow = new occ.BRepOffsetAPI_MakeThickSolid_1();
+                hollow.MakeThickSolidByJoin(
+                  tempSolid,
+                  closingFaces,
+                  offset,
+                  1e-4,
+                  0,
+                  false,
+                  false,
+                  0,
+                  false
+                );
+              } else if (typeof occ.BRepOffsetAPI_MakeThickSolid_2 === 'function') {
+                hollow = new occ.BRepOffsetAPI_MakeThickSolid_2(
+                  tempSolid,
+                  closingFaces,
+                  offset,
+                  1e-4
+                );
+              } else {
+                hollow = new occ.BRepOffsetAPI_MakeThickSolid();
+                if (typeof hollow.MakeThickSolidByJoin === 'function') {
+                  hollow.MakeThickSolidByJoin(
+                    tempSolid,
+                    closingFaces,
+                    offset,
+                    1e-4,
+                    0,
+                    false,
+                    false,
+                    0,
+                    false
+                  );
+                }
+              }
+
+              if (hollow) {
+                hollow.Build();
+                if (hollow.IsDone()) {
+                  const shelledShape = hollow.Shape();
+                  safeDelete(tempSolid);
+                  tempSolid = shelledShape;
+                } else {
+                  throw new Error(`Shell preview failed to build thick solid with thickness ${rawThickness}`);
+                }
+              } else {
+                throw new Error('Shell preview API not available in OpenCASCADE environment');
+              }
+            } finally {
+              for (const face of validOccFaces) {
+                safeDelete(face);
+              }
+              safeDelete(closingFaces);
+              safeDelete(hollow);
+            }
+          } else {
+            throw new Error(`Unsupported preview operation type: ${op.type}`);
+          }
+
+          const meshData = tessellateSolid(tempSolid, occ);
+
+          const vClone = meshData.vertices.slice();
+          const nClone = meshData.normals.slice();
+          const iClone = meshData.indices.slice();
+          const eClone = meshData.edgeVertices ? meshData.edgeVertices.slice() : undefined;
+
+          const safeMeshData: MeshResult = {
+            ...meshData,
+            vertices: vClone,
+            normals: nClone,
+            indices: iClone,
+            edgeVertices: eClone,
+            edges: eClone,
+          };
+
+          const transferBuffers: Transferable[] = [vClone.buffer, nClone.buffer, iClone.buffer];
+          if (eClone) transferBuffers.push(eClone.buffer);
+
+          _self.postMessage(
+            {
+              taskId: req.taskId,
+              type: req.type,
+              success: true,
+              data: safeMeshData,
+            } as SolidTaskResponse,
+            transferBuffers
+          );
+        } catch (previewErr: any) {
+          _self.postMessage({
+            taskId: req.taskId,
+            type: req.type,
+            success: false,
+            error: previewErr?.message || String(previewErr),
+          } as SolidTaskResponse);
+        } finally {
+          for (const e of validOccEdges) {
+            safeDelete(e);
+          }
+          safeDelete(previewMaker);
+          safeDelete(tempSolid);
+        }
         break;
       }
 

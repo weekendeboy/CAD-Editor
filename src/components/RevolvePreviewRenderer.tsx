@@ -646,6 +646,7 @@ const RevolvePreviewMesh: React.FC<RevolvePreviewMeshProps> = ({ preview }) => {
   }, [arcVisual]);
 
   const toggleDirection = useCallback(() => {
+    window.dispatchEvent(new CustomEvent('cad-toggle-revolve-direction'));
     setRevolvePreview({
       ...preview,
       reversed: !preview.reversed,
@@ -653,6 +654,7 @@ const RevolvePreviewMesh: React.FC<RevolvePreviewMeshProps> = ({ preview }) => {
   }, [preview, setRevolvePreview]);
 
   const handleSelectAxisIn3D = useCallback((lineId: string) => {
+    window.dispatchEvent(new CustomEvent('cad-set-revolve-axis', { detail: lineId }));
     setRevolveAxisEntityId(lineId);
     setRevolvePreview({
       ...preview,

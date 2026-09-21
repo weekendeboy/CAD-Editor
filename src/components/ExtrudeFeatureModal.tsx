@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useCADStore } from '../store/cadStore';
 import { findClosedProfiles } from '../core/2d/TopologyEngine';
 import { SketchFeature, ExtrudeFeature, CutExtrudeFeature } from '../types/cad';
@@ -18,81 +18,113 @@ import {
 export interface ExtrudeFeatureModalProps {
   isOpen: boolean;
   mode: 'EXTRUDE' | 'CUT_EXTRUDE';
+  featureId?: string;
   onClose: () => void;
 }
 
-export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
-  isOpen,
+interface ExtrudeFeatureModalContentProps {
+  mode: 'EXTRUDE' | 'CUT_EXTRUDE';
+  featureId?: string;
+  onClose: () => void;
+}
+
+/**
+ * 內部內容元件：僅在 isOpen 為 true 時掛載。
+ * 初始狀態於建構時一次性計算，杜絕 useEffect 依賴改變導致使用者輸入被重設。
+ */
+const ExtrudeFeatureModalContent: React.FC<ExtrudeFeatureModalContentProps> = ({
   mode,
+  featureId,
   onClose,
 }) => {
+  const document = useCADStore((s) => s.document);
+  const activeSketchId = useCADStore((s) => s.activeSketchId);
+  const addFeature = useCADStore((s) => s.addFeature);
+  const updateFeature = useCADStore((s) => s.updateFeature);
+  const viewMode = useCADStore((s) => s.viewMode);
+  const setViewMode = useCADStore((s) => s.setViewMode);
+  const setExtrudePreview = useCADStore((s) => s.setExtrudePreview);
 
-  const {
-    document,
-    activeSketchId,
-    addFeature,
-    viewMode,
-    setViewMode,
-    setExtrudePreview,
-  } = useCADStore();
-
-  // 取得目前特徵樹中的所有草圖特徵
-  const sketches = (document?.featureTree || []).filter(
-    (f): f is SketchFeature => f.type === 'SKETCH'
+  const featureTree = document?.featureTree || [];
+  const sketches = useMemo(
+    () => featureTree.filter((f): f is SketchFeature => f.type === 'SKETCH'),
+    [featureTree]
   );
 
-  // 表單狀態
-  const [featureName, setFeatureName] = useState('');
-  const [selectedSketchId, setSelectedSketchId] = useState('');
-  const [depth, setDepth] = useState<number>(20);
-  const [direction, setDirection] = useState<'normal' | 'reversed' | 'mid-plane'>('normal');
-  const [throughAll, setThroughAll] = useState(false);
-
-  const targetSketch = sketches.find((s) => s.id === selectedSketchId);
-  const computedProfiles = React.useMemo(() => {
-    if (!targetSketch) return [];
-    if (targetSketch.profiles && targetSketch.profiles.length > 0) return targetSketch.profiles;
-    return findClosedProfiles(targetSketch.entities, targetSketch.constraints);
-  }, [targetSketch]);
-
   const isBoss = mode === 'EXTRUDE';
+  const isEditMode = Boolean(featureId);
 
-  // 當彈窗開啟時，若不在 3D 模式自動切換為 3D 視角以利預覽
+  // 取得目標特徵（若為編輯模式）
+  const targetFeature = useMemo(() => {
+    if (!featureId) return null;
+    const f = featureTree.find((item) => item.id === featureId);
+    if (f && (f.type === 'EXTRUDE' || f.type === 'CUT_EXTRUDE')) {
+      return f as ExtrudeFeature | CutExtrudeFeature;
+    }
+    return null;
+  }, [featureTree, featureId]);
+
+  // 表單初始狀態 (僅在 Component Mount 時一次性計算，避免任何 rerender 覆寫使用者輸入)
+  const [featureName, setFeatureName] = useState<string>(() => {
+    if (targetFeature) {
+      return targetFeature.name || (isBoss ? 'Extrude1' : 'Cut-Extrude1');
+    }
+    if (mode === 'EXTRUDE') {
+      const count = featureTree.filter((f) => f.type === 'EXTRUDE').length + 1;
+      return `Extrude${count}`;
+    } else {
+      const count = featureTree.filter((f) => f.type === 'CUT_EXTRUDE').length + 1;
+      return `Cut-Extrude${count}`;
+    }
+  });
+
+  const [selectedSketchId, setSelectedSketchId] = useState<string>(() => {
+    if (targetFeature) {
+      return targetFeature.sketchId || (sketches.length > 0 ? sketches[0].id : '');
+    }
+    const validActive = sketches.find((s) => s.id === activeSketchId);
+    if (validActive) return validActive.id;
+    return sketches.length > 0 ? sketches[0].id : '';
+  });
+
+  const [depth, setDepth] = useState<number>(() => {
+    if (targetFeature) {
+      return typeof targetFeature.depth === 'number' ? targetFeature.depth : 20;
+    }
+    return 20;
+  });
+
+  const [direction, setDirection] = useState<'normal' | 'reversed' | 'mid-plane'>(() => {
+    if (targetFeature) {
+      return targetFeature.direction || 'normal';
+    }
+    return 'normal';
+  });
+
+  const [throughAll, setThroughAll] = useState<boolean>(() => {
+    if (targetFeature && targetFeature.type === 'CUT_EXTRUDE') {
+      return Boolean((targetFeature as CutExtrudeFeature).throughAll);
+    }
+    return false;
+  });
+
+  // 自動確保切換至 3D 視圖
   useEffect(() => {
-    if (!isOpen) return;
-
     if (viewMode !== '3D') {
       setViewMode('3D');
     }
+  }, [viewMode, setViewMode]);
 
-    // 計算自動名稱
-    const tree = document?.featureTree || [];
-    if (mode === 'EXTRUDE') {
-      const count = tree.filter((f) => f.type === 'EXTRUDE').length + 1;
-      setFeatureName(`Extrude${count}`);
-    } else {
-      const count = tree.filter((f) => f.type === 'CUT_EXTRUDE').length + 1;
-      setFeatureName(`Cut-Extrude${count}`);
-    }
-
-    // 預設目標草圖為當前 activeSketchId，若無則選取第一張草圖
-    const validActive = sketches.find((s) => s.id === activeSketchId);
-    if (validActive) {
-      setSelectedSketchId(validActive.id);
-    } else if (sketches.length > 0) {
-      setSelectedSketchId(sketches[0].id);
-    } else {
-      setSelectedSketchId('');
-    }
-
-    setDepth(20);
-    setDirection('normal');
-    setThroughAll(false);
-  }, [isOpen, mode, activeSketchId, document?.featureTree, viewMode, setViewMode]);
+  // 元件卸載時清除 3D 預覽
+  useEffect(() => {
+    return () => {
+      setExtrudePreview(null);
+    };
+  }, [setExtrudePreview]);
 
   // 即時同步拉伸預覽狀態至 3D 視圖
   useEffect(() => {
-    if (!isOpen || !selectedSketchId) {
+    if (!selectedSketchId) {
       setExtrudePreview(null);
       return;
     }
@@ -106,21 +138,19 @@ export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
       direction,
       throughAll: !isBoss && throughAll,
     });
-  }, [isOpen, mode, selectedSketchId, depth, direction, throughAll, isBoss, setExtrudePreview]);
+  }, [mode, selectedSketchId, depth, direction, throughAll, isBoss, setExtrudePreview]);
 
-  // 元件卸載或關閉時清除預覽
-  useEffect(() => {
-    return () => {
-      setExtrudePreview(null);
-    };
-  }, [setExtrudePreview]);
+  const targetSketch = sketches.find((s) => s.id === selectedSketchId);
+  const computedProfiles = useMemo(() => {
+    if (!targetSketch) return [];
+    if (targetSketch.profiles && targetSketch.profiles.length > 0) return targetSketch.profiles;
+    return findClosedProfiles(targetSketch.entities, targetSketch.constraints);
+  }, [targetSketch]);
 
   const handleClose = useCallback(() => {
     setExtrudePreview(null);
     onClose();
   }, [setExtrudePreview, onClose]);
-
-  if (!isOpen) return null;
 
   const sketchProfileCount = computedProfiles.length;
 
@@ -140,39 +170,55 @@ export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
     if (!selectedSketchId) return;
 
     const profileIds = computedProfiles.map((p) => p.id);
-
     const parsedDepth = Math.max(0.1, Number(depth) || 20);
 
-    if (mode === 'EXTRUDE') {
-      const newFeature: ExtrudeFeature = {
-        id: `extrude-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        name: featureName.trim() || 'Extrude1',
-        type: 'EXTRUDE',
+    if (featureId) {
+      // 編輯模式：更新既有特徵，保持 featureId 不變
+      const updates: Partial<ExtrudeFeature | CutExtrudeFeature> = {
+        name: featureName.trim() || (isBoss ? 'Extrude1' : 'Cut-Extrude1'),
         sketchId: selectedSketchId,
         profileIds,
         depth: parsedDepth,
         direction,
         dependencies: [selectedSketchId],
-        suppressed: false,
-        visible: true,
-        mergeResult: true,
       };
-      addFeature(newFeature);
+      if (!isBoss) {
+        (updates as Partial<CutExtrudeFeature>).throughAll = throughAll;
+      }
+      updateFeature(featureId, updates);
     } else {
-      const newFeature: CutExtrudeFeature = {
-        id: `cut-extrude-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        name: featureName.trim() || 'Cut-Extrude1',
-        type: 'CUT_EXTRUDE',
-        sketchId: selectedSketchId,
-        profileIds,
-        depth: parsedDepth,
-        direction,
-        throughAll,
-        dependencies: [selectedSketchId],
-        suppressed: false,
-        visible: true,
-      };
-      addFeature(newFeature);
+      // 新建模式：產生全新特徵實例
+      if (mode === 'EXTRUDE') {
+        const newFeature: ExtrudeFeature = {
+          id: `extrude-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          name: featureName.trim() || 'Extrude1',
+          type: 'EXTRUDE',
+          sketchId: selectedSketchId,
+          profileIds,
+          depth: parsedDepth,
+          direction,
+          dependencies: [selectedSketchId],
+          suppressed: false,
+          visible: true,
+          mergeResult: true,
+        };
+        addFeature(newFeature);
+      } else {
+        const newFeature: CutExtrudeFeature = {
+          id: `cut-extrude-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          name: featureName.trim() || 'Cut-Extrude1',
+          type: 'CUT_EXTRUDE',
+          sketchId: selectedSketchId,
+          profileIds,
+          depth: parsedDepth,
+          direction,
+          throughAll,
+          dependencies: [selectedSketchId],
+          suppressed: false,
+          visible: true,
+        };
+        addFeature(newFeature);
+      }
     }
 
     // 自動切換視圖模式至 3D 並清除預覽
@@ -206,7 +252,13 @@ export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
           </div>
           <div>
             <h3 className="text-sm font-bold tracking-wide text-white flex items-center gap-2">
-              {isBoss ? '伸長長料 (Extrude Boss)' : '伸長除料 (Extrude Cut)'}
+              {isEditMode
+                ? isBoss
+                  ? '編輯伸長長料 (Edit Extrude Boss)'
+                  : '編輯伸長除料 (Edit Extrude Cut)'
+                : isBoss
+                ? '伸長長料 (Extrude Boss)'
+                : '伸長除料 (Extrude Cut)'}
             </h3>
             <div className="flex items-center gap-1.5 text-[10px] text-neutral-400">
               <Eye size={11} className={isBoss ? 'text-amber-400' : 'text-rose-400'} />
@@ -229,7 +281,9 @@ export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
         <div className="space-y-1.5">
           <label className="block font-semibold text-neutral-300 flex items-center justify-between">
             <span>特徵名稱 (Feature Name)</span>
-            <span className="text-[10px] font-mono text-neutral-500">Auto ID</span>
+            <span className="text-[10px] font-mono text-neutral-500">
+              {isEditMode ? featureId : 'Auto ID'}
+            </span>
           </label>
           <input
             type="text"
@@ -378,7 +432,7 @@ export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
               className={`py-2 px-1.5 rounded-lg border flex flex-col items-center justify-center gap-0.5 transition-colors cursor-pointer ${
                 direction === 'normal'
                   ? 'bg-blue-600/25 border-blue-500 text-blue-300 font-bold shadow-sm ring-1 ring-blue-500/30'
-                  : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-850'
+                  : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-855'
               }`}
             >
               <span className="text-xs">正向 (Normal)</span>
@@ -391,7 +445,7 @@ export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
               className={`py-2 px-1.5 rounded-lg border flex flex-col items-center justify-center gap-0.5 transition-colors cursor-pointer ${
                 direction === 'reversed'
                   ? 'bg-blue-600/25 border-blue-500 text-blue-300 font-bold shadow-sm ring-1 ring-blue-500/30'
-                  : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-850'
+                  : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-855'
               }`}
             >
               <span className="text-xs">反向 (Reversed)</span>
@@ -404,7 +458,7 @@ export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
               className={`py-2 px-1.5 rounded-lg border flex flex-col items-center justify-center gap-0.5 transition-colors cursor-pointer ${
                 direction === 'mid-plane'
                   ? 'bg-blue-600/25 border-blue-500 text-blue-300 font-bold shadow-sm ring-1 ring-blue-500/30'
-                  : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-850'
+                  : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white hover:bg-neutral-855'
               }`}
             >
               <span className="text-xs">兩側對稱</span>
@@ -468,7 +522,7 @@ export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
             }`}
           >
             <Check size={15} />
-            <span>確定建立</span>
+            <span>{isEditMode ? '確定更新' : '確定建立'}</span>
           </button>
         </div>
       </form>
@@ -476,4 +530,23 @@ export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
   );
 };
 
+export const ExtrudeFeatureModal: React.FC<ExtrudeFeatureModalProps> = ({
+  isOpen,
+  mode,
+  featureId,
+  onClose,
+}) => {
+  if (!isOpen) return null;
+
+  return (
+    <ExtrudeFeatureModalContent
+      key={`${mode}-${featureId || 'new'}`}
+      mode={mode}
+      featureId={featureId}
+      onClose={onClose}
+    />
+  );
+};
+
 export default ExtrudeFeatureModal;
+

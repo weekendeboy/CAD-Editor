@@ -301,7 +301,18 @@ export function isPointInsideProfileLoop(
     }
   }
 
-  let intersectionCount = 0;
+  const intersectionsX: number[] = [];
+  const dedupTol = 1e-4;
+
+  const addIntersection = (x: number) => {
+    if (x < testX - eps) return;
+    for (const existingX of intersectionsX) {
+      if (Math.abs(existingX - x) < dedupTol) {
+        return;
+      }
+    }
+    intersectionsX.push(x);
+  };
 
   // 2. 當提供 segments 時，依據直線與圓弧 segment 類型分別計算水平向右射線交點
   if (segments && segments.length > 0) {
@@ -317,7 +328,7 @@ export function isPointInsideProfileLoop(
           if (Math.abs(dy) > eps) {
             const xInt = p1.x + ((testY - p1.y) / dy) * (p2.x - p1.x);
             if (xInt >= testX) {
-              intersectionCount++;
+              addIntersection(xInt);
             }
           }
         }
@@ -346,7 +357,7 @@ export function isPointInsideProfileLoop(
               if (candX >= testX) {
                 const candAngle = Math.atan2(testY - center.y, candX - center.x);
                 if (isAngleInArcSweep(candAngle, sAngle, eAngle, isCW)) {
-                  intersectionCount++;
+                  addIntersection(candX);
                 }
               }
             }
@@ -361,7 +372,7 @@ export function isPointInsideProfileLoop(
             if (Math.abs(dy) > eps) {
               const xInt = p1.x + ((testY - p1.y) / dy) * (p2.x - p1.x);
               if (xInt >= testX) {
-                intersectionCount++;
+                addIntersection(xInt);
               }
             }
           }
@@ -369,7 +380,7 @@ export function isPointInsideProfileLoop(
       }
     }
 
-    return intersectionCount % 2 === 1;
+    return intersectionsX.length % 2 === 1;
   }
 
   // 3. 退化為多邊形：若 segments 未提供或為空，針對 loop 頂點做經典多邊形射線交叉法
@@ -388,13 +399,13 @@ export function isPointInsideProfileLoop(
       if (Math.abs(dy) > eps) {
         const xInt = p1.x + ((testY - p1.y) / dy) * (p2.x - p1.x);
         if (xInt >= testX) {
-          intersectionCount++;
+          addIntersection(xInt);
         }
       }
     }
   }
 
-  return intersectionCount % 2 === 1;
+  return intersectionsX.length % 2 === 1;
 }
 
 /**

@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useCADStore } from '../store/cadStore';
 import { FeatureTreeItem } from './FeatureTreeItem';
+import { FeatureType } from '../types/cad';
 import {
   ChevronLeft,
   ChevronRight,
@@ -13,9 +14,14 @@ import {
   RotateCcw,
   Info,
   Pencil,
+  Sliders,
 } from 'lucide-react';
 
-export const FeatureTreePanel: React.FC = () => {
+export interface FeatureTreePanelProps {
+  onEditFeature?: (featureId: string, featureType: FeatureType) => void;
+}
+
+export const FeatureTreePanel: React.FC<FeatureTreePanelProps> = ({ onEditFeature }) => {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isDraggingRollback, setIsDraggingRollback] = useState(false);
   const [selectedPlaneId, setSelectedPlaneId] = useState<string | null>(null);
@@ -323,7 +329,20 @@ export const FeatureTreePanel: React.FC = () => {
                     onToggleVisibility={(id) => handleToggleVisibility(id)}
                     onRename={(id, newName) => renameFeature(id, newName)}
                     onDelete={(id) => removeFeature(id)}
+                    onEditFeature={onEditFeature}
                   />
+                  {(feature.type === 'EXTRUDE' || feature.type === 'CUT_EXTRUDE') && !isPast && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onEditFeature?.(feature.id, feature.type);
+                      }}
+                      className="absolute right-12 top-2 p-1 rounded opacity-0 group-hover/tree-item:opacity-100 hover:bg-neutral-700 hover:text-white text-neutral-400 transition-all z-10"
+                      title="編輯此特徵 (Edit Feature)"
+                    >
+                      <Sliders className="w-3.5 h-3.5 text-sky-400" />
+                    </button>
+                  )}
                   {feature.type === 'DATUM_PLANE' && !isPast && (
                     <button
                       onClick={(e) => {

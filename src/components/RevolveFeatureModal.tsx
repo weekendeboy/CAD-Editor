@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useCADStore } from '../store/cadStore';
 import {
   SketchFeature,
@@ -26,127 +26,122 @@ export interface RevolveFeatureModalProps {
   onClose: () => void;
 }
 
-export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
-  isOpen,
+interface RevolveFeatureModalContentProps {
+  mode: 'REVOLVE' | 'REVOLVE_CUT';
+  onClose: () => void;
+}
+
+/**
+ * 內部內容元件：僅在 isOpen 為 true 時掛載。
+ * 初始狀態於建構時一次性計算，杜絕 useEffect 初始化的巢狀 setState 與重繪迴圈。
+ */
+const RevolveFeatureModalContent: React.FC<RevolveFeatureModalContentProps> = ({
   mode,
   onClose,
 }) => {
-
-  const { 
-    document, 
-    activeSketchId, 
-    addFeature, 
-    viewMode, 
-    setViewMode,
-    setRevolvePreview,
-    revolvePreview,
-  } = useCADStore();
+  const featureTree = useCADStore((s) => s.document?.featureTree) || [];
+  const activeSketchId = useCADStore((s) => s.activeSketchId);
+  const addFeature = useCADStore((s) => s.addFeature);
+  const viewMode = useCADStore((s) => s.viewMode);
+  const setViewMode = useCADStore((s) => s.setViewMode);
+  const setRevolvePreview = useCADStore((s) => s.setRevolvePreview);
 
   // 取得目前特徵樹中的所有草圖特徵
-  const sketches = (document?.featureTree || []).filter(
-    (f): f is SketchFeature => f.type === 'SKETCH'
+  const sketches = useMemo(() => {
+    return featureTree.filter(
+      (f): f is SketchFeature => f.type === 'SKETCH'
+    );
+  }, [featureTree]);
+
+  // 決定初始草圖 (優先選擇目前作用中的草圖，否則降級選擇第一張草圖)
+  const initialSketch = useMemo(() => {
+    return sketches.find((s) => s.id === activeSketchId) || sketches[0] || null;
+  }, [sketches, activeSketchId]);
+
+  // 同步初始化表單狀態 (避免在 useEffect 內重複呼叫 setState 觸發 Max Update Depth)
+  const [featureName, setFeatureName] = useState<string>(() => {
+    if (mode === 'REVOLVE') {
+      const count = featureTree.filter((f) => f.type === 'REVOLVE').length + 1;
+      return `Revolve${count}`;
+    } else {
+      const count = featureTree.filter((f) => f.type === 'REVOLVE_CUT').length + 1;
+      return `Revolve-Cut${count}`;
+    }
+  });
+
+  const [selectedSketchId, setSelectedSketchId] = useState<string>(
+    () => initialSketch?.id || ''
   );
 
-  // 表單狀態
-  const [featureName, setFeatureName] = useState('');
-  const [selectedSketchId, setSelectedSketchId] = useState('');
-  const [selectedAxisId, setSelectedAxisId] = useState('');
+  const [selectedAxisId, setSelectedAxisId] = useState<string>(() => {
+    const lines = (initialSketch?.entities || []).filter(
+      (e): e is LineEntity => e.type === 'line'
+    );
+    const constr = lines.find((l) => l.isConstruction);
+    return constr?.id || lines[0]?.id || '';
+  });
+
   const [angleDeg, setAngleDeg] = useState<number>(360);
   const [reversed, setReversed] = useState<boolean>(false);
 
-  const targetSketch = sketches.find((s) => s.id === selectedSketchId);
-  const computedProfiles = React.useMemo(() => {
+  // 自動確保切換至 3D 視圖
+  useEffect(() => {
+    if (viewMode !== '3D') {
+      setViewMode('3D');
+    }
+  }, [viewMode, setViewMode]);
+
+  // 當前選取草圖物件與線段實體
+  const targetSketch = useMemo(() => {
+    return sketches.find((s) => s.id === selectedSketchId);
+  }, [sketches, selectedSketchId]);
+
+  const lineEntities = useMemo(() => {
+    return (targetSketch?.entities || []).filter(
+      (e): e is LineEntity => e.type === 'line'
+    );
+  }, [targetSketch]);
+
+  const computedProfiles = useMemo(() => {
     if (!targetSketch) return [];
     if (targetSketch.profiles && targetSketch.profiles.length > 0) return targetSketch.profiles;
     return findClosedProfiles(targetSketch.entities, targetSketch.constraints);
   }, [targetSketch]);
 
-  // 當彈窗開啟或 mode 切換時，初始化預設表單狀態與名稱
+  // 監聽 3D 視圖或 2D 畫布中直接點擊軸線與切換方向的自訂事件
   useEffect(() => {
-    if (!isOpen) return;
-
-    if (viewMode !== '3D') {
-      setViewMode('3D');
-    }
-
-    // 自動產生特徵名稱
-    const tree = document?.featureTree || [];
-    if (mode === 'REVOLVE') {
-      const count = tree.filter((f) => f.type === 'REVOLVE').length + 1;
-      setFeatureName(`Revolve${count}`);
-    } else {
-      const count = tree.filter((f) => f.type === 'REVOLVE_CUT').length + 1;
-      setFeatureName(`Revolve-Cut${count}`);
-    }
-
-    // 預設目標草圖為當前 activeSketchId，若無則降級選取第一張草圖
-    const validActive = sketches.find((s) => s.id === activeSketchId);
-    if (validActive) {
-      setSelectedSketchId(validActive.id);
-    } else if (sketches.length > 0) {
-      setSelectedSketchId(sketches[0].id);
-    } else {
-      setSelectedSketchId('');
-    }
-
-    setAngleDeg(360);
-    setReversed(false);
-  }, [isOpen, mode, activeSketchId, document?.featureTree]);
-
-  // 當選取的目標草圖變更時，自動切換旋轉軸線選取
-  const lineEntities = (targetSketch?.entities || []).filter(
-    (e): e is LineEntity => e.type === 'line'
-  );
-
-  // 預設初始旋轉軸
-  useEffect(() => {
-    if (!targetSketch || lineEntities.length === 0) {
-      setSelectedAxisId('');
-      return;
-    }
-
-    // 若 store 中已有記錄點選的軸且屬於當前草圖，優先使用
-    if (revolvePreview?.axisEntityId && lineEntities.some(l => l.id === revolvePreview.axisEntityId)) {
-      setSelectedAxisId(revolvePreview.axisEntityId);
-      return;
-    }
-
-    // 優先選取第一條建構線；若無，預設選取第一條普通直線
-    const constructionLine = lineEntities.find((l) => l.isConstruction);
-    if (constructionLine) {
-      setSelectedAxisId(constructionLine.id);
-    } else {
-      setSelectedAxisId(lineEntities[0].id);
-    }
-  }, [selectedSketchId, targetSketch?.id, lineEntities.length]);
-
-  // 當在 3D 視圖中直接點擊軸線時，同步更新 selectedAxisId
-  useEffect(() => {
-    if (revolvePreview?.axisEntityId && revolvePreview.axisEntityId !== selectedAxisId) {
-      const exists = lineEntities.some((l) => l.id === revolvePreview.axisEntityId);
-      if (exists) {
-        setSelectedAxisId(revolvePreview.axisEntityId);
+    const handleAxisSelected = (e: CustomEvent<string>) => {
+      if (e.detail) {
+        setSelectedAxisId(e.detail);
       }
-    }
-  }, [revolvePreview?.axisEntityId, lineEntities, selectedAxisId]);
+    };
+    const handleToggleDir = () => {
+      setReversed((prev) => !prev);
+    };
 
-  // 若預覽狀態中發生方向反轉切換，同步至本地狀態
-  useEffect(() => {
-    if (revolvePreview && revolvePreview.reversed !== undefined && revolvePreview.reversed !== reversed) {
-      setReversed(revolvePreview.reversed);
-    }
-  }, [revolvePreview?.reversed]);
+    window.addEventListener('cad-set-revolve-axis' as any, handleAxisSelected);
+    window.addEventListener('cad-toggle-revolve-direction' as any, handleToggleDir);
 
-  // 即時同步旋轉預覽狀態至 3D 視圖
+    return () => {
+      window.removeEventListener('cad-set-revolve-axis' as any, handleAxisSelected);
+      window.removeEventListener('cad-toggle-revolve-direction' as any, handleToggleDir);
+    };
+  }, []);
+
+  // 目標草圖切換事件處理
+  const handleSketchChange = useCallback((newSketchId: string) => {
+    setSelectedSketchId(newSketchId);
+    const sketch = sketches.find((s) => s.id === newSketchId);
+    const lines = (sketch?.entities || []).filter((e): e is LineEntity => e.type === 'line');
+    const constr = lines.find((l) => l.isConstruction);
+    const defaultAxisId = constr?.id || lines[0]?.id || '';
+    setSelectedAxisId(defaultAxisId);
+  }, [sketches]);
+
+  // 單向推送預覽狀態至 CAD Store (Modal 為唯一的權威來源，杜絕雙向 Ping-Pong 迴圈)
   useEffect(() => {
-    if (!isOpen || !selectedSketchId || !selectedAxisId) {
-      setRevolvePreview(isOpen && selectedSketchId ? {
-        isOpen: true,
-        mode,
-        sketchId: selectedSketchId,
-        axisEntityId: '',
-        angle: 0
-      } : null);
+    if (!selectedSketchId) {
+      setRevolvePreview(null);
       return;
     }
 
@@ -159,23 +154,16 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
       sketchId: selectedSketchId,
       axisEntityId: selectedAxisId,
       angle: angleRad,
-      reversed
+      reversed,
     });
-  }, [isOpen, mode, selectedSketchId, selectedAxisId, angleDeg, reversed, setRevolvePreview]);
+  }, [mode, selectedSketchId, selectedAxisId, angleDeg, reversed, setRevolvePreview]);
 
-  // 元件卸載或關閉時清除預覽
+  // 元件卸載時安全清除預覽狀態
   useEffect(() => {
     return () => {
       setRevolvePreview(null);
     };
   }, [setRevolvePreview]);
-
-  const handleClose = useCallback(() => {
-    setRevolvePreview(null);
-    onClose();
-  }, [setRevolvePreview, onClose]);
-
-  if (!isOpen) return null;
 
   const sketchProfileCount = computedProfiles.length;
   const isBoss = mode === 'REVOLVE';
@@ -221,9 +209,8 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
       addFeature(newFeature);
     }
 
-    // 自動切換視圖模式至 3D 並關閉彈窗
     setViewMode('3D');
-    handleClose();
+    onClose();
   };
 
   return (
@@ -231,7 +218,7 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
       className="fixed top-24 left-4 z-40 w-96 max-h-[calc(100vh-7rem)] overflow-hidden flex flex-col bg-neutral-950/95 backdrop-blur-md border border-neutral-800 rounded-xl shadow-2xl text-neutral-200 select-none animate-in fade-in slide-in-from-left-4 duration-200"
       id="revolve-feature-propertymanager"
     >
-      {/* SW 經典對話框頂部 Header */}
+      {/* 頂部 Header */}
       <div
         className={`h-12 px-4 border-b flex items-center justify-between shrink-0 font-sans ${
           isBoss
@@ -259,7 +246,7 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
           </div>
         </div>
         <button
-          onClick={handleClose}
+          onClick={onClose}
           className="p-1 text-neutral-400 hover:text-white hover:bg-neutral-800/80 rounded-lg transition-colors cursor-pointer"
           title="關閉 (Esc)"
         >
@@ -298,7 +285,7 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
           ) : (
             <select
               value={selectedSketchId}
-              onChange={(e) => setSelectedSketchId(e.target.value)}
+              onChange={(e) => handleSketchChange(e.target.value)}
               className="w-full px-3 py-2 bg-neutral-900 border border-neutral-800 rounded-lg text-white font-mono focus:outline-none focus:border-purple-500/80 transition-colors"
             >
               {sketches.map((s) => (
@@ -329,7 +316,7 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
           )}
         </div>
 
-        {/* 旋轉軸線 (Axis of Revolution) - 支援 3D 畫面直接點選與下拉選單 */}
+        {/* 旋轉軸線 (Axis of Revolution) */}
         <div className="space-y-2 p-3 bg-neutral-900/90 rounded-xl border border-neutral-800">
           <div className="flex items-center justify-between">
             <label className="font-semibold text-neutral-200 flex items-center gap-1.5">
@@ -410,7 +397,7 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
             </div>
           </div>
 
-          {/* 快速填入按鈕 */}
+          {/* 快速設值按鈕 */}
           <div className="flex items-center gap-1.5 pt-0.5">
             <span className="text-[11px] text-neutral-500 mr-1">快速設值:</span>
             {[90, 180, 270, 360].map((deg) => (
@@ -489,6 +476,15 @@ export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
       </form>
     </div>
   );
+};
+
+export const RevolveFeatureModal: React.FC<RevolveFeatureModalProps> = ({
+  isOpen,
+  mode,
+  onClose,
+}) => {
+  if (!isOpen) return null;
+  return <RevolveFeatureModalContent mode={mode} onClose={onClose} />;
 };
 
 export default RevolveFeatureModal;

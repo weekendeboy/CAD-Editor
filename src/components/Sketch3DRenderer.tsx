@@ -12,6 +12,7 @@ import {
   Point2D,
 } from '../types/cad';
 import { mapPoint2DTo3D } from '../core/3d/FeaturePipelineAdapter';
+import { getArcSweepAngle } from '../core/2d/GeometryMath';
 
 /**
  * 在 3D 視圖中將草圖圖元投影至對應基準面呈現 3D 線條
@@ -78,18 +79,19 @@ export const Sketch3DRenderer: React.FC = () => {
         } else if (entity.type === 'arc') {
           const arc = entity as ArcEntity;
           const segments = 32;
-          let startAngle = arc.startAngle;
-          let endAngle = arc.endAngle;
-          // 正規化角度跨越
-          if (endAngle < startAngle) {
-            endAngle += Math.PI * 2;
-          }
-          const diff = endAngle - startAngle;
+          const isCW = Boolean(arc.clockwise);
+          const sweep = getArcSweepAngle({
+            startAngle: arc.startAngle,
+            endAngle: arc.endAngle,
+            clockwise: isCW,
+          });
 
           let prevPt: THREE.Vector3 | null = null;
           for (let i = 0; i <= segments; i++) {
             const t = i / segments;
-            const angle = startAngle + diff * t;
+            const angle = isCW
+              ? arc.startAngle - sweep * t
+              : arc.startAngle + sweep * t;
             const pt2d: Point2D = {
               x: arc.center.x + arc.radius * Math.cos(angle),
               y: arc.center.y + arc.radius * Math.sin(angle),

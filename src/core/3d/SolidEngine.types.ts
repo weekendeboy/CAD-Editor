@@ -196,7 +196,8 @@ export type SolidTaskType =
   | 'EXPORT_STEP'
   | 'EXPORT_STL'
   | 'EXPORT_MODEL'
-  | 'EXTRUDE_PROFILE';
+  | 'EXTRUDE_PROFILE'
+  | 'PREVIEW_OPERATION';
 
 export type WorkerTaskType = SolidTaskType;
 
