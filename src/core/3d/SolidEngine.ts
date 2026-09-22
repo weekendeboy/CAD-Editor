@@ -9,6 +9,7 @@ import {
   MeshResult,
   ExtrudeProfileResponseData,
   FeatureEvalOp,
+  PreviewOperationOp,
   KernelResult,
 } from './SolidEngine.types';
 import type { SketchProfile } from '../../types/cad';
@@ -206,7 +207,7 @@ export class SolidEngine {
     return result;
   }
 
-  public async previewOperation(operation: FeatureEvalOp): Promise<MeshResult> {
+  public async previewOperation(operation: FeatureEvalOp | PreviewOperationOp): Promise<MeshResult> {
     await this.init();
     return this.dispatch<MeshResult>('PREVIEW_OPERATION', { operation });
   }

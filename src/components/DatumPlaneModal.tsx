@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useCADStore } from '../store/cadStore';
+import { useDraggableModal } from '../hooks/useDraggableModal';
 import {
   CustomPlane,
   DatumPlaneFeature,
@@ -80,6 +81,8 @@ export const DatumPlaneModal: React.FC<DatumPlaneModalProps> = ({ isOpen, onClos
   const [point2Ref, setPoint2Ref] = useState<RuntimeBRepVertexRef | null>(null);
   const [point3Ref, setPoint3Ref] = useState<RuntimeBRepVertexRef | null>(null);
   const [activePointIndex, setActivePointIndex] = useState<1 | 2 | 3>(1);
+
+  const { position, dragHandleProps } = useDraggableModal({ defaultX: 280, defaultY: 70 });
 
   // 當開啟時自動切換為 3D 視角以利即時預覽與 3D 點/軸選取
   useEffect(() => {
@@ -630,16 +633,21 @@ export const DatumPlaneModal: React.FC<DatumPlaneModalProps> = ({ isOpen, onClos
         iconColor: 'text-cyan-400',
       };
 
+  if (!isOpen) return null;
+
   return (
-    <div
-      className="fixed top-20 left-4 z-40 w-96 max-h-[calc(100vh-6rem)] overflow-hidden flex flex-col bg-neutral-950/95 backdrop-blur-md border border-neutral-800 rounded-xl shadow-2xl text-neutral-200 select-none animate-in fade-in slide-in-from-left-4 duration-200 pointer-events-auto"
-      onClick={(e) => e.stopPropagation()}
-      id="datum-plane-propertymanager"
-    >
-      {/* 頂部 Header */}
+    <div className="fixed inset-0 z-40 pointer-events-none">
       <div
-        className={`h-12 px-4 border-b flex items-center justify-between shrink-0 font-sans ${themeColor.headerBg}`}
+        style={{ transform: `translate3d(${position.x}px, ${position.y}px, 0)`, position: 'fixed', top: 0, left: 0 }}
+        className="w-96 max-h-[calc(100vh-5rem)] overflow-hidden flex flex-col bg-neutral-950/95 backdrop-blur-md border border-neutral-800 rounded-xl shadow-2xl text-neutral-200 select-none animate-in fade-in slide-in-from-left-4 duration-200 pointer-events-auto"
+        onClick={(e) => e.stopPropagation()}
+        id="datum-plane-propertymanager"
       >
+        {/* 頂部 Header */}
+        <div
+          {...dragHandleProps}
+          className={`h-12 px-4 border-b flex items-center justify-between shrink-0 font-sans cursor-move select-none ${themeColor.headerBg}`}
+        >
         <div className="flex items-center gap-2.5">
           <div className={`p-1.5 rounded-lg border shadow-sm ${themeColor.badgeBg}`}>
             {isThreePoint ? <Triangle size={18} /> : isAngle ? <RotateCw size={18} /> : <SquareDashed size={18} />}
@@ -1389,6 +1397,7 @@ export const DatumPlaneModal: React.FC<DatumPlaneModalProps> = ({ isOpen, onClos
         </div>
       </form>
     </div>
+  </div>
   );
 };
 

@@ -217,13 +217,38 @@ function setRotationAx1(trsf: any, ax1: any, angle: number) {
 }
 
 function setMirrorAx2(trsf: any, ax2: any) {
+  if (typeof trsf.SetMirror_2 === 'function') {
+    try {
+      trsf.SetMirror_2(ax2);
+      return;
+    } catch {
+      // fallback
+    }
+  }
   if (typeof trsf.SetMirror_3 === 'function') {
-    trsf.SetMirror_3(ax2);
-  } else if (typeof trsf.SetMirror_2 === 'function') {
-    trsf.SetMirror_2(ax2);
-  } else {
+    try {
+      trsf.SetMirror_3(ax2);
+      return;
+    } catch {
+      // fallback
+    }
+  }
+  if (typeof trsf.SetMirror === 'function') {
     trsf.SetMirror(ax2);
   }
+}
+
+function createAx2(pnt: any, dir: any, occ: any): any {
+  if (typeof occ.gp_Ax2_3 === 'function') {
+    return new occ.gp_Ax2_3(pnt, dir);
+  } else if (typeof occ.gp_Ax2_2 === 'function') {
+    return new occ.gp_Ax2_2(pnt, dir);
+  } else if (typeof occ.gp_Ax2 === 'function') {
+    return new occ.gp_Ax2(pnt, dir);
+  } else if (typeof occ.gp_Ax2_1 === 'function') {
+    return new occ.gp_Ax2_1(pnt, dir);
+  }
+  return new occ.gp_Ax2_3(pnt, dir);
 }
 
 function getEdgeDirection(
@@ -301,28 +326,36 @@ function buildWireFromSegments(segments: ProfileSegment[], occ: any): any {
       safeDelete(p1);
       safeDelete(p2);
     } else if (seg.type === 'arc' && seg.center && typeof seg.radius === 'number' && seg.radius > 0) {
-      let sAng = seg.startAngle;
-      let eAng = seg.endAngle;
+      let midX: number;
+      let midY: number;
 
-      if (sAng === undefined || eAng === undefined) {
-        sAng = Math.atan2(seg.start.y - seg.center.y, seg.start.x - seg.center.x);
-        eAng = Math.atan2(seg.end.y - seg.center.y, seg.end.x - seg.center.x);
-      }
-
-      let sweep = eAng - sAng;
-      const isCW = seg.sweepFlag === 1;
-
-      if (isCW) {
-        while (sweep >= 0) sweep -= 2 * Math.PI;
-        while (sweep < -2 * Math.PI) sweep += 2 * Math.PI;
+      if ((seg as any).mid) {
+        midX = (seg as any).mid.x;
+        midY = (seg as any).mid.y;
       } else {
-        while (sweep <= 0) sweep += 2 * Math.PI;
-        while (sweep > 2 * Math.PI) sweep -= 2 * Math.PI;
-      }
+        let sAng = seg.startAngle;
+        let eAng = seg.endAngle;
 
-      const midAng = sAng + sweep / 2;
-      const midX = seg.center.x + seg.radius * Math.cos(midAng);
-      const midY = seg.center.y + seg.radius * Math.sin(midAng);
+        if (sAng === undefined || eAng === undefined) {
+          sAng = Math.atan2(seg.start.y - seg.center.y, seg.start.x - seg.center.x);
+          eAng = Math.atan2(seg.end.y - seg.center.y, seg.end.x - seg.center.x);
+        }
+
+        let sweep = eAng - sAng;
+        const isCW = seg.sweepFlag === 1 || (seg as any).clockwise === true;
+
+        if (isCW) {
+          while (sweep >= 0) sweep -= 2 * Math.PI;
+          while (sweep < -2 * Math.PI) sweep += 2 * Math.PI;
+        } else {
+          while (sweep <= 0) sweep += 2 * Math.PI;
+          while (sweep > 2 * Math.PI) sweep -= 2 * Math.PI;
+        }
+
+        const midAng = sAng + sweep / 2;
+        midX = seg.center.x + seg.radius * Math.cos(midAng);
+        midY = seg.center.y + seg.radius * Math.sin(midAng);
+      }
 
       const pStart = new occ.gp_Pnt_3(seg.start.x, seg.start.y, 0);
       const pMid = new occ.gp_Pnt_3(midX, midY, 0);
@@ -584,20 +617,148 @@ function transformFaceTo3D(
   return transformedFace;
 }
 
+interface RawPathSegment3D {
+  type: 'line' | 'arc';
+  start: { x: number; y: number; z: number };
+  end: { x: number; y: number; z: number };
+  mid?: { x: number; y: number; z: number };
+  center?: { x: number; y: number; z: number };
+  radius?: number;
+  clockwise?: boolean;
+  sweepFlag?: number | boolean;
+}
+
+function dist3D(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): number {
+  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+/**
+ * 確保多段直線與圓弧路徑在 3D 空間中依序首尾相接 (P_end, i ≈ P_start, i+1)
+ */
+function chainAndOrientPathSegments(segments: RawPathSegment3D[]): RawPathSegment3D[] {
+  if (!segments || segments.length <= 1) return segments || [];
+
+  const EPS = 1e-3;
+  const n = segments.length;
+
+  // 1. 檢查是否已經嚴格首尾相連
+  let alreadyChained = true;
+  for (let i = 0; i < n - 1; i++) {
+    if (dist3D(segments[i].end, segments[i + 1].start) > EPS) {
+      alreadyChained = false;
+      break;
+    }
+  }
+  if (alreadyChained) {
+    return segments;
+  }
+
+  // 2. 統計各 segment 端點與其他 segment 端點的鄰接狀態
+  const isConnected = (p: { x: number; y: number; z: number }, otherIdx: number) => {
+    for (let j = 0; j < n; j++) {
+      if (j === otherIdx) continue;
+      if (dist3D(p, segments[j].start) < EPS || dist3D(p, segments[j].end) < EPS) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  let startIdx = 0;
+  let startReversed = false;
+
+  for (let i = 0; i < n; i++) {
+    const startConn = isConnected(segments[i].start, i);
+    const endConn = isConnected(segments[i].end, i);
+
+    if (!startConn && endConn) {
+      startIdx = i;
+      startReversed = false;
+      break;
+    } else if (startConn && !endConn) {
+      startIdx = i;
+      startReversed = true;
+      break;
+    }
+  }
+
+  const result: RawPathSegment3D[] = [];
+  const used = new Set<number>();
+
+  const getOriented = (seg: RawPathSegment3D, reversed: boolean): RawPathSegment3D => {
+    if (!reversed) return seg;
+    return {
+      ...seg,
+      start: { ...seg.end },
+      end: { ...seg.start },
+      mid: seg.mid ? { ...seg.mid } : undefined,
+      clockwise: seg.clockwise !== undefined ? !seg.clockwise : undefined,
+      sweepFlag:
+        seg.sweepFlag !== undefined
+          ? seg.sweepFlag === 1 || seg.sweepFlag === true
+            ? 0
+            : 1
+          : undefined,
+    };
+  };
+
+  const firstSeg = getOriented(segments[startIdx], startReversed);
+  result.push(firstSeg);
+  used.add(startIdx);
+  let currentEnd = firstSeg.end;
+
+  while (used.size < n) {
+    let bestNextIdx = -1;
+    let bestReverse = false;
+    let bestDist = Infinity;
+
+    for (let i = 0; i < n; i++) {
+      if (used.has(i)) continue;
+      const dStart = dist3D(currentEnd, segments[i].start);
+      const dEnd = dist3D(currentEnd, segments[i].end);
+
+      if (dStart < bestDist) {
+        bestDist = dStart;
+        bestNextIdx = i;
+        bestReverse = false;
+      }
+      if (dEnd < bestDist) {
+        bestDist = dEnd;
+        bestNextIdx = i;
+        bestReverse = true;
+      }
+    }
+
+    if (bestNextIdx === -1) break;
+
+    const nextSeg = getOriented(segments[bestNextIdx], bestReverse);
+    result.push(nextSeg);
+    used.add(bestNextIdx);
+    currentEnd = nextSeg.end;
+  }
+
+  return result;
+}
+
 function buildPathWire(
-  segments: {
-    type: 'line' | 'arc';
-    start: { x: number; y: number; z: number };
-    end: { x: number; y: number; z: number };
-    center?: { x: number; y: number; z: number };
-    radius?: number;
-    sweepFlag?: number | boolean;
-  }[],
+  rawSegments: RawPathSegment3D[],
   occ: any
 ): any {
+  if (!rawSegments || rawSegments.length === 0) {
+    throw new Error('Invalid Path Wire: empty path segments.');
+  }
+
+  // 1. 執行拓撲連通排序與方向校準，保證每段首尾相接
+  const segments = chainAndOrientPathSegments(rawSegments);
+
   const wireMaker = new occ.BRepBuilderAPI_MakeWire_1();
 
   for (const seg of segments) {
+    // 忽略退化的零長度圖元
+    if (dist3D(seg.start, seg.end) < 1e-6 && seg.type === 'line') {
+      continue;
+    }
+
     const p1 = new occ.gp_Pnt_3(seg.start.x, seg.start.y, seg.start.z);
     const p2 = new occ.gp_Pnt_3(seg.end.x, seg.end.y, seg.end.z);
 
@@ -615,16 +776,18 @@ function buildPathWire(
       }
       wireMaker.Add_1(mkEdge.Edge());
       safeDelete(mkEdge);
-    } else if (seg.type === 'arc' && seg.center) {
+    } else if (seg.type === 'arc') {
       let midX: number;
       let midY: number;
       let midZ: number;
 
-      if ((seg as any).mid) {
-        midX = (seg as any).mid.x;
-        midY = (seg as any).mid.y;
-        midZ = (seg as any).mid.z;
-      } else {
+      // 【關鍵修復】：若已提供經由 2D 草圖幾何與順逆時針方向算出的精確世界中點 mid，直接使用
+      if (seg.mid) {
+        midX = seg.mid.x;
+        midY = seg.mid.y;
+        midZ = seg.mid.z;
+      } else if (seg.center) {
+        // 後備計算（若無 mid 點）
         const v1x = seg.start.x - seg.center.x;
         const v1y = seg.start.y - seg.center.y;
         const v1z = seg.start.z - seg.center.z;
@@ -634,9 +797,18 @@ function buildPathWire(
 
         const r = seg.radius || Math.hypot(v1x, v1y, v1z);
 
+        const isCW = seg.clockwise === true || seg.sweepFlag === 1 || seg.sweepFlag === true;
         let midVx = v1x + v2x;
         let midVy = v1y + v2y;
         let midVz = v1z + v2z;
+
+        if (isCW) {
+          // 若為順時針且兩向量夾角夾在補角方向
+          midVx = -midVx;
+          midVy = -midVy;
+          midVz = -midVz;
+        }
+
         const midVLen = Math.hypot(midVx, midVy, midVz);
 
         if (midVLen > 1e-6) {
@@ -648,11 +820,17 @@ function buildPathWire(
           midY = (seg.start.y + seg.end.y) / 2;
           midZ = (seg.start.z + seg.end.z) / 2;
         }
+      } else {
+        midX = (seg.start.x + seg.end.x) / 2;
+        midY = (seg.start.y + seg.end.y) / 2;
+        midZ = (seg.start.z + seg.end.z) / 2;
       }
 
       const pMid = new occ.gp_Pnt_3(midX, midY, midZ);
       let arcAdded = false;
 
+      // 使用空間三點構建圓弧（P_start, P_mid, P_end）
+      // 百分之百精確走過三點，完全免除長弧/短弧判定失誤與順逆時針歧義
       if (typeof occ.GC_MakeArcOfCircle_4 === 'function') {
         try {
           const arcMaker = new occ.GC_MakeArcOfCircle_4(p1, pMid, p2);
@@ -663,20 +841,41 @@ function buildPathWire(
               geomCurve = new occ.Handle_Geom_Curve_2(trimmed.get());
             }
             const curveHandle = geomCurve || trimmed;
+            let edgeMaker: any = null;
             if (typeof occ.BRepBuilderAPI_MakeEdge_24 === 'function') {
-              const edgeMaker = new occ.BRepBuilderAPI_MakeEdge_24(curveHandle);
-              if (edgeMaker.IsDone()) {
-                wireMaker.Add_1(edgeMaker.Edge());
-                arcAdded = true;
-              }
-              safeDelete(edgeMaker);
+              edgeMaker = new occ.BRepBuilderAPI_MakeEdge_24(curveHandle);
+            } else if (typeof occ.BRepBuilderAPI_MakeEdge === 'function') {
+              edgeMaker = new occ.BRepBuilderAPI_MakeEdge(curveHandle);
             }
+
+            if (edgeMaker && edgeMaker.IsDone()) {
+              wireMaker.Add_1(edgeMaker.Edge());
+              arcAdded = true;
+            }
+            if (edgeMaker) safeDelete(edgeMaker);
             if (geomCurve) safeDelete(geomCurve);
             safeDelete(trimmed);
           }
           safeDelete(arcMaker);
         } catch (arcErr) {
-          console.warn('SolidWorker: 3D path arc failed:', arcErr);
+          console.warn('SolidWorker: 3D path arc via 3-points failed:', arcErr);
+        }
+      }
+
+      // 若三點構弧失敗（例如三點幾乎共線），後備嘗試直線邊線
+      if (!arcAdded) {
+        try {
+          const fallbackLineEdge =
+            typeof occ.BRepBuilderAPI_MakeEdge_3 === 'function'
+              ? new occ.BRepBuilderAPI_MakeEdge_3(p1, p2)
+              : new occ.BRepBuilderAPI_MakeEdge_1(p1, p2);
+          if (fallbackLineEdge.IsDone()) {
+            wireMaker.Add_1(fallbackLineEdge.Edge());
+            arcAdded = true;
+          }
+          safeDelete(fallbackLineEdge);
+        } catch (lineErr) {
+          console.warn('SolidWorker: fallback line edge failed:', lineErr);
         }
       }
 
@@ -2045,15 +2244,16 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                         ? pat.totalAngle
                         : 2 * Math.PI;
 
-                    if (totalAngle > 2 * Math.PI + 0.1) {
+                    if (Math.abs(totalAngle) > 2 * Math.PI + 0.1) {
                       totalAngle = (totalAngle * Math.PI) / 180;
                     }
 
                     const equalSpacing = pat.equalSpacing !== false;
+                    const isSymmetric = Boolean(pat.isSymmetric);
 
                     let deltaTheta = 0;
                     if (equalSpacing) {
-                      const isFullCircle = Math.abs(totalAngle - 2 * Math.PI) < 1e-4;
+                      const isFullCircle = Math.abs(Math.abs(totalAngle) - 2 * Math.PI) < 1e-4;
                       if (isFullCircle) {
                         deltaTheta = totalAngle / count;
                       } else {
@@ -2067,8 +2267,15 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                     const axDir = new occ.gp_Dir_4(axisDirVec.x, axisDirVec.y, axisDirVec.z);
                     const rotAxis = new occ.gp_Ax1_2(axPnt, axDir);
 
-                    for (let k = 1; k < count; k++) {
-                      const angle = k * deltaTheta;
+                    for (let k = 0; k < count; k++) {
+                      const angle = isSymmetric
+                        ? -(totalAngle / 2) + k * deltaTheta
+                        : k * deltaTheta;
+
+                      if (Math.abs(angle) < 1e-7) {
+                        continue;
+                      }
+
                       const trsf = new occ.gp_Trsf_1();
                       setRotationAx1(trsf, rotAxis, angle);
 
@@ -2131,7 +2338,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                     safeDelete(axPnt);
                     success = true;
                   } else if (op.type === 'MIRROR_3D') {
-                    const plane = op.mirrorPlane;
+                    const plane = op.mirrorPlane || (op as any).mirror3D;
                     if (!plane) {
                       throw new Error(`Mirror 3D requires mirrorPlane configuration`);
                     }
@@ -2140,7 +2347,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
                     const pnt = new occ.gp_Pnt_3(origin.x, origin.y, origin.z);
                     const dir = new occ.gp_Dir_4(normal.x, normal.y, normal.z);
-                    const ax2 = new occ.gp_Ax2_3(pnt, dir);
+                    const ax2 = createAx2(pnt, dir, occ);
 
                     const trsf = new occ.gp_Trsf_1();
                     setMirrorAx2(trsf, ax2);
@@ -3062,24 +3269,37 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
       case 'PREVIEW_OPERATION': {
         if (!oc) throw new Error('Worker not initialized');
-        if (!currentSolid || (typeof currentSolid.IsNull === 'function' && currentSolid.IsNull())) {
-          throw new Error('No active solid body available for preview');
-        }
         const occ = oc;
         const op = req.payload?.operation as FeatureEvalOp;
         if (!op) {
           throw new Error('No operation provided for preview');
         }
 
+        const isStandaloneOp =
+          op.type === 'SWEEP' ||
+          op.type === 'SWEEP_3D' ||
+          op.type === 'LOFT' ||
+          op.type === 'LINEAR_PATTERN' ||
+          op.type === 'CIRCULAR_PATTERN' ||
+          op.type === 'MIRROR_3D';
+        if (
+          !isStandaloneOp &&
+          (!currentSolid || (typeof currentSolid.IsNull === 'function' && currentSolid.IsNull()))
+        ) {
+          throw new Error('No active solid body available for preview');
+        }
+
         let tempSolid: any = null;
-        try {
-          const copyMaker = new occ.BRepBuilderAPI_Copy_2(currentSolid, true, false);
-          tempSolid = copyMaker.Shape();
-          safeDelete(copyMaker);
-        } catch (_) {
-          const copyMaker = new occ.BRepBuilderAPI_Copy_1(currentSolid, true);
-          tempSolid = copyMaker.Shape();
-          safeDelete(copyMaker);
+        if (currentSolid && (typeof currentSolid.IsNull !== 'function' || !currentSolid.IsNull())) {
+          try {
+            const copyMaker = new occ.BRepBuilderAPI_Copy_2(currentSolid, true, false);
+            tempSolid = copyMaker.Shape();
+            safeDelete(copyMaker);
+          } catch (_) {
+            const copyMaker = new occ.BRepBuilderAPI_Copy_1(currentSolid, true);
+            tempSolid = copyMaker.Shape();
+            safeDelete(copyMaker);
+          }
         }
 
         const validOccEdges: any[] = [];
@@ -3435,11 +3655,376 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               safeDelete(closingFaces);
               safeDelete(hollow);
             }
+          } else if (op.type === 'LINEAR_PATTERN') {
+            const pat = op.patternLinear;
+            const targetIds = op.targetFeatureIds || pat?.targetFeatureIds || [];
+
+            const dir1 = pat?.dir1 || { x: 1, y: 0, z: 0 };
+            const count1 = typeof pat?.count1 === 'number' && pat.count1 > 0 ? pat.count1 : 1;
+            const spacing1 = typeof pat?.spacing1 === 'number' ? pat.spacing1 : 0;
+
+            const isDirection2Enabled = Boolean(pat?.dir2 || (typeof pat?.count2 === 'number' && pat.count2 > 1));
+            const dir2 = pat?.dir2 || { x: 0, y: 1, z: 0 };
+            const count2 = isDirection2Enabled && typeof pat?.count2 === 'number' && pat.count2 > 0 ? pat.count2 : 1;
+            const spacing2 = typeof pat?.spacing2 === 'number' ? pat.spacing2 : 0;
+
+            // 1. 從 featureEvaluationCache 取得目標特徵的 toolShape
+            const targetShapes: any[] = [];
+            for (const tid of targetIds) {
+              const ts = featureEvaluationCache.getToolShape(tid);
+              if (ts && (typeof ts.IsNull !== 'function' || !ts.IsNull())) {
+                targetShapes.push(ts);
+              }
+            }
+
+            // 若快取未命中則以 tempSolid 作為備用來源
+            if (targetShapes.length === 0 && tempSolid && (typeof tempSolid.IsNull !== 'function' || !tempSolid.IsNull())) {
+              targetShapes.push(tempSolid);
+            }
+
+            if (targetShapes.length === 0) {
+              throw new Error('Linear pattern preview failed: no target shapes available');
+            }
+
+            // 2. 依方向與間距進行平移複製
+            const instanceShapes: any[] = [];
+            for (let pIdx = 0; pIdx < count1; pIdx++) {
+              for (let qIdx = 0; qIdx < count2; qIdx++) {
+                const dx = pIdx * spacing1 * (dir1.x || 0) + (isDirection2Enabled ? qIdx * spacing2 * (dir2.x || 0) : 0);
+                const dy = pIdx * spacing1 * (dir1.y || 0) + (isDirection2Enabled ? qIdx * spacing2 * (dir2.y || 0) : 0);
+                const dz = pIdx * spacing1 * (dir1.z || 0) + (isDirection2Enabled ? qIdx * spacing2 * (dir2.z || 0) : 0);
+
+                const vec = new occ.gp_Vec_4(dx, dy, dz);
+                const trsf = new occ.gp_Trsf_1();
+                setTranslationVec(trsf, vec);
+
+                for (const tShape of targetShapes) {
+                  const xform = new occ.BRepBuilderAPI_Transform_2(tShape, trsf, true);
+                  const transformedCopy = xform.Shape();
+                  instanceShapes.push(transformedCopy);
+                  safeDelete(xform);
+                }
+                safeDelete(trsf);
+                safeDelete(vec);
+              }
+            }
+
+            if (instanceShapes.length === 0) {
+              throw new Error('Linear pattern preview produced no shapes');
+            }
+
+            // 3. 將多個實體組合成 Compound 做為預覽 Shape
+            let previewShape: any = null;
+            if (instanceShapes.length === 1) {
+              previewShape = instanceShapes[0];
+            } else {
+              const builder = new occ.BRep_Builder();
+              const compound = new occ.TopoDS_Compound();
+              builder.MakeCompound(compound);
+              for (const inst of instanceShapes) {
+                builder.Add(compound, inst);
+                safeDelete(inst);
+              }
+              safeDelete(builder);
+              previewShape = compound;
+            }
+
+            safeDelete(tempSolid);
+            tempSolid = previewShape;
+          } else if (op.type === 'CIRCULAR_PATTERN') {
+            const pat = op.patternCircular;
+            const targetIds = op.targetFeatureIds || (pat as any)?.targetFeatureIds || [];
+
+            const axisOrigin = pat?.axis?.origin || (pat as any)?.axisOrigin || { x: 0, y: 0, z: 0 };
+            const axisDirVec = pat?.axis?.direction || (pat as any)?.axisDirection || { x: 0, y: 0, z: 1 };
+            const count = typeof pat?.count === 'number' && pat.count > 0 ? pat.count : 1;
+            let totalAngle =
+              typeof pat?.totalAngle === 'number' && !isNaN(pat.totalAngle)
+                ? pat.totalAngle
+                : (typeof (pat as any)?.fillAngleDeg === 'number'
+                  ? ((pat as any).fillAngleDeg * Math.PI) / 180
+                  : 2 * Math.PI);
+
+            if (Math.abs(totalAngle) > 2 * Math.PI + 0.1) {
+              totalAngle = (totalAngle * Math.PI) / 180;
+            }
+
+            const equalSpacing = pat?.equalSpacing !== false;
+            const isSymmetric = Boolean(pat?.isSymmetric);
+
+            // 1. 從 featureEvaluationCache 取得目標特徵的 toolShape
+            const targetShapes: any[] = [];
+            for (const tid of targetIds) {
+              const ts = featureEvaluationCache.getToolShape(tid);
+              if (ts && (typeof ts.IsNull !== 'function' || !ts.IsNull())) {
+                targetShapes.push(ts);
+              }
+            }
+
+            // 若快取未命中則以 tempSolid 作為備用來源
+            if (targetShapes.length === 0 && tempSolid && (typeof tempSolid.IsNull !== 'function' || !tempSolid.IsNull())) {
+              targetShapes.push(tempSolid);
+            }
+
+            if (targetShapes.length === 0) {
+              throw new Error('Circular pattern preview failed: no target shapes available');
+            }
+
+            // 2. 計算旋轉角度步進 (Step Angle)
+            let deltaTheta = 0;
+            if (equalSpacing) {
+              const isFullCircle = Math.abs(Math.abs(totalAngle) - 2 * Math.PI) < 1e-4;
+              if (isFullCircle) {
+                deltaTheta = totalAngle / count;
+              } else {
+                deltaTheta = count > 1 ? totalAngle / (count - 1) : totalAngle;
+              }
+            } else {
+              deltaTheta = totalAngle;
+            }
+
+            // 3. 建立旋轉軸
+            const axPnt = new occ.gp_Pnt_3(axisOrigin.x, axisOrigin.y, axisOrigin.z);
+            const axDir = new occ.gp_Dir_4(axisDirVec.x, axisDirVec.y, axisDirVec.z);
+            const rotAxis = new occ.gp_Ax1_2(axPnt, axDir);
+
+            // 4. 迴圈生成各 instance 旋轉實例
+            const instanceShapes: any[] = [];
+            try {
+              for (let k = 0; k < count; k++) {
+                const angle = isSymmetric
+                  ? -(totalAngle / 2) + k * deltaTheta
+                  : k * deltaTheta;
+                const trsf = new occ.gp_Trsf_1();
+                setRotationAx1(trsf, rotAxis, angle);
+
+                for (const tShape of targetShapes) {
+                  const xform = new occ.BRepBuilderAPI_Transform_2(tShape, trsf, true);
+                  const transformedCopy = xform.Shape();
+                  instanceShapes.push(transformedCopy);
+                  safeDelete(xform);
+                }
+                safeDelete(trsf);
+              }
+            } finally {
+              safeDelete(rotAxis);
+              safeDelete(axDir);
+              safeDelete(axPnt);
+            }
+
+            if (instanceShapes.length === 0) {
+              throw new Error('Circular pattern preview produced no shapes');
+            }
+
+            // 5. 將多個實體組合成 Compound 做為預覽 Shape
+            let previewShape: any = null;
+            if (instanceShapes.length === 1) {
+              previewShape = instanceShapes[0];
+            } else {
+              const builder = new occ.BRep_Builder();
+              const compound = new occ.TopoDS_Compound();
+              builder.MakeCompound(compound);
+              for (const inst of instanceShapes) {
+                builder.Add(compound, inst);
+                safeDelete(inst);
+              }
+              safeDelete(builder);
+              previewShape = compound;
+            }
+
+            safeDelete(tempSolid);
+            tempSolid = previewShape;
+          } else if (op.type === 'MIRROR_3D') {
+            const plane = op.mirrorPlane || (op as any).mirror3D;
+            if (!plane) {
+              throw new Error('Mirror 3D preview requires mirrorPlane configuration');
+            }
+            const origin = plane.origin || { x: 0, y: 0, z: 0 };
+            const normal = plane.normal || { x: 0, y: 0, z: 1 };
+            const targetIds = op.targetFeatureIds || [];
+
+            const targetShapes: any[] = [];
+            for (const tid of targetIds) {
+              const ts = featureEvaluationCache.getToolShape(tid);
+              if (ts && (typeof ts.IsNull !== 'function' || !ts.IsNull())) {
+                targetShapes.push(ts);
+              }
+            }
+
+            if (targetShapes.length === 0 && tempSolid && (typeof tempSolid.IsNull !== 'function' || !tempSolid.IsNull())) {
+              targetShapes.push(tempSolid);
+            }
+
+            if (targetShapes.length === 0) {
+              throw new Error('Mirror 3D preview failed: no target shapes available');
+            }
+
+            const pnt = new occ.gp_Pnt_3(origin.x, origin.y, origin.z);
+            const dir = new occ.gp_Dir_4(normal.x, normal.y, normal.z);
+            const ax2 = createAx2(pnt, dir, occ);
+            const trsf = new occ.gp_Trsf_1();
+            setMirrorAx2(trsf, ax2);
+
+            const instanceShapes: any[] = [];
+            try {
+              for (const tShape of targetShapes) {
+                const xform = new occ.BRepBuilderAPI_Transform_2(tShape, trsf, true);
+                const mirroredCopy = xform.Shape();
+                instanceShapes.push(mirroredCopy);
+                safeDelete(xform);
+              }
+            } finally {
+              safeDelete(trsf);
+              safeDelete(ax2);
+              safeDelete(dir);
+              safeDelete(pnt);
+            }
+
+            if (instanceShapes.length === 0) {
+              throw new Error('Mirror 3D preview produced no shapes');
+            }
+
+            let previewShape: any = null;
+            if (instanceShapes.length === 1) {
+              previewShape = instanceShapes[0];
+            } else {
+              const builder = new occ.BRep_Builder();
+              const compound = new occ.TopoDS_Compound();
+              builder.MakeCompound(compound);
+              for (const inst of instanceShapes) {
+                builder.Add(compound, inst);
+                safeDelete(inst);
+              }
+              safeDelete(builder);
+              previewShape = compound;
+            }
+
+            safeDelete(tempSolid);
+            tempSolid = previewShape;
+          } else if (op.type === 'SWEEP' || op.type === 'SWEEP_3D') {
+            const pathSegments = op.sweepData?.pathSegments;
+            const profiles = op.profiles;
+            const plane = op.plane || {};
+
+            console.log('[SolidWorker SWEEP Preview] Executing sweep preview:', {
+              profileCount: profiles?.length,
+              pathSegmentsCount: pathSegments?.length,
+              plane,
+            });
+
+            if (!pathSegments || pathSegments.length === 0) {
+              throw new Error('Sweep preview missing path segments');
+            }
+            if (!profiles || profiles.length === 0) {
+              throw new Error('Sweep preview missing profiles');
+            }
+
+            const pathWire = buildPathWire(pathSegments, occ);
+            const sweepSolids: any[] = [];
+
+            for (const profile of profiles) {
+              const localFace = createFaceFromProfile(profile, occ);
+              const spatialFace = transformFaceTo3D(localFace, plane, occ);
+              safeDelete(localFace);
+
+              const pipeMaker =
+                typeof occ.BRepOffsetAPI_MakePipe_1 === 'function'
+                  ? new occ.BRepOffsetAPI_MakePipe_1(pathWire, spatialFace)
+                  : new occ.BRepOffsetAPI_MakePipe(pathWire, spatialFace);
+
+              pipeMaker.Build();
+              if (pipeMaker.IsDone()) {
+                const pipeSolid = pipeMaker.Shape();
+                sweepSolids.push(pipeSolid);
+              } else {
+                safeDelete(spatialFace);
+                safeDelete(pipeMaker);
+                safeDelete(pathWire);
+                throw new Error(`Pipe sweep preview failed for profile ${profile.id || ''}`);
+              }
+
+              safeDelete(spatialFace);
+              safeDelete(pipeMaker);
+            }
+
+            safeDelete(pathWire);
+
+            if (sweepSolids.length === 0) {
+              throw new Error('Sweep preview produced no valid solids');
+            }
+
+            let previewShape: any = null;
+            if (sweepSolids.length === 1) {
+              previewShape = sweepSolids[0];
+            } else {
+              const builder = new occ.BRep_Builder();
+              const compound = new occ.TopoDS_Compound();
+              builder.MakeCompound(compound);
+              for (const s of sweepSolids) {
+                builder.Add(compound, s);
+                safeDelete(s);
+              }
+              safeDelete(builder);
+              previewShape = compound;
+            }
+
+            safeDelete(tempSolid);
+            tempSolid = previewShape;
+            console.log('[SolidWorker SWEEP Preview] Generated preview shape successfully');
+          } else if (op.type === 'LOFT') {
+            if (!op.loftData || !op.loftData.sections || op.loftData.sections.length < 2) {
+              throw new Error('Loft preview requires at least 2 sections');
+            }
+
+            const isSolid = op.loftData.isSolid ?? true;
+            const ruled = op.loftData.ruled ?? false;
+            const thruSections = new occ.BRepOffsetAPI_ThruSections(isSolid, ruled, 1.0e-6);
+
+            const intermediateWires: any[] = [];
+
+            for (const section of op.loftData.sections) {
+              if (!section.profiles || section.profiles.length === 0) continue;
+              for (const profile of section.profiles) {
+                let localWire: any = null;
+                if (profile.segments && profile.segments.length > 0) {
+                  localWire = buildWireFromSegments(profile.segments, occ);
+                } else if (profile.outerLoop && profile.outerLoop.length > 1) {
+                  localWire = buildWireFromPoints(profile.outerLoop, occ);
+                }
+                if (!localWire) continue;
+
+                const spatialWire = transformWireTo3D(localWire, section.plane, occ);
+                safeDelete(localWire);
+
+                thruSections.AddWire(spatialWire);
+                intermediateWires.push(spatialWire);
+              }
+            }
+
+            thruSections.Build();
+
+            if (!thruSections.IsDone()) {
+              for (const w of intermediateWires) safeDelete(w);
+              safeDelete(thruSections);
+              throw new Error('Loft preview section connection failed');
+            }
+
+            const loftShape = thruSections.Shape();
+
+            for (const w of intermediateWires) {
+              safeDelete(w);
+            }
+            safeDelete(thruSections);
+
+            safeDelete(tempSolid);
+            tempSolid = loftShape;
+            console.log('[SolidWorker LOFT Preview] Generated preview shape successfully');
           } else {
             throw new Error(`Unsupported preview operation type: ${op.type}`);
           }
 
           const meshData = tessellateSolid(tempSolid, occ);
+          console.log('[SolidWorker SWEEP Preview] Tessellation complete. Vertices:', meshData.vertices?.length);
 
           const vClone = meshData.vertices.slice();
           const nClone = meshData.normals.slice();
@@ -3468,6 +4053,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             transferBuffers
           );
         } catch (previewErr: any) {
+          console.warn('[SolidWorker Preview Error]:', previewErr?.message || previewErr);
           _self.postMessage({
             taskId: req.taskId,
             type: req.type,

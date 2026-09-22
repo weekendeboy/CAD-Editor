@@ -359,12 +359,20 @@ export interface CircularPatternFeature extends BaseCADFeature {
   count: number;              // 實例總數 (>= 2)
   totalAngle: number;         // 填滿總角度 (弧度，例如 2 * Math.PI)
   equalSpacing: boolean;      // 是否等間距排列
+  isSymmetric?: boolean;      // 中心對稱分佈 (Symmetric / Centered)
 }
 
 export interface Mirror3DFeature extends BaseCADFeature {
   type: 'MIRROR_3D';
   targetFeatureIds: string[];     // 要鏡射的特徵 ID 清單
-  mirrorPlaneFeatureId: string;   // 參照的 DatumPlane 特徵 ID
+  mirrorPlaneFeatureId?: string;   // 參照的 DatumPlane 特徵 ID (選填)
+  mirrorPlane?: {
+    planeId?: string;
+    origin: Point3D;
+    normal: Point3D;
+    faceLabel?: string;
+    faceRef?: any;
+  };
 }
 
 export interface SweepFeature extends BaseCADFeature {

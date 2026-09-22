@@ -331,7 +331,7 @@ export const FeatureTreePanel: React.FC<FeatureTreePanelProps> = ({ onEditFeatur
                     onDelete={(id) => removeFeature(id)}
                     onEditFeature={onEditFeature}
                   />
-                  {(feature.type === 'EXTRUDE' || feature.type === 'CUT_EXTRUDE') && !isPast && (
+                  {(feature.type === 'EXTRUDE' || feature.type === 'CUT_EXTRUDE' || feature.type === 'SHELL_3D' || feature.type === 'FILLET_3D' || feature.type === 'CHAMFER_3D' || feature.type === 'LINEAR_PATTERN' || feature.type === 'CIRCULAR_PATTERN' || feature.type === 'SWEEP' || feature.type === 'LOFT') && !isPast && (
                     <button
                       onClick={(e) => {
                         e.stopPropagation();

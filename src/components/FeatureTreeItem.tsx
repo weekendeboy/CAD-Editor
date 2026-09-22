@@ -17,6 +17,10 @@ import {
   Trash2,
   Edit3,
   Sliders,
+  Orbit,
+  LayoutGrid,
+  Route,
+  Layers,
 } from 'lucide-react';
 
 export interface FeatureTreeItemProps {
@@ -57,6 +61,14 @@ function renderFeatureIcon(type: FeatureType, className: string = 'w-4 h-4') {
       return <CornerDownRight className={className} />;
     case 'CHAMFER_3D':
       return <SquareSlash className={className} />;
+    case 'LINEAR_PATTERN':
+      return <LayoutGrid className={className} />;
+    case 'CIRCULAR_PATTERN':
+      return <Orbit className={className} />;
+    case 'SWEEP':
+      return <Route className={className} />;
+    case 'LOFT':
+      return <Layers className={className} />;
     default:
       return <Box className={className} />;
   }
@@ -317,7 +329,7 @@ export const FeatureTreeItem: React.FC<FeatureTreeItemProps> = ({
               </button>
             )}
 
-            {(feature.type === 'EXTRUDE' || feature.type === 'CUT_EXTRUDE' || feature.type === 'SHELL_3D') && !isPastRollback && (
+            {(feature.type === 'EXTRUDE' || feature.type === 'CUT_EXTRUDE' || feature.type === 'SHELL_3D' || feature.type === 'FILLET_3D' || feature.type === 'CHAMFER_3D' || feature.type === 'LINEAR_PATTERN' || feature.type === 'CIRCULAR_PATTERN' || feature.type === 'SWEEP' || feature.type === 'LOFT') && !isPastRollback && (
               <button
                 onClick={(e) => {
                   e.stopPropagation();

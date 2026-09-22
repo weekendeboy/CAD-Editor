@@ -18,6 +18,8 @@ import type {
   Point2D,
   Point3D,
   Vector3D,
+  CADEntity2D,
+  PolylineEntity,
   LineEntity,
   ArcEntity,
 } from '../../types/cad';
@@ -29,6 +31,8 @@ import {
 import type { FeatureEvalOp } from './SolidEngine.types';
 import type { TopoReference } from './PersistentTopology.types';
 import { findClosedProfiles } from '../2d/TopologyEngine';
+import { getArcMidPoint } from '../2d/GeometryMath';
+import { decomposePolylineToEntities } from '../2d/PolylineUtils';
 
 /**
  * 向量正規化輔助函式
@@ -360,11 +364,47 @@ export function compileFeaturePlan(
             count: Math.max(2, feat.count || 2),
             totalAngle: feat.totalAngle || 2 * Math.PI,
             equalSpacing: feat.equalSpacing ?? true,
+            isSymmetric: Boolean(feat.isSymmetric),
           },
         });
       } else if (feature.type === 'MIRROR_3D') {
         const feat = feature as Mirror3DFeature;
-        const refPlane = planeCache.get(feat.mirrorPlaneFeatureId) || DatumFrontPlane;
+        let origin: Point3D = { x: 0, y: 0, z: 0 };
+        let normal: Vector3D = { x: 0, y: 0, z: 1 };
+        let refPlane: CustomPlane | undefined;
+
+        const planeId = feat.mirrorPlane?.planeId || feat.mirrorPlaneFeatureId;
+
+        if (planeId && planeCache.has(planeId)) {
+          refPlane = planeCache.get(planeId);
+          if (refPlane) {
+            origin = refPlane.origin;
+            normal = normalizeVec3(refPlane.normal);
+          }
+        } else if (planeId && planesMap && planesMap[planeId]) {
+          refPlane = planesMap[planeId];
+          if (refPlane) {
+            origin = refPlane.origin;
+            normal = normalizeVec3(refPlane.normal);
+          }
+        } else if (feat.mirrorPlane?.origin && feat.mirrorPlane?.normal) {
+          // 若特徵是基於模型表面鏡射，直接使用其儲存的 origin 與 normal
+          origin = feat.mirrorPlane.origin;
+          normal = normalizeVec3(feat.mirrorPlane.normal);
+        } else if (feat.mirrorPlaneFeatureId) {
+          const found = planeCache.get(feat.mirrorPlaneFeatureId) || (planesMap && planesMap[feat.mirrorPlaneFeatureId]);
+          if (found) {
+            refPlane = found;
+            origin = found.origin;
+            normal = normalizeVec3(found.normal);
+          }
+        }
+
+        const mirrorPlaneConfig = {
+          planeId,
+          origin,
+          normal,
+        };
 
         ops.push({
           featureId: feat.id,
@@ -372,11 +412,9 @@ export function compileFeaturePlan(
           operation: 'JOIN',
           targetFeatureIds: feat.targetFeatureIds || [],
           profiles: [],
-          plane: refPlane,
-          mirrorPlane: {
-            origin: refPlane.origin,
-            normal: normalizeVec3(refPlane.normal),
-          },
+          plane: refPlane || DatumFrontPlane,
+          mirrorPlane: mirrorPlaneConfig,
+          mirror3D: mirrorPlaneConfig,
         });
       } else if (feature.type === 'SWEEP') {
         const feat = feature as SweepFeature;
@@ -398,11 +436,23 @@ export function compileFeaturePlan(
             mid?: Point3D;
             center?: Point3D;
             radius?: number;
+            clockwise?: boolean;
+            sweepFlag?: number | boolean;
           }[] = [];
 
+          // 收集所有有效路徑幾何圖元 (若為 Polyline 則打散為 line 與 arc)
+          const rawEntities: CADEntity2D[] = [];
           for (const entity of pathSk.entities) {
             if (entity.isConstruction) continue;
+            if (entity.type === 'polyline') {
+              const decomposed = decomposePolylineToEntities(entity as PolylineEntity);
+              rawEntities.push(...decomposed);
+            } else {
+              rawEntities.push(entity);
+            }
+          }
 
+          for (const entity of rawEntities) {
             if (entity.type === 'line') {
               const line = entity as LineEntity;
               pathSegments.push({
@@ -412,6 +462,7 @@ export function compileFeaturePlan(
               });
             } else if (entity.type === 'arc') {
               const arc = entity as ArcEntity;
+              const isCW = Boolean(arc.clockwise);
               const start2D = {
                 x: arc.center.x + arc.radius * Math.cos(arc.startAngle),
                 y: arc.center.y + arc.radius * Math.sin(arc.startAngle),
@@ -420,13 +471,7 @@ export function compileFeaturePlan(
                 x: arc.center.x + arc.radius * Math.cos(arc.endAngle),
                 y: arc.center.y + arc.radius * Math.sin(arc.endAngle),
               };
-              const midAngle =
-                arc.startAngle +
-                (arc.endAngle - arc.startAngle + (arc.endAngle < arc.startAngle ? Math.PI * 2 : 0)) / 2;
-              const mid2D = {
-                x: arc.center.x + arc.radius * Math.cos(midAngle),
-                y: arc.center.y + arc.radius * Math.sin(midAngle),
-              };
+              const mid2D = getArcMidPoint(arc);
 
               pathSegments.push({
                 type: 'arc',
@@ -435,6 +480,8 @@ export function compileFeaturePlan(
                 mid: mapPoint2DTo3D(mid2D, pathSk.plane),
                 center: mapPoint2DTo3D(arc.center, pathSk.plane),
                 radius: arc.radius,
+                clockwise: isCW,
+                sweepFlag: isCW ? 1 : 0,
               });
             }
           }

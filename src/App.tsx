@@ -111,6 +111,18 @@ export default function App() {
         mode: featureType,
         featureId,
       });
+    } else if (featureType === 'LINEAR_PATTERN' || featureType === 'CIRCULAR_PATTERN') {
+      setPatternModalConfig({
+        isOpen: true,
+        mode: featureType,
+        featureId,
+      });
+    } else if (featureType === 'SWEEP' || featureType === 'LOFT') {
+      setSweepLoftModalConfig({
+        isOpen: true,
+        mode: featureType,
+        featureId,
+      });
     }
   }, []);
 
@@ -127,6 +139,7 @@ export default function App() {
   const [patternModalConfig, setPatternModalConfig] = useState<{
     isOpen: boolean;
     mode: 'LINEAR_PATTERN' | 'CIRCULAR_PATTERN' | 'MIRROR_3D';
+    featureId?: string;
   }>({
     isOpen: false,
     mode: 'LINEAR_PATTERN',
@@ -136,6 +149,7 @@ export default function App() {
   const [sweepLoftModalConfig, setSweepLoftModalConfig] = useState<{
     isOpen: boolean;
     mode: 'SWEEP' | 'LOFT';
+    featureId?: string;
   }>({
     isOpen: false,
     mode: 'SWEEP',
@@ -1567,12 +1581,14 @@ export default function App() {
       <PatternMirrorModal
         isOpen={patternModalConfig.isOpen}
         mode={patternModalConfig.mode}
-        onClose={() => setPatternModalConfig((prev) => ({ ...prev, isOpen: false }))}
+        featureId={patternModalConfig.featureId}
+        onClose={() => setPatternModalConfig((prev) => ({ ...prev, isOpen: false, featureId: undefined }))}
       />
       <SweepLoftModal
         isOpen={sweepLoftModalConfig.isOpen}
         mode={sweepLoftModalConfig.mode}
-        onClose={() => setSweepLoftModalConfig((prev) => ({ ...prev, isOpen: false }))}
+        featureId={sweepLoftModalConfig.featureId}
+        onClose={() => setSweepLoftModalConfig((prev) => ({ ...prev, isOpen: false, featureId: undefined }))}
       />
       <DatumPlaneModal
         isOpen={datumPlaneModalOpen}

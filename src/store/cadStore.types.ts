@@ -65,7 +65,7 @@ export interface SelectedEdgeItem {
 }
 
 export interface FilletChamferPreviewState {
-  type: 'FILLET_3D' | 'CHAMFER_3D';
+  type: 'FILLET_3D' | 'CHAMFER_3D' | 'SHELL_3D' | 'LINEAR_PATTERN' | 'CIRCULAR_PATTERN' | 'MIRROR_3D' | 'SWEEP' | 'SWEEP_3D' | 'LOFT';
   mesh: MeshResult | null;
   error?: string;
 }

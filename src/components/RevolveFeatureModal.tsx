@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useCADStore } from '../store/cadStore';
+import { useDraggableModal } from '../hooks/useDraggableModal';
 import {
   SketchFeature,
   RevolveFeature,
@@ -83,6 +84,8 @@ const RevolveFeatureModalContent: React.FC<RevolveFeatureModalContentProps> = ({
 
   const [angleDeg, setAngleDeg] = useState<number>(360);
   const [reversed, setReversed] = useState<boolean>(false);
+
+  const { position, dragHandleProps } = useDraggableModal({ defaultX: 280, defaultY: 70 });
 
   // 自動確保切換至 3D 視圖
   useEffect(() => {
@@ -214,18 +217,22 @@ const RevolveFeatureModalContent: React.FC<RevolveFeatureModalContentProps> = ({
   };
 
   return (
-    <div
-      className="fixed top-24 left-4 z-40 w-96 max-h-[calc(100vh-7rem)] overflow-hidden flex flex-col bg-neutral-950/95 backdrop-blur-md border border-neutral-800 rounded-xl shadow-2xl text-neutral-200 select-none animate-in fade-in slide-in-from-left-4 duration-200"
-      id="revolve-feature-propertymanager"
-    >
-      {/* 頂部 Header */}
+    <div className="fixed inset-0 z-40 pointer-events-none">
       <div
-        className={`h-12 px-4 border-b flex items-center justify-between shrink-0 font-sans ${
-          isBoss
-            ? 'bg-purple-950/70 border-purple-800/50'
-            : 'bg-rose-950/70 border-rose-800/50'
-        }`}
+        style={{ transform: `translate3d(${position.x}px, ${position.y}px, 0)`, position: 'fixed', top: 0, left: 0 }}
+        className="w-96 max-h-[calc(100vh-5rem)] overflow-hidden flex flex-col bg-neutral-950/95 backdrop-blur-md border border-neutral-800 rounded-xl shadow-2xl text-neutral-200 select-none animate-in fade-in slide-in-from-left-4 duration-200 pointer-events-auto"
+        onClick={(e) => e.stopPropagation()}
+        id="revolve-feature-propertymanager"
       >
+        {/* 頂部 Header */}
+        <div
+          {...dragHandleProps}
+          className={`h-12 px-4 border-b flex items-center justify-between shrink-0 font-sans cursor-move select-none ${
+            isBoss
+              ? 'bg-purple-950/70 border-purple-800/50'
+              : 'bg-rose-950/70 border-rose-800/50'
+          }`}
+        >
         <div className="flex items-center gap-2.5">
           <div
             className={`p-1.5 rounded-lg border shadow-sm ${
@@ -475,6 +482,7 @@ const RevolveFeatureModalContent: React.FC<RevolveFeatureModalContentProps> = ({
         </div>
       </form>
     </div>
+  </div>
   );
 };
 

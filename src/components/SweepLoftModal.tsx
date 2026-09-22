@@ -1,7 +1,27 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useCADStore } from '../store/cadStore';
-import { SketchFeature, SweepFeature, LoftFeature } from '../types/cad';
+import { useDraggableModal } from '../hooks/useDraggableModal';
+import { solidEngine } from '../core/3d/SolidEngine';
+import { FeatureEvalOp } from '../core/3d/SolidEngine.types';
+import {
+  SketchFeature,
+  SweepFeature,
+  LoftFeature,
+  Point3D,
+  CADEntity2D,
+  PolylineEntity,
+  LineEntity,
+  ArcEntity,
+  CustomPlane,
+  DatumFrontPlane,
+  DatumTopPlane,
+  DatumRightPlane,
+  DatumPlaneFeature,
+} from '../types/cad';
 import { findClosedProfiles } from '../core/2d/TopologyEngine';
+import { getArcMidPoint } from '../core/2d/GeometryMath';
+import { decomposePolylineToEntities } from '../core/2d/PolylineUtils';
+import { mapPoint2DTo3D } from '../core/3d/FeaturePipelineAdapter';
 import {
   Route,
   Layers,
@@ -21,15 +41,26 @@ import {
 export interface SweepLoftModalProps {
   isOpen: boolean;
   mode: 'SWEEP' | 'LOFT';
+  featureId?: string;
   onClose: () => void;
 }
 
 export const SweepLoftModal: React.FC<SweepLoftModalProps> = ({
   isOpen,
   mode,
+  featureId,
   onClose,
 }) => {
-  const { document, activeSketchId, addFeature, setViewMode } = useCADStore();
+  const {
+    document,
+    activeSketchId,
+    addFeature,
+    updateFeature,
+    setViewMode,
+    setFilletChamferPreview,
+  } = useCADStore();
+
+  const { position, resetPosition, dragHandleProps } = useDraggableModal({ defaultX: 280, defaultY: 70 });
 
   // 取得目前特徵樹中所有草圖特徵
   const allSketches = (document?.featureTree || []).filter(
@@ -49,6 +80,13 @@ export const SweepLoftModal: React.FC<SweepLoftModalProps> = ({
   const [ruled, setRuled] = useState(false);
   const [isSolid, setIsSolid] = useState(true);
 
+  // 單次 Hydration 防護機制 Ref
+  const prevOpenRef = useRef<{ isOpen: boolean; featureId?: string; mode?: string }>({
+    isOpen: false,
+    featureId: undefined,
+    mode: undefined,
+  });
+
   // 篩選具備封閉輪廓的草圖清單（可用於截面 profile）
   const profileSketches = allSketches.filter(
     (s) =>
@@ -61,12 +99,44 @@ export const SweepLoftModal: React.FC<SweepLoftModalProps> = ({
     (s) => s.entities && s.entities.some((e) => !e.isConstruction)
   );
 
-  // 當彈窗開啟或 mode 切換時，重新初始化表單數值
+  // 當彈窗開啟或 featureId / mode 切換時，初始化或回填表單數值
   useEffect(() => {
-    if (!isOpen) return;
+    const isJustOpened =
+      isOpen &&
+      (!prevOpenRef.current.isOpen ||
+        prevOpenRef.current.featureId !== featureId ||
+        prevOpenRef.current.mode !== mode);
+
+    prevOpenRef.current = { isOpen, featureId, mode };
+
+    if (!isJustOpened || !isOpen) return;
+
+    resetPosition();
 
     const tree = document?.featureTree || [];
 
+    // 編輯模式：回填既有特徵資料
+    if (featureId) {
+      const existing = tree.find((f) => f.id === featureId);
+      if (existing) {
+        setFeatureName(existing.name || '');
+        if (existing.type === 'SWEEP') {
+          const sw = existing as SweepFeature;
+          setSelectedProfileSketchId(sw.profileSketchId || '');
+          setSelectedPathSketchId(sw.pathSketchId || '');
+          return;
+        } else if (existing.type === 'LOFT') {
+          const lf = existing as LoftFeature;
+          setSelectedSketchIds(lf.sketchIds || []);
+          setSketchToAdd('');
+          setRuled(Boolean(lf.ruled));
+          setIsSolid(lf.isSolid !== false);
+          return;
+        }
+      }
+    }
+
+    // 新建模式：初始化預設值
     if (mode === 'SWEEP') {
       const count = tree.filter((f) => f.type === 'SWEEP').length + 1;
       setFeatureName(`Sweep${count}`);
@@ -96,7 +166,7 @@ export const SweepLoftModal: React.FC<SweepLoftModalProps> = ({
       setRuled(false);
       setIsSolid(true);
     }
-  }, [isOpen, mode, activeSketchId, document?.featureTree]);
+  }, [isOpen, featureId, mode, activeSketchId, document?.featureTree, profileSketches, pathCandidateSketches, resetPosition]);
 
   // 當 Sweep 截面草圖切換時，自動校正路徑草圖避免衝突
   const handleProfileChange = (newProfileId: string) => {
@@ -131,9 +201,359 @@ export const SweepLoftModal: React.FC<SweepLoftModalProps> = ({
     });
   };
 
+  // 卸載時清理預覽狀態
+  useEffect(() => {
+    return () => {
+      setFilletChamferPreview(null);
+    };
+  }, [setFilletChamferPreview]);
+
+  // 即時 3D Live Preview 計算 (Debounce 80ms，調用 SolidEngine 進行 Sweep 即時半透明網格預覽)
+  useEffect(() => {
+    if (
+      !isOpen ||
+      mode !== 'SWEEP' ||
+      !selectedProfileSketchId ||
+      !selectedPathSketchId ||
+      selectedProfileSketchId === selectedPathSketchId
+    ) {
+      if (mode === 'SWEEP' || !isOpen) {
+        setFilletChamferPreview(null);
+      }
+      return;
+    }
+
+    let isCancelled = false;
+
+    const timer = setTimeout(async () => {
+      try {
+        const tree = document?.featureTree || [];
+        const planesMap = document?.planes || {};
+
+        const planeCache = new Map<string, CustomPlane>();
+        planeCache.set('datum-front', DatumFrontPlane);
+        planeCache.set('datum-top', DatumTopPlane);
+        planeCache.set('datum-right', DatumRightPlane);
+
+        if (planesMap) {
+          for (const [key, plane] of Object.entries(planesMap)) {
+            if (plane) {
+              planeCache.set(key, plane);
+              if (plane.id) {
+                planeCache.set(plane.id, plane);
+              }
+            }
+          }
+        }
+
+        for (const feat of tree) {
+          if (feat.type === 'DATUM_PLANE') {
+            const datumFeat = feat as DatumPlaneFeature;
+            if (datumFeat.plane) {
+              planeCache.set(datumFeat.id, datumFeat.plane);
+            }
+          }
+        }
+
+        const resolveSketchPlane = (sk: SketchFeature): CustomPlane => {
+          if (sk.planeFeatureId && planeCache.has(sk.planeFeatureId)) {
+            return planeCache.get(sk.planeFeatureId)!;
+          }
+          return sk.plane || DatumFrontPlane;
+        };
+
+        const profileSk = tree.find((f) => f.id === selectedProfileSketchId) as SketchFeature | undefined;
+        const pathSk = tree.find((f) => f.id === selectedPathSketchId) as SketchFeature | undefined;
+
+        if (!profileSk || !pathSk) {
+          if (!isCancelled) setFilletChamferPreview(null);
+          return;
+        }
+
+        const profilePlane = resolveSketchPlane(profileSk);
+        const pathPlane = resolveSketchPlane(pathSk);
+
+        let availableProfiles = profileSk.profiles || [];
+        if (!availableProfiles || availableProfiles.length === 0) {
+          availableProfiles = findClosedProfiles(profileSk.entities || [], profileSk.constraints || []);
+        }
+
+        if (availableProfiles.length === 0) {
+          if (!isCancelled) setFilletChamferPreview(null);
+          return;
+        }
+
+        const pathSegments: {
+          type: 'line' | 'arc';
+          start: Point3D;
+          end: Point3D;
+          mid?: Point3D;
+          center?: Point3D;
+          radius?: number;
+          clockwise?: boolean;
+          sweepFlag?: number | boolean;
+        }[] = [];
+
+        // 收集所有有效路徑幾何圖元 (若為 Polyline 則打散為 line 與 arc)
+        const rawEntities: CADEntity2D[] = [];
+        for (const entity of pathSk.entities || []) {
+          if (entity.isConstruction) continue;
+          if (entity.type === 'polyline') {
+            const decomposed = decomposePolylineToEntities(entity as PolylineEntity);
+            rawEntities.push(...decomposed);
+          } else {
+            rawEntities.push(entity);
+          }
+        }
+
+        for (const entity of rawEntities) {
+          if (entity.type === 'line') {
+            const line = entity as LineEntity;
+            pathSegments.push({
+              type: 'line',
+              start: mapPoint2DTo3D(line.start, pathPlane),
+              end: mapPoint2DTo3D(line.end, pathPlane),
+            });
+          } else if (entity.type === 'arc') {
+            const arc = entity as ArcEntity;
+            const isCW = Boolean(arc.clockwise);
+            const start2D = {
+              x: arc.center.x + arc.radius * Math.cos(arc.startAngle),
+              y: arc.center.y + arc.radius * Math.sin(arc.startAngle),
+            };
+            const end2D = {
+              x: arc.center.x + arc.radius * Math.cos(arc.endAngle),
+              y: arc.center.y + arc.radius * Math.sin(arc.endAngle),
+            };
+            const mid2D = getArcMidPoint(arc);
+
+            pathSegments.push({
+              type: 'arc',
+              start: mapPoint2DTo3D(start2D, pathPlane),
+              end: mapPoint2DTo3D(end2D, pathPlane),
+              mid: mapPoint2DTo3D(mid2D, pathPlane),
+              center: mapPoint2DTo3D(arc.center, pathPlane),
+              radius: arc.radius,
+              clockwise: isCW,
+              sweepFlag: isCW ? 1 : 0,
+            });
+          }
+        }
+
+        if (pathSegments.length === 0) {
+          if (!isCancelled) setFilletChamferPreview(null);
+          return;
+        }
+
+        const op: FeatureEvalOp = {
+          featureId: 'preview-sweep',
+          type: 'SWEEP',
+          operation: 'JOIN',
+          profiles: availableProfiles,
+          plane: profilePlane,
+          sweepData: { pathSegments },
+          sweep: {
+            profileSketchId: selectedProfileSketchId,
+            pathSketchId: selectedPathSketchId,
+          },
+        };
+
+        console.log('[SweepPreview] dispatching previewOperation:', {
+          profileSketchId: selectedProfileSketchId,
+          pathSketchId: selectedPathSketchId,
+          profilesCount: availableProfiles.length,
+          pathSegmentsCount: pathSegments.length,
+          profilePlane,
+          pathPlane,
+        });
+
+        const meshResult = await solidEngine.previewOperation(op);
+        console.log('[SweepPreview] received meshResult:', {
+          success: meshResult?.success,
+          verticesLength: meshResult?.vertices?.length,
+          indicesLength: meshResult?.indices?.length,
+        });
+
+        if (!isCancelled) {
+          if (meshResult && meshResult.vertices && meshResult.vertices.length > 0) {
+            setFilletChamferPreview({
+              type: 'SWEEP',
+              mesh: meshResult,
+            });
+          } else {
+            console.warn('[SweepPreview] meshResult is empty or invalid');
+            setFilletChamferPreview(null);
+          }
+        }
+      } catch (err: any) {
+        console.warn('[SweepPreview] caught error:', err);
+        if (!isCancelled) {
+          setFilletChamferPreview({
+            type: 'SWEEP',
+            mesh: null,
+            error: err?.message || '掃出預覽失敗 (Sweep preview failed)',
+          });
+        }
+      }
+    }, 80);
+
+    return () => {
+      isCancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    isOpen,
+    mode,
+    selectedProfileSketchId,
+    selectedPathSketchId,
+    document?.featureTree,
+    document?.planes,
+    setFilletChamferPreview,
+  ]);
+
+  // 即時 3D Live Preview 計算 (Debounce 80ms，調用 SolidEngine 進行 Loft 即時半透明網格預覽)
+  useEffect(() => {
+    if (!isOpen || mode !== 'LOFT' || selectedSketchIds.length < 2) {
+      if (mode === 'LOFT' || !isOpen) {
+        setFilletChamferPreview(null);
+      }
+      return;
+    }
+
+    let isCancelled = false;
+
+    const timer = setTimeout(async () => {
+      try {
+        const tree = document?.featureTree || [];
+        const planesMap = document?.planes || {};
+
+        const planeCache = new Map<string, CustomPlane>();
+        planeCache.set('datum-front', DatumFrontPlane);
+        planeCache.set('datum-top', DatumTopPlane);
+        planeCache.set('datum-right', DatumRightPlane);
+
+        if (planesMap) {
+          for (const [key, plane] of Object.entries(planesMap)) {
+            if (plane) {
+              planeCache.set(key, plane);
+              if (plane.id) {
+                planeCache.set(plane.id, plane);
+              }
+            }
+          }
+        }
+
+        for (const feat of tree) {
+          if (feat.type === 'DATUM_PLANE') {
+            const datumFeat = feat as DatumPlaneFeature;
+            if (datumFeat.plane) {
+              planeCache.set(datumFeat.id, datumFeat.plane);
+            }
+          }
+        }
+
+        const resolveSketchPlane = (sk: SketchFeature): CustomPlane => {
+          if (sk.planeFeatureId && planeCache.has(sk.planeFeatureId)) {
+            return planeCache.get(sk.planeFeatureId)!;
+          }
+          return sk.plane || DatumFrontPlane;
+        };
+
+        const sections: {
+          profiles: SketchFeature['profiles'];
+          plane: CustomPlane;
+        }[] = [];
+
+        for (const skId of selectedSketchIds) {
+          const sk = tree.find((f) => f.id === skId) as SketchFeature | undefined;
+          if (!sk) continue;
+
+          let availableProfiles = sk.profiles || [];
+          if (!availableProfiles || availableProfiles.length === 0) {
+            availableProfiles = findClosedProfiles(sk.entities || [], sk.constraints || []);
+          }
+
+          if (availableProfiles && availableProfiles.length > 0) {
+            sections.push({
+              profiles: availableProfiles,
+              plane: resolveSketchPlane(sk),
+            });
+          }
+        }
+
+        if (sections.length < 2) {
+          if (!isCancelled) setFilletChamferPreview(null);
+          return;
+        }
+
+        const op: FeatureEvalOp = {
+          featureId: 'preview-loft',
+          type: 'LOFT',
+          operation: 'JOIN',
+          profiles: [],
+          plane: sections[0].plane,
+          loftData: {
+            sections,
+            isSolid,
+            ruled,
+          },
+        };
+
+        console.log('[LoftPreview] dispatching previewOperation:', {
+          sectionsCount: sections.length,
+          isSolid,
+          ruled,
+        });
+
+        const meshResult = await solidEngine.previewOperation(op);
+        console.log('[LoftPreview] received meshResult:', {
+          success: meshResult?.success,
+          verticesLength: meshResult?.vertices?.length,
+          indicesLength: meshResult?.indices?.length,
+        });
+
+        if (!isCancelled) {
+          if (meshResult && meshResult.vertices && meshResult.vertices.length > 0) {
+            setFilletChamferPreview({
+              type: 'LOFT',
+              mesh: meshResult,
+            });
+          } else {
+            console.warn('[LoftPreview] meshResult is empty or invalid');
+            setFilletChamferPreview(null);
+          }
+        }
+      } catch (err: any) {
+        console.warn('[LoftPreview] caught error:', err);
+        if (!isCancelled) {
+          setFilletChamferPreview({
+            type: 'LOFT',
+            mesh: null,
+            error: err?.message || '疊層拉伸預覽失敗 (Loft preview failed)',
+          });
+        }
+      }
+    }, 80);
+
+    return () => {
+      isCancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    isOpen,
+    mode,
+    selectedSketchIds,
+    isSolid,
+    ruled,
+    document?.featureTree,
+    document?.planes,
+    setFilletChamferPreview,
+  ]);
+
   if (!isOpen) return null;
 
   const isSweep = mode === 'SWEEP';
+  const isEditMode = Boolean(featureId);
 
   // 驗證檢查
   const isSweepValid =
@@ -157,34 +577,53 @@ export const SweepLoftModal: React.FC<SweepLoftModalProps> = ({
     if (isSweep) {
       if (!isSweepValid) return;
 
-      const newFeature: SweepFeature = {
-        id: generateId(),
-        name: trimmedName,
-        type: 'SWEEP',
-        profileSketchId: selectedProfileSketchId,
-        pathSketchId: selectedPathSketchId,
-        suppressed: false,
-        visible: true,
-        dependencies: [selectedProfileSketchId, selectedPathSketchId],
-      };
+      if (featureId) {
+        updateFeature(featureId, {
+          name: trimmedName,
+          profileSketchId: selectedProfileSketchId,
+          pathSketchId: selectedPathSketchId,
+          dependencies: [selectedProfileSketchId, selectedPathSketchId],
+        });
+      } else {
+        const newFeature: SweepFeature = {
+          id: generateId(),
+          name: trimmedName,
+          type: 'SWEEP',
+          profileSketchId: selectedProfileSketchId,
+          pathSketchId: selectedPathSketchId,
+          suppressed: false,
+          visible: true,
+          dependencies: [selectedProfileSketchId, selectedPathSketchId],
+        };
 
-      addFeature(newFeature);
+        addFeature(newFeature);
+      }
     } else {
       if (!isLoftValid) return;
 
-      const newFeature: LoftFeature = {
-        id: generateId(),
-        name: trimmedName,
-        type: 'LOFT',
-        sketchIds: selectedSketchIds,
-        isSolid,
-        ruled,
-        suppressed: false,
-        visible: true,
-        dependencies: [...selectedSketchIds],
-      };
+      if (featureId) {
+        updateFeature(featureId, {
+          name: trimmedName,
+          sketchIds: selectedSketchIds,
+          isSolid,
+          ruled,
+          dependencies: [...selectedSketchIds],
+        });
+      } else {
+        const newFeature: LoftFeature = {
+          id: generateId(),
+          name: trimmedName,
+          type: 'LOFT',
+          sketchIds: selectedSketchIds,
+          isSolid,
+          ruled,
+          suppressed: false,
+          visible: true,
+          dependencies: [...selectedSketchIds],
+        };
 
-      addFeature(newFeature);
+        addFeature(newFeature);
+      }
     }
 
     // 自動切換視圖模式至 3D 並關閉彈窗
@@ -198,14 +637,16 @@ export const SweepLoftModal: React.FC<SweepLoftModalProps> = ({
   );
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+    <div className="fixed inset-0 z-40 pointer-events-none">
       <div
-        className="w-full max-w-md bg-neutral-950 border border-neutral-800 rounded-xl shadow-2xl overflow-hidden flex flex-col text-neutral-200 select-none"
+        style={{ transform: `translate3d(${position.x}px, ${position.y}px, 0)`, position: 'fixed', top: 0, left: 0 }}
+        className="w-96 max-h-[calc(100vh-5rem)] bg-neutral-950/95 border border-neutral-800 rounded-xl shadow-2xl overflow-hidden flex flex-col text-neutral-200 select-none pointer-events-auto"
         onClick={(e) => e.stopPropagation()}
       >
         {/* SW 經典對話框頂部 Header */}
         <div
-          className={`h-12 px-4 border-b flex items-center justify-between shrink-0 font-sans ${
+          {...dragHandleProps}
+          className={`h-12 px-4 border-b flex items-center justify-between shrink-0 font-sans cursor-move select-none ${
             isSweep
               ? 'bg-teal-950/60 border-teal-800/40'
               : 'bg-violet-950/60 border-violet-800/40'
@@ -223,7 +664,9 @@ export const SweepLoftModal: React.FC<SweepLoftModalProps> = ({
             </div>
             <div className="flex flex-col">
               <span className="font-bold text-sm text-neutral-100 flex items-center gap-1.5">
-                {isSweep ? '掃出長料 (Sweep Boss)' : '疊層拉伸 (Loft Boss)'}
+                {isSweep
+                  ? (isEditMode ? '編輯掃出 (Edit Sweep)' : '掃出長料 (Sweep Boss)')
+                  : (isEditMode ? '編輯疊層拉伸 (Edit Loft)' : '疊層拉伸 (Loft Boss)')}
               </span>
               <span className="text-[11px] text-neutral-400">
                 {isSweep
@@ -506,7 +949,11 @@ export const SweepLoftModal: React.FC<SweepLoftModalProps> = ({
               }`}
             >
               <Check size={14} />
-              <span>{isSweep ? '建立掃出特徵' : '建立疊層拉伸特徵'}</span>
+              <span>
+                {isSweep
+                  ? (isEditMode ? '儲存變更' : '建立掃出特徵')
+                  : (isEditMode ? '儲存變更' : '建立疊層拉伸特徵')}
+              </span>
             </button>
           </div>
         </form>

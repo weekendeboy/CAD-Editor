@@ -771,6 +771,59 @@ test('PATTERN / MIRROR: CIRCULAR_PATTERN 旋轉複製目標 toolShape', () => {
   assert.ok(result.resultSolid.id.includes('transformed-spoke-arm'));
 });
 
+test('PATTERN / MIRROR: CIRCULAR_PATTERN 支援負角度 (CW 順時針反向旋轉)', () => {
+  const occ = createMockOCC();
+  const cache = new FeatureEvaluationCache();
+
+  const baseSolid = { _type: 'TopoDS_Shape', id: 'base-hub', IsNull: () => false, delete: () => {} };
+  const spokeToolShape = { _type: 'TopoDS_Shape', id: 'spoke-arm', IsNull: () => false, delete: () => {} };
+
+  cache.set('feat-spoke', {
+    featureId: 'feat-spoke',
+    result: {
+      featureId: 'feat-spoke',
+      success: true,
+      createdBodyIds: ['main-body'],
+      modifiedBodyIds: [],
+      diagnostics: [],
+      error: undefined,
+      executionTimeMs: 1,
+      toolShape: 'EXTRUDE',
+    },
+    toolShape: spokeToolShape,
+  });
+
+  const ops: FeatureEvalOp[] = [
+    {
+      featureId: 'feat-hub',
+      type: 'EXTRUDE',
+      operation: 'JOIN',
+    },
+    {
+      featureId: 'feat-spoke',
+      type: 'EXTRUDE',
+      operation: 'JOIN',
+    },
+    {
+      featureId: 'circ-pattern-cw',
+      type: 'CIRCULAR_PATTERN',
+      operation: 'JOIN',
+      targetFeatureIds: ['feat-spoke'],
+      patternCircular: {
+        axis: { origin: { x: 0, y: 0, z: 0 }, direction: { x: 0, y: 0, z: 1 } },
+        count: 3,
+        totalAngle: -Math.PI,
+        equalSpacing: true,
+      },
+    },
+  ];
+
+  const result = evaluatePatternOrMirrorOp(ops[2], baseSolid, occ, cache, ops);
+  assert.equal(result.success, true);
+  assert.ok(result.resultSolid.id.includes('fused'));
+  assert.ok(result.resultSolid.id.includes('transformed-spoke-arm'));
+});
+
 test('PATTERN / MIRROR: MIRROR_3D 鏡射複製目標 toolShape', () => {
   const occ = createMockOCC();
   const cache = new FeatureEvaluationCache();

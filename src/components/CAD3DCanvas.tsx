@@ -552,8 +552,11 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect, o
 
   const previewMaterial = useMemo(() => {
     const isFillet = filletChamferPreview?.type === 'FILLET_3D';
+    const isLinearPattern = filletChamferPreview?.type === 'LINEAR_PATTERN';
+    const isSweep = filletChamferPreview?.type === 'SWEEP' || filletChamferPreview?.type === 'SWEEP_3D';
+    const isLoft = filletChamferPreview?.type === 'LOFT';
     return new THREE.MeshStandardMaterial({
-      color: isFillet ? '#34d399' : '#818cf8',
+      color: isFillet ? '#34d399' : isLinearPattern ? '#38bdf8' : isSweep ? '#2dd4bf' : isLoft ? '#a78bfa' : '#818cf8',
       metalness: 0.2,
       roughness: 0.4,
       side: THREE.DoubleSide,
@@ -667,94 +670,105 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect, o
           <meshBasicMaterial color="#38bdf8" wireframe />
         </mesh>
       )}
+      {/* 基礎實體幾何 */}
       {geometry && (
-        <group>
-          <mesh
-            geometry={geometry}
-            material={material}
-            castShadow
-            receiveShadow
-            onPointerDown={(e) => {
-              e.stopPropagation();
-              if (e.face && e.object) {
-                const hitPoint = e.point.clone();
-                const worldNormal = e.face.normal
-                  .clone()
-                  .transformDirection(e.object.matrixWorld)
-                  .normalize();
+        <mesh
+          geometry={geometry}
+          material={material}
+          castShadow
+          receiveShadow
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            if (e.face && e.object) {
+              const hitPoint = e.point.clone();
+              const worldNormal = e.face.normal
+                .clone()
+                .transformDirection(e.object.matrixWorld)
+                .normalize();
 
-                const triangleIndex = e.faceIndex;
-                let faceRef: RuntimeBRepFaceRef | undefined = undefined;
-                if (typeof triangleIndex === 'number' && mapping) {
-                  const resolved = resolveTriangleToFace(mapping, triangleIndex);
-                  if (resolved.status === 'exact' && resolved.faceRef) {
-                    faceRef = resolved.faceRef;
-                  }
+              const triangleIndex = e.faceIndex;
+              let faceRef: RuntimeBRepFaceRef | undefined = undefined;
+              if (typeof triangleIndex === 'number' && mapping) {
+                const resolved = resolveTriangleToFace(mapping, triangleIndex);
+                if (resolved.status === 'exact' && resolved.faceRef) {
+                  faceRef = resolved.faceRef;
                 }
-
-                // 檢查是否處於 Datum Plane 3D 參考面選取模式 (activePicker === 'reference_plane')
-                const datumPreview = useCADStore.getState().datumPlanePreview;
-                if (datumPreview?.isOpen && datumPreview.activePicker === 'reference_plane') {
-                  if (faceRef) {
-                    const resolvedRef = resolveBRepFaceToReference(faceRef, hitPoint);
-                    if (!resolvedRef.isValid || !resolvedRef.reference) {
-                      alert(resolvedRef.error || '選取的表面非平面，無法作為基準面參考');
-                      return;
-                    }
-                    window.dispatchEvent(
-                      new CustomEvent('cad-set-datum-reference-face', {
-                        detail: {
-                          plane: resolvedRef.reference.plane,
-                          faceRef,
-                          name: `實體表面 #${faceRef.faceIndex}`,
-                        },
-                      })
-                    );
-                  } else {
-                    const plane = createPlaneFromFaceNormal(hitPoint, worldNormal, '實體表面');
-                    window.dispatchEvent(
-                      new CustomEvent('cad-set-datum-reference-face', {
-                        detail: {
-                          plane,
-                          name: '實體表面',
-                        },
-                      })
-                    );
-                  }
-                  useCADStore.getState().setDatumPickerTarget(null);
-                  return;
-                }
-
-                onFaceSelect({
-                  point: hitPoint,
-                  normal: worldNormal,
-                  triangleIndex,
-                  faceRef,
-                });
               }
-            }}
+
+              // 檢查是否處於 Datum Plane 3D 參考面選取模式 (activePicker === 'reference_plane')
+              const datumPreview = useCADStore.getState().datumPlanePreview;
+              if (datumPreview?.isOpen && datumPreview.activePicker === 'reference_plane') {
+                if (faceRef) {
+                  const resolvedRef = resolveBRepFaceToReference(faceRef, hitPoint);
+                  if (!resolvedRef.isValid || !resolvedRef.reference) {
+                    alert(resolvedRef.error || '選取的表面非平面，無法作為基準面參考');
+                    return;
+                  }
+                  window.dispatchEvent(
+                    new CustomEvent('cad-set-datum-reference-face', {
+                      detail: {
+                        plane: resolvedRef.reference.plane,
+                        faceRef,
+                        name: `實體表面 #${faceRef.faceIndex}`,
+                      },
+                    })
+                  );
+                } else {
+                  const plane = createPlaneFromFaceNormal(hitPoint, worldNormal, '實體表面');
+                  window.dispatchEvent(
+                    new CustomEvent('cad-set-datum-reference-face', {
+                      detail: {
+                        plane,
+                        name: '實體表面',
+                      },
+                    })
+                  );
+                }
+                useCADStore.getState().setDatumPickerTarget(null);
+                return;
+              }
+
+              onFaceSelect({
+                point: hitPoint,
+                normal: worldNormal,
+                triangleIndex,
+                faceRef,
+              });
+            }
+          }}
+        />
+      )}
+
+      {/* Fillet / Chamfer / Linear Pattern / Sweep 即時 3D Live Preview Mesh (獨立於基礎幾何，無本體時亦可正常顯示) */}
+      {previewGeometry && (
+        <group name="fillet-chamfer-preview">
+          <mesh
+            geometry={previewGeometry}
+            material={previewMaterial}
           />
-
-          {/* Fillet / Chamfer 即時 3D Live Preview Mesh */}
-          {previewGeometry && (
-            <group name="fillet-chamfer-preview">
-              <mesh
-                geometry={previewGeometry}
-                material={previewMaterial}
+          {previewEdgesGeometry && (
+            <lineSegments geometry={previewEdgesGeometry}>
+              <lineBasicMaterial
+                color={
+                  filletChamferPreview?.type === 'FILLET_3D'
+                    ? '#059669'
+                    : filletChamferPreview?.type === 'LINEAR_PATTERN'
+                    ? '#0284c7'
+                    : filletChamferPreview?.type === 'SWEEP' || filletChamferPreview?.type === 'SWEEP_3D'
+                    ? '#0d9488'
+                    : '#4f46e5'
+                }
+                linewidth={2}
+                depthTest={true}
               />
-              {previewEdgesGeometry && (
-                <lineSegments geometry={previewEdgesGeometry}>
-                  <lineBasicMaterial
-                    color={filletChamferPreview?.type === 'FILLET_3D' ? '#059669' : '#4f46e5'}
-                    linewidth={2}
-                    depthTest={true}
-                  />
-                </lineSegments>
-              )}
-            </group>
+            </lineSegments>
           )}
+        </group>
+      )}
 
-          {/* 交互式 B-Rep 邊線渲染 (支援獨立選取、懸停提示與高亮) */}
+      {/* 交互式 B-Rep 邊線渲染 (支援獨立選取、懸停提示與高亮) */}
+      {geometry && (
+        <>
           {show3DEdges && mapping?.edges && mapping.edges.length > 0 ? (
             mapping.edges.map((edgeRef) => (
               <InteractiveBRepEdge
@@ -783,7 +797,7 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect, o
               </lineSegments>
             )
           )}
-        </group>
+        </>
       )}
     </group>
   );

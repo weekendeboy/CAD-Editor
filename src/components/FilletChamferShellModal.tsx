@@ -5,6 +5,7 @@ import { solidEngine } from '../core/3d/SolidEngine';
 import { FeatureEvalOp, RuntimeBRepFaceRef } from '../core/3d/SolidEngine.types';
 import { TopoReference } from '../core/3d/PersistentTopology.types';
 import { SelectedEdgeItem } from '../store/cadStore.types';
+import { useDraggableModal } from '../hooks/useDraggableModal';
 import {
   X,
   CornerDownRight,
@@ -220,6 +221,8 @@ export const FilletChamferShellModal: React.FC<FilletChamferShellModalProps> = (
   const prevFeatureIdRef = useRef<string | undefined>(undefined);
   const prevModeRef = useRef<string | undefined>(undefined);
   const originalRollbackIndexRef = useRef<number | null>(null);
+
+  const { position, dragHandleProps } = useDraggableModal({ defaultX: 280, defaultY: 70 });
 
   // 每次開啟、切換 mode 或 featureId 時自動初始化名稱與狀態（嚴禁在使用者操作期間因為 store/targetFeature 引用更新而重設狀態）
   useEffect(() => {
@@ -691,16 +694,21 @@ export const FilletChamferShellModal: React.FC<FilletChamferShellModalProps> = (
 
   const header = getHeaderStyle();
 
+  if (!isOpen) return null;
+
   return (
-    <div
-      className="fixed top-24 left-4 z-40 w-96 max-h-[calc(100vh-7rem)] overflow-hidden flex flex-col bg-neutral-950/95 backdrop-blur-md border border-neutral-800 rounded-xl shadow-2xl text-neutral-200 select-none animate-in fade-in slide-in-from-left-4 duration-200 pointer-events-auto"
-      onClick={(e) => e.stopPropagation()}
-      id="fillet-chamfer-shell-propertymanager"
-    >
-      {/* Modal 頂部 Header */}
+    <div className="fixed inset-0 z-40 pointer-events-none">
       <div
-        className={`h-12 px-4 border-b flex items-center justify-between shrink-0 font-sans ${header.bgColor}`}
+        style={{ transform: `translate3d(${position.x}px, ${position.y}px, 0)`, position: 'fixed', top: 0, left: 0 }}
+        className="w-96 max-h-[calc(100vh-5rem)] overflow-hidden flex flex-col bg-neutral-950/95 backdrop-blur-md border border-neutral-800 rounded-xl shadow-2xl text-neutral-200 select-none animate-in fade-in slide-in-from-left-4 duration-200 pointer-events-auto"
+        onClick={(e) => e.stopPropagation()}
+        id="fillet-chamfer-shell-propertymanager"
       >
+        {/* Modal 頂部 Header */}
+        <div
+          {...dragHandleProps}
+          className={`h-12 px-4 border-b flex items-center justify-between shrink-0 font-sans cursor-move select-none ${header.bgColor}`}
+        >
         <div className="flex items-center gap-2.5">
           <div className={`p-1.5 rounded-lg border shadow-sm ${header.iconColor}`}>
             {header.icon}
@@ -1128,6 +1136,7 @@ export const FilletChamferShellModal: React.FC<FilletChamferShellModalProps> = (
         </div>
       </form>
     </div>
+  </div>
   );
 };
 

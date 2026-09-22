@@ -97,6 +97,7 @@ export interface FeatureEvalOp {
     | 'CIRCULAR_PATTERN'
     | 'MIRROR_3D'
     | 'SWEEP'
+    | 'SWEEP_3D'
     | 'LOFT'
     | 'FILLET_3D'
     | 'CHAMFER_3D'
@@ -122,6 +123,7 @@ export interface FeatureEvalOp {
   angle?: number; // 旋轉弧度
   // 線性陣列 (Linear Pattern)
   patternLinear?: {
+    targetFeatureIds?: string[];
     dir1: Point3D;
     count1: number;
     spacing1: number;
@@ -138,20 +140,35 @@ export interface FeatureEvalOp {
     count: number;
     totalAngle: number;
     equalSpacing: boolean;
+    isSymmetric?: boolean;
   };
   // 3D 鏡射 (3D Mirror)
   mirrorPlane?: CustomPlane | {
+    planeId?: string;
+    origin: Point3D;
+    normal: Point3D;
+  };
+  mirror3D?: {
+    planeId?: string;
     origin: Point3D;
     normal: Point3D;
   };
   // 掃出運算規格 (Sweep)
+  sweep?: {
+    profileSketchId: string;
+    pathSketchId: string;
+    isCut?: boolean;
+  };
   sweepData?: {
     pathSegments: {
       type: 'line' | 'arc';
       start: Point3D;
       end: Point3D;
+      mid?: Point3D;
       center?: Point3D;
       radius?: number;
+      clockwise?: boolean;
+      sweepFlag?: number | boolean;
     }[];
   };
   // 疊層拉伸運算規格 (Loft)
@@ -244,10 +261,47 @@ export interface ExportModelPayload {
   unit?: 'mm' | 'inch';
 }
 
+export interface PreviewOperationPayload {
+  taskId: string;
+  operation: FeatureEvalOp | PreviewOperationOp;
+}
+
+export type PreviewOperationOp =
+  | FeatureEvalOp
+  | {
+      featureId?: string;
+      type: 'SWEEP' | 'SWEEP_3D';
+      sweep: {
+        profileSketchId: string;
+        pathSketchId: string;
+        isCut?: boolean;
+      };
+      profiles?: SketchProfile[];
+      plane?: CustomPlane | {
+        origin: Point3D;
+        xAxis: Point3D;
+        yAxis: Point3D;
+        normal: Point3D;
+      };
+      sweepData?: {
+        pathSegments: {
+          type: 'line' | 'arc';
+          start: Point3D;
+          end: Point3D;
+          mid?: Point3D;
+          center?: Point3D;
+          radius?: number;
+          clockwise?: boolean;
+          sweepFlag?: number | boolean;
+        }[];
+      };
+    };
+
 export type SolidTaskPayload =
   | InitPayload
   | ExtrudeProfilesPayload
   | EvaluateFeatureTreePayload
+  | PreviewOperationPayload
   | ExportStepPayload
   | ExportStlPayload;
 
