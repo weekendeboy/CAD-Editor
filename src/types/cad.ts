@@ -82,6 +82,8 @@ export type CADEntity2D =
 
 export type EntityState = 'UnderDefined' | 'FullyDefined' | 'OverDefined';
 
+export const ORIGIN_ENTITY_ID = 'ORIGIN';
+
 export type ConstraintType =
   | 'coincident'
   | 'horizontal'
@@ -107,6 +109,8 @@ export interface Constraint {
   pointIndices?: number[];
   value?: number;
   targetVal?: number;
+  weight?: number;
+  isSoft?: boolean;
 }
 
 export interface Dimension {
@@ -170,6 +174,12 @@ export interface Point3D {
 
 export type Vector3D = Point3D;
 
+export interface AttachedFaceRef {
+  parentFeatureId: string;
+  faceIndex: number;
+  persistentId?: string;
+}
+
 export interface CustomPlane {
   id: string;
   name: string;
@@ -178,6 +188,7 @@ export interface CustomPlane {
   xAxis: Point3D;
   yAxis: Point3D;
   parentFeatureId?: string;
+  attachedFaceRef?: AttachedFaceRef;
 }
 
 export const DatumFrontPlane: CustomPlane = {
@@ -246,6 +257,7 @@ export interface SketchFeature extends BaseCADFeature {
   type: 'SKETCH';
   planeFeatureId?: string; // 所屬基準面特徵 ID
   plane: CustomPlane;      // 快取空間矩陣 / 平面資訊，確保渲染層無損相容
+  attachedFaceRef?: AttachedFaceRef; // 面附著動態參照
   entities: CADEntity2D[];
   constraints: Constraint[];
   dimensions: Dimension[];
@@ -356,6 +368,7 @@ export interface CircularPatternFeature extends BaseCADFeature {
   targetFeatureIds: string[]; // 要複製的特徵 ID 清單
   axisOrigin: Point3D;        // 旋轉中心軸起點
   axisDirection: Point3D;     // 旋轉中心軸單位方向向量
+  axisEdgeRef?: TopoReference; // 參照的旋轉中心軸邊線拓撲參照 (選填)
   count: number;              // 實例總數 (>= 2)
   totalAngle: number;         // 填滿總角度 (弧度，例如 2 * Math.PI)
   equalSpacing: boolean;      // 是否等間距排列

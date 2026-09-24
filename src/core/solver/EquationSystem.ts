@@ -1,4 +1,4 @@
-import { Constraint, CADEntity2D } from '../../types/cad';
+import { Constraint, CADEntity2D, ORIGIN_ENTITY_ID } from '../../types/cad';
 import { VariableSystem } from './VariableSystem';
 
 export class EquationSystem {
@@ -20,7 +20,7 @@ export class EquationSystem {
     const residuals: number[] = [];
 
     const getPointCoordsWithX = (entityId: string, ptIndex: number | undefined, xArray: number[]): [number, number] => {
-      if (entityId === 'origin') {
+      if (entityId === 'origin' || entityId === 'ORIGIN' || entityId === ORIGIN_ENTITY_ID) {
         return [0, 0];
       }
       const ent = entityMap.get(entityId);
@@ -53,6 +53,7 @@ export class EquationSystem {
     };
 
     for (const c of constraints) {
+      const startIdx = residuals.length;
       if (c.type === 'horizontal') {
         const ent1Id = c.entityIds[0];
         const ent2Id = c.entityIds[1] || c.entityIds[0];
@@ -251,7 +252,15 @@ export class EquationSystem {
           }
         }
       }
-      // 其他約束類型保留在此處，等待後續實作擴充
+
+      // 依據約束權重（如軟目標拖曳）縮放殘差
+      const endIdx = residuals.length;
+      const w = c.weight !== undefined ? c.weight : (c.isSoft ? 0.05 : 1.0);
+      if (w !== 1.0 && endIdx > startIdx) {
+        for (let i = startIdx; i < endIdx; i++) {
+          residuals[i] *= w;
+        }
+      }
     }
 
     return residuals;

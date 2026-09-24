@@ -407,7 +407,7 @@ export function applyGripDragWithConstraints(
     return workingEntities;
   }
 
-  // 步驟 D：若草圖存在約束，依據當前夾點類型生成暫時性錨點約束（Temporary Fix Constraint）
+  // 步驟 D：若草圖存在約束，依據當前夾點類型生成低權重軟拖曳目標約束（Soft Drag Target Constraint）
   const tempFixConstraints: Constraint[] = [];
   const { grip } = activeGrip;
 
@@ -417,6 +417,8 @@ export function applyGripDragWithConstraints(
       type: 'fix',
       entityIds: [draggedEntity.id],
       pointIndices: [0],
+      weight: 0.05,
+      isSoft: true,
     });
   } else if (grip.type === 'line_end') {
     tempFixConstraints.push({
@@ -424,6 +426,8 @@ export function applyGripDragWithConstraints(
       type: 'fix',
       entityIds: [draggedEntity.id],
       pointIndices: [1],
+      weight: 0.05,
+      isSoft: true,
     });
   } else if (grip.type === 'line_mid') {
     tempFixConstraints.push({
@@ -431,12 +435,16 @@ export function applyGripDragWithConstraints(
       type: 'fix',
       entityIds: [draggedEntity.id],
       pointIndices: [0],
+      weight: 0.05,
+      isSoft: true,
     });
     tempFixConstraints.push({
       id: '__temp_fix_end',
       type: 'fix',
       entityIds: [draggedEntity.id],
       pointIndices: [1],
+      weight: 0.05,
+      isSoft: true,
     });
   } else if (grip.type === 'circle_center' || grip.type === 'arc_center') {
     tempFixConstraints.push({
@@ -444,6 +452,8 @@ export function applyGripDragWithConstraints(
       type: 'fix',
       entityIds: [draggedEntity.id],
       pointIndices: [0],
+      weight: 0.05,
+      isSoft: true,
     });
   } else if (grip.type === 'polyline_vertex') {
     const match = grip.id.match(/_(\d+)$/);
@@ -453,6 +463,8 @@ export function applyGripDragWithConstraints(
         type: 'fix',
         entityIds: [draggedEntity.id],
         pointIndices: [parseInt(match[1], 10)],
+        weight: 0.05,
+        isSoft: true,
       });
     }
   }

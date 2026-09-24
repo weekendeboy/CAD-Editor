@@ -29,11 +29,109 @@ export interface GraphAnalysisResult {
 }
 
 /**
- * 取得特徵直接相依的父特徵 ID 清單
+ * 解析並修復表面草圖之父特徵 ID (若 parentFeatureId 為 'main-body'、'solid-0' 或懸空，自動回溯到最近上游實體特徵)
  */
-export function getDirectDependencies(feature: RuntimeCADFeature | { dependencies?: string[] }): string[] {
-  if (!feature || !feature.dependencies) return [];
-  return [...feature.dependencies];
+export function resolveAttachedParentFeatureId(
+  feature: RuntimeCADFeature | { dependencies?: string[] },
+  allFeatures?: RuntimeCADFeature[]
+): string | undefined {
+  const feat = feature as any;
+  let attachedParentId = feat.attachedFaceRef?.parentFeatureId || feat.plane?.attachedFaceRef?.parentFeatureId;
+
+  if (!allFeatures || !Array.isArray(allFeatures) || allFeatures.length === 0) {
+    if (attachedParentId === 'main-body' || (typeof attachedParentId === 'string' && attachedParentId.startsWith('solid-'))) {
+      return undefined;
+    }
+    return attachedParentId;
+  }
+
+  const featureIds = new Set(allFeatures.map((f) => f.id));
+  const isValid =
+    attachedParentId &&
+    featureIds.has(attachedParentId) &&
+    attachedParentId !== 'main-body' &&
+    !attachedParentId.startsWith('solid-');
+
+  if (!isValid && (feat.attachedFaceRef || feat.plane?.attachedFaceRef)) {
+    // 自動修復回退：在當前草圖位置之前尋找最近上游實體特徵
+    const currentIdx = allFeatures.findIndex((f) => f.id === (feature as any).id);
+    const searchLimit = currentIdx >= 0 ? currentIdx : allFeatures.length;
+    for (let i = searchLimit - 1; i >= 0; i--) {
+      if (isBodyModifyingFeature(allFeatures[i])) {
+        attachedParentId = allFeatures[i].id;
+        break;
+      }
+    }
+  }
+
+  return attachedParentId;
+}
+
+/**
+ * 取得特徵直接相依的父特徵 ID 清單 (包含顯式 dependencies 及各特徵專屬之父級幾何/草圖/表面引用)
+ */
+export function getDirectDependencies(
+  feature: RuntimeCADFeature | { dependencies?: string[] },
+  allFeatures?: RuntimeCADFeature[]
+): string[] {
+  if (!feature) return [];
+  const deps = new Set<string>();
+
+  const feat = feature as any;
+  const attachedParentId = resolveAttachedParentFeatureId(feature, allFeatures);
+
+  if (feature.dependencies && Array.isArray(feature.dependencies)) {
+    for (const d of feature.dependencies) {
+      if (d) {
+        if (d === 'main-body' || d.startsWith('solid-')) {
+          if (attachedParentId) deps.add(attachedParentId);
+        } else {
+          deps.add(d);
+        }
+      }
+    }
+  }
+
+  // 表面草圖關聯父特徵
+  if (attachedParentId) {
+    deps.add(attachedParentId);
+  }
+  // 基準面參照特徵
+  if (feat.planeFeatureId) {
+    deps.add(feat.planeFeatureId);
+  }
+  if (feat.referencePlaneId) {
+    deps.add(feat.referencePlaneId);
+  }
+  if (feat.referenceFeatureId) {
+    deps.add(feat.referenceFeatureId);
+  }
+  // 實體長料 / 除料所依賴之草圖
+  if (feat.sketchId) {
+    deps.add(feat.sketchId);
+  }
+  if (Array.isArray(feat.sketchIds)) {
+    for (const sid of feat.sketchIds) {
+      if (sid) deps.add(sid);
+    }
+  }
+  if (feat.profileSketchId) {
+    deps.add(feat.profileSketchId);
+  }
+  if (feat.pathSketchId) {
+    deps.add(feat.pathSketchId);
+  }
+  // 鏡射 / 陣列相依
+  if (feat.mirrorPlaneFeatureId) {
+    deps.add(feat.mirrorPlaneFeatureId);
+  }
+  if (Array.isArray(feat.targetFeatureIds)) {
+    for (const tid of feat.targetFeatureIds) {
+      if (tid) deps.add(tid);
+    }
+  }
+
+  return Array.from(deps);
 }
 
 /**
@@ -60,7 +158,7 @@ export function analyzeFeatureGraph(features: RuntimeCADFeature[]): GraphAnalysi
   // 建立相鄰表與入度計算 (f 依賴于 depId => depId 為 parent)
   const featureIds = new Set(features.map(f => f.id));
   for (const f of features) {
-    const deps = getDirectDependencies(f);
+    const deps = getDirectDependencies(f, features);
     let validDepCount = 0;
     for (const depId of deps) {
       if (featureIds.has(depId)) {
@@ -114,7 +212,8 @@ export function analyzeFeatureGraph(features: RuntimeCADFeature[]): GraphAnalysi
 }
 
 /**
- * 檢查所有特徵的 dependencies 是否存在於當前的特徵清單中，回傳孤兒依賴映射
+ * 檢查所有特徵的 dependencies 是否存在於當前的特徵清單中，回傳孤兒依賴映射。
+ * 【純函式規範】嚴禁在驗證函式中原地修改傳入的特徵物件 (保持不可變性，防止 Zustand 被凍結物件拋出唯讀錯誤)。
  */
 export function validateFeatureDependencies(features: RuntimeCADFeature[]): Map<string, string[]> {
   const featureIds = new Set(features.map((f) => f.id));
@@ -122,8 +221,25 @@ export function validateFeatureDependencies(features: RuntimeCADFeature[]): Map<
 
   for (const f of features) {
     const missing: string[] = [];
-    const deps = getDirectDependencies(f);
-    for (const depId of deps) {
+    // 自動推導表面草圖父特徵 ID (若是 'main-body' 或懸空，自動回退到最近上游實體特徵)
+    const attachedParentId = resolveAttachedParentFeatureId(f, features);
+
+    // 局部計算有效依賴清單（effectiveDeps），嚴禁原地修改 f.dependencies
+    const effectiveDeps = (f.dependencies || []).map((dep) => {
+      if (dep === 'main-body' || (typeof dep === 'string' && dep.startsWith('solid-'))) {
+        // 自動推導合法父特徵 ID，僅供本地驗證，不直接寫回唯讀的 f 物件
+        return attachedParentId || resolveAttachedParentFeatureId(f, features) || dep;
+      }
+      return dep;
+    });
+
+    const directDeps = getDirectDependencies(f, features);
+    const combinedDeps = new Set<string>([...effectiveDeps, ...directDeps]);
+
+    for (const depId of combinedDeps) {
+      if (depId === 'main-body' || (typeof depId === 'string' && depId.startsWith('solid-'))) {
+        continue;
+      }
       if (!featureIds.has(depId)) {
         missing.push(depId);
       }
@@ -197,7 +313,7 @@ export function markDownstreamDirty(
   }
 
   for (const f of features) {
-    const deps = getDirectDependencies(f);
+    const deps = getDirectDependencies(f, features);
     for (const depId of deps) {
       let list = childrenMap.get(depId);
       if (!list) {
@@ -253,7 +369,7 @@ export function markDownstreamDirty(
     }
 
     // 軌道 B: 隱式實體歷程傳播 (Single-Body Cumulative Solid Invalidation)
-    // 若發現了更早的受波及實體特徵，將其歷史後續所有實體修改特徵全部標記為髒
+    // 若發現了更早的受波及實體特徵，將其歷史後續所有實體修改特徵以及附著於實體表面的草圖全部標記為髒
     if (earliestBodyIndex < scannedFromIndex) {
       const scanStart = earliestBodyIndex + 1;
       const scanEnd = Math.min(scannedFromIndex, features.length);
@@ -261,6 +377,11 @@ export function markDownstreamDirty(
       for (let i = scanStart; i < scanEnd; i++) {
         const nextFeat = features[i];
         if (isBodyModifyingFeature(nextFeat)) {
+          markDirty(nextFeat.id);
+        } else if (
+          nextFeat.type === 'SKETCH' &&
+          Boolean((nextFeat as any).attachedFaceRef || (nextFeat as any).plane?.attachedFaceRef)
+        ) {
           markDirty(nextFeat.id);
         }
       }
@@ -302,7 +423,8 @@ export function getRegenPlan(
   let firstDirtyIdx = -1;
   for (let i = 0; i < evalSequence.length; i++) {
     const feat = evalSequence[i];
-    const isCached = cachedFeatureIds.includes(feat.id);
+    // 草圖本身不直接產生獨立 Kernel 3D Solid 快取，若無 dirty 或 broken 視為乾淨以避免非預期整樹失效
+    const isCached = feat.type === 'SKETCH' ? true : cachedFeatureIds.includes(feat.id);
     const isBroken = brokenDependencies.has(feat.id);
     
     if (feat.isDirty || !isCached || isBroken) {

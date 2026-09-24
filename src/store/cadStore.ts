@@ -20,6 +20,7 @@ import {
   ExtrudeFeature,
   DatumPlaneFeature,
   CustomPlane,
+  AttachedFaceRef,
   Constraint,
   ConstraintType,
   Point2D,
@@ -178,6 +179,25 @@ function createInitialDocument(): CADDocument {
   return doc;
 }
 
+const CAD_PERSISTENCE_KEY = 'cad_document_persistence_v1';
+
+function getInitialDocument(): CADDocument {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      const saved = window.localStorage.getItem(CAD_PERSISTENCE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && Array.isArray(parsed.featureTree) && parsed.featureTree.length > 0) {
+          return parsed;
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to load persisted CAD document:', e);
+    }
+  }
+  return createInitialDocument();
+}
+
 function pushUndoState(state: CADState): Partial<CADState> {
   const clonedDoc: CADDocument = JSON.parse(JSON.stringify(state.document));
   const newUndoStack = [...state.undoStack, clonedDoc];
@@ -228,12 +248,14 @@ function markSketchDirtyInDoc(doc: CADDocument, sketchId: string): CADDocument {
   };
 }
 
+let globalRegenToken = 0;
+
 export const useCADStore = create<CADState>()(
   immer((set, get) => ({
     // ==========================================
     // 1. DocumentState (持久化文件狀態)
     // ==========================================
-    document: createInitialDocument(),
+    document: getInitialDocument(),
     undoStack: [],
     redoStack: [],
 
@@ -300,6 +322,7 @@ export const useCADStore = create<CADState>()(
     sketchSession: {
       isActive: true,
       sketchId: "sketch-1",
+      savedRollbackIndex: null,
       initialEntities: [],
       initialConstraints: [],
       initialDimensions: [],
@@ -453,7 +476,11 @@ export const useCADStore = create<CADState>()(
         if (state.undoStack.length > 20) state.undoStack.shift();
         state.redoStack = [];
 
-        const newFeatureWithDirty: CADFeature = { ...feature, isDirty: true };
+        const newFeatureWithDirty: CADFeature = {
+          ...feature,
+          dependencies: feature.dependencies ? [...feature.dependencies] : [],
+          isDirty: true,
+        };
         state.document.featureTree.splice(
           currentRollback,
           0,
@@ -561,13 +588,14 @@ export const useCADStore = create<CADState>()(
         }
 
         const dirtyTree = markDownstreamDirty(updatedTree, id);
+        console.log('[DAG Regen Debug] Dirty feature IDs:', dirtyTree.filter(f => f.isDirty).map(f => f.id));
         const validationMap = validateFeatureDependencies(dirtyTree);
 
         const finalTree = dirtyTree.map((f) => {
           const errs = validationMap.get(f.id);
           return {
             ...f,
-            error: errs && errs.length > 0 ? errs.join("; ") : f.error,
+            error: errs && errs.length > 0 ? errs.join("; ") : (f.error?.includes("遺失父特徵依賴") ? null : f.error),
           };
         });
 
@@ -701,14 +729,14 @@ export const useCADStore = create<CADState>()(
     },
     setRollbackIndex: (index) => {
       let isChanged = false;
-      set((state) => {
-        const clamped = Math.max(
-          0,
-          Math.min(index, state.document.featureTree.length),
-        );
-        if (state.document.rollbackIndex === clamped) return;
-
+      const state = get();
+      const clamped = Math.max(
+        0,
+        Math.min(index, state.document.featureTree.length),
+      );
+      if (state.document.rollbackIndex !== clamped) {
         isChanged = true;
+        globalRegenToken++;
         const activeFeatures = state.document.featureTree.slice(0, clamped);
         let nextActiveSketchId = state.activeSketchId;
         if (nextActiveSketchId) {
@@ -723,6 +751,8 @@ export const useCADStore = create<CADState>()(
           }
         }
 
+        console.log('[Rollback Debug] Setting rollbackIndex to:', clamped, 'Triggering regen...');
+
         set({
           activeSketchId: nextActiveSketchId,
           document: {
@@ -730,12 +760,13 @@ export const useCADStore = create<CADState>()(
             rollbackIndex: clamped,
           },
         });
-      });
+      }
       if (isChanged) {
         get().regenerateFeatureTree();
       }
     },
     regenerateFeatureTree: async () => {
+      const currentToken = ++globalRegenToken;
       const state = get();
       const { featureTree, rollbackIndex, planes } = state.document;
       const cachedFeatureIds = Object.keys(state.featureResults);
@@ -814,7 +845,7 @@ export const useCADStore = create<CADState>()(
           return {
             ...f,
             isDirty: false,
-            error: f.error?.includes("遺失父特徵依賴") ? f.error : null,
+            error: null,
           };
         });
 
@@ -851,7 +882,7 @@ export const useCADStore = create<CADState>()(
           result.success !== false && featureErrorMap.size === 0;
 
         if (!isSuccess) {
-          console.error("[CADStore Diagnostic] SolidWorker evaluation failed/has errors:", {
+          console.warn("[CADStore] Solid evaluation completed with feature warnings:", {
             resultSuccess: result.success,
             diagnostics: result.diagnostics,
             featureErrorMap: Array.from(featureErrorMap.entries()),
@@ -876,10 +907,45 @@ export const useCADStore = create<CADState>()(
 
           const regeneratedTree = applyRegenResults(treeWithErrors, opsResults);
 
+          // 同步幾何核心動態計算的貼面基準面 (evaluatedPlane) 至草圖特徵與 document.planes
+          let planesUpdated = false;
+          const updatedPlanes = { ...get().document.planes };
+          const treeWithUpdatedPlanes = regeneratedTree.map((f) => {
+            if (f.type === "SKETCH") {
+              const sketch = f as SketchFeature;
+              for (const [opId, fRes] of Object.entries(result.featureResults || {})) {
+                if (fRes.evaluatedPlane) {
+                  const parentOp = treeWithErrors.find((item) => item.id === opId) as any;
+                  if (parentOp && parentOp.sketchId === sketch.id) {
+                    const newPlane = {
+                      ...sketch.plane,
+                      ...fRes.evaluatedPlane,
+                    };
+                    if (newPlane.id) {
+                      updatedPlanes[newPlane.id] = newPlane;
+                      planesUpdated = true;
+                    }
+                    return {
+                      ...sketch,
+                      plane: newPlane,
+                    };
+                  }
+                }
+              }
+            }
+            return f;
+          });
+
+          if (currentToken !== globalRegenToken || get().document.rollbackIndex !== rollbackIndex) {
+            console.log('[Regen Guard] Skipping stale async evaluation result', { currentToken, globalRegenToken, currentRollback: get().document.rollbackIndex, expectedRollback: rollbackIndex });
+            return;
+          }
+
           set((s) => ({
             document: {
               ...s.document,
-              featureTree: regeneratedTree,
+              featureTree: treeWithUpdatedPlanes,
+              planes: planesUpdated ? updatedPlanes : s.document.planes,
             },
             cumulativePartMesh: result.finalMesh || null,
             cumulativeSubshapeMapping: result.finalMesh?.mapping || null,
@@ -897,6 +963,22 @@ export const useCADStore = create<CADState>()(
                 isDirty: true,
                 error: diagErr,
               };
+            }
+            if (result.featureResults && result.featureResults[f.id]) {
+              const featRes = result.featureResults[f.id];
+              if (featRes.success) {
+                return {
+                  ...f,
+                  isDirty: false,
+                  error: null,
+                };
+              } else {
+                return {
+                  ...f,
+                  isDirty: true,
+                  error: featRes.error || f.error || "特徵運算失敗",
+                };
+              }
             }
             if (result.success === false && opFeatureIds.has(f.id)) {
               return {
@@ -1310,7 +1392,7 @@ export const useCADStore = create<CADState>()(
         state.selectedMeshSelection = selection;
       }),
 
-    createSketchOnFacePlane: (plane: CustomPlane) => {
+    createSketchOnFacePlane: (plane: CustomPlane, attachedFaceRef?: AttachedFaceRef) => {
       let retId = "";
       set((state) => {
         const newSketchId = crypto.randomUUID();
@@ -1319,13 +1401,35 @@ export const useCADStore = create<CADState>()(
         ).length;
         const sketchName = `Sketch${sketchCount + 1}`;
 
+        // 檢驗傳入的 parentFeatureId 是否為 featureTree 裡的真實特徵
+        const currentTree = state.document.featureTree;
+        let validParentId = attachedFaceRef?.parentFeatureId;
+
+        if (!validParentId || validParentId === 'main-body' || !currentTree.some((f) => f.id === validParentId)) {
+          // 自動在當前特徵樹中逆向尋找最後一個實體特徵（EXTRUDE, REVOLVE, LOFT, SWEEP, CUT_EXTRUDE）
+          const lastSolid = [...currentTree].reverse().find((f) =>
+            f.type === 'EXTRUDE' || f.type === 'REVOLVE' || f.type === 'LOFT' || f.type === 'SWEEP' || f.type === 'CUT_EXTRUDE' || f.type === 'REVOLVE_CUT'
+          );
+          validParentId = lastSolid ? lastSolid.id : undefined;
+        }
+
+        // 確保寫入 attachedFaceRef 與 dependencies 的絕對是真實特徵 ID（例如 'extrude-1'），絕不可為 'main-body'
+        const sanitizedRef = attachedFaceRef && validParentId ? { ...attachedFaceRef, parentFeatureId: validParentId } : undefined;
+        const deps: string[] = [];
+        if (validParentId) deps.push(validParentId);
+
+        const planeWithRef = sanitizedRef
+          ? { ...plane, attachedFaceRef: { ...sanitizedRef } }
+          : { ...plane };
+
         const newSketch: SketchFeature = {
           id: newSketchId,
           name: sketchName,
           type: "SKETCH",
           planeFeatureId: plane.id,
-          plane: plane,
-          dependencies: [],
+          plane: planeWithRef,
+          attachedFaceRef: sanitizedRef ? { ...sanitizedRef } : undefined,
+          dependencies: [...deps],
           entities: [],
           constraints: [],
           dimensions: [],
@@ -1334,6 +1438,14 @@ export const useCADStore = create<CADState>()(
           suppressed: false,
           visible: true,
         };
+
+        console.log('[P03 TRACE] Create Sketch2', {
+          sketchId: newSketch.id,
+          planeOrigin: newSketch.plane?.origin,
+          planeNormal: newSketch.plane?.normal,
+          attachedFaceRef: newSketch.attachedFaceRef,
+          dependencies: newSketch.dependencies,
+        });
 
         const rollback = Math.max(
           0,
@@ -1344,7 +1456,7 @@ export const useCADStore = create<CADState>()(
         );
         const newTree = [
           ...state.document.featureTree.slice(0, rollback),
-          newSketch,
+          { ...newSketch, dependencies: [...newSketch.dependencies] },
           ...state.document.featureTree.slice(rollback),
         ];
 
@@ -1447,12 +1559,24 @@ export const useCADStore = create<CADState>()(
     },
 
     enterSketchSession: (sketchId: string) => {
+      let shouldRegen = false;
       set((state) => {
         const sketch = state.document.featureTree.find(
           (f) => f.id === sketchId && f.type === "SKETCH",
         ) as SketchFeature | undefined;
 
         if (!sketch) return;
+
+        const sketchIdx = state.document.featureTree.findIndex(
+          (f) => f.id === sketchId,
+        );
+        const prevRollback =
+          state.sketchSession.isActive &&
+          typeof state.sketchSession.savedRollbackIndex === "number"
+            ? state.sketchSession.savedRollbackIndex
+            : typeof state.document.rollbackIndex === "number"
+              ? state.document.rollbackIndex
+              : state.document.featureTree.length;
 
         const entitiesClone = JSON.parse(JSON.stringify(sketch.entities || []));
         const constraintsClone = JSON.parse(
@@ -1468,6 +1592,7 @@ export const useCADStore = create<CADState>()(
         state.sketchSession = {
           isActive: true,
           sketchId: sketchId,
+          savedRollbackIndex: prevRollback,
           initialEntities: entitiesClone,
           initialConstraints: constraintsClone,
           initialDimensions: dimensionsClone,
@@ -1482,7 +1607,16 @@ export const useCADStore = create<CADState>()(
         };
         state.activeSketchId = sketchId;
         state.viewMode = "2D";
+
+        if (sketchIdx !== -1) {
+          state.document.rollbackIndex = sketchIdx;
+          shouldRegen = true;
+        }
       });
+
+      if (shouldRegen) {
+        get().regenerateFeatureTree();
+      }
     },
 
     startSketchSession: (sketchId: string) => {
@@ -1495,6 +1629,7 @@ export const useCADStore = create<CADState>()(
 
       const targetSketchId = session.sketchId;
       const isDirty = session.isDirty;
+      const savedRollback = session.savedRollbackIndex;
 
       if (isDirty) {
         set((state) => {
@@ -1519,9 +1654,16 @@ export const useCADStore = create<CADState>()(
             state.document = docDirty;
           }
 
+          const restoredRollback =
+            typeof savedRollback === "number"
+              ? savedRollback
+              : state.document.featureTree.length;
+          state.document.rollbackIndex = restoredRollback;
+
           state.sketchSession = {
             isActive: false,
             sketchId: null,
+            savedRollbackIndex: null,
             initialEntities: [],
             initialConstraints: [],
             initialDimensions: [],
@@ -1534,14 +1676,22 @@ export const useCADStore = create<CADState>()(
             draftUndoStack: [],
             draftRedoStack: [],
           };
+          state.viewMode = "3D";
         });
 
         await get().regenerateFeatureTree();
       } else {
         set((state) => {
+          const restoredRollback =
+            typeof savedRollback === "number"
+              ? savedRollback
+              : state.document.featureTree.length;
+          state.document.rollbackIndex = restoredRollback;
+
           state.sketchSession = {
             isActive: false,
             sketchId: null,
+            savedRollbackIndex: null,
             initialEntities: [],
             initialConstraints: [],
             initialDimensions: [],
@@ -1554,15 +1704,28 @@ export const useCADStore = create<CADState>()(
             draftUndoStack: [],
             draftRedoStack: [],
           };
+          state.viewMode = "3D";
         });
+
+        await get().regenerateFeatureTree();
       }
     },
 
-    cancelSketchSession: () => {
+    cancelSketchSession: async () => {
+      const session = get().sketchSession;
+      const savedRollback = session.savedRollbackIndex;
+
       set((state) => {
+        const restoredRollback =
+          typeof savedRollback === "number"
+            ? savedRollback
+            : state.document.featureTree.length;
+        state.document.rollbackIndex = restoredRollback;
+
         state.sketchSession = {
           isActive: false,
           sketchId: null,
+          savedRollbackIndex: null,
           initialEntities: [],
           initialConstraints: [],
           initialDimensions: [],
@@ -1575,7 +1738,10 @@ export const useCADStore = create<CADState>()(
           draftUndoStack: [],
           draftRedoStack: [],
         };
+        state.viewMode = "3D";
       });
+
+      await get().regenerateFeatureTree();
     },
 
     setSelectedPointIndex: (id, index) =>
@@ -4450,7 +4616,7 @@ export const useCADStore = create<CADState>()(
     // Undo / Redo (包含防呆機制)
     // ------------------------------------------
 
-    undo: () => {
+    undo: async () => {
       let isDocUndo = false;
       set((state) => {
         if (state.sketchSession.isActive) {
@@ -4492,7 +4658,9 @@ export const useCADStore = create<CADState>()(
         }
 
         if (state.undoStack.length === 0) return;
-        const previousDoc = state.undoStack[state.undoStack.length - 1];
+        const previousDoc: CADDocument = JSON.parse(
+          JSON.stringify(state.undoStack[state.undoStack.length - 1]),
+        );
         const newUndoStack = state.undoStack.slice(0, -1);
 
         // 【防呆機制】檢查上一步的 activeSketchId 是否還存在於舊的特徵樹中
@@ -4506,17 +4674,21 @@ export const useCADStore = create<CADState>()(
           ...state.redoStack,
           JSON.parse(JSON.stringify(state.document)),
         ];
-        state.document = previousDoc;
+        state.document = {
+          ...previousDoc,
+          featureTree: previousDoc.featureTree.map((f) => ({ ...f, isDirty: true })),
+        };
+        state.featureResults = {};
         state.activeSketchId = safeActiveSketchId;
         state.selectedEntityIds = [];
         state.selectedFeatureId = null;
         isDocUndo = true;
       });
       if (isDocUndo) {
-        get().regenerateFeatureTree();
+        await get().regenerateFeatureTree();
       }
     },
-    redo: () => {
+    redo: async () => {
       let isDocRedo = false;
       set((state) => {
         if (state.sketchSession.isActive) {
@@ -4556,7 +4728,9 @@ export const useCADStore = create<CADState>()(
         }
 
         if (state.redoStack.length === 0) return;
-        const nextDoc = state.redoStack[state.redoStack.length - 1];
+        const nextDoc: CADDocument = JSON.parse(
+          JSON.stringify(state.redoStack[state.redoStack.length - 1]),
+        );
         const newRedoStack = state.redoStack.slice(0, -1);
 
         // 【防呆機制】檢查下一步的 activeSketchId 是否還存在
@@ -4570,14 +4744,18 @@ export const useCADStore = create<CADState>()(
           JSON.parse(JSON.stringify(state.document)),
         ];
         state.redoStack = newRedoStack;
-        state.document = nextDoc;
+        state.document = {
+          ...nextDoc,
+          featureTree: nextDoc.featureTree.map((f) => ({ ...f, isDirty: true })),
+        };
+        state.featureResults = {};
         state.activeSketchId = safeActiveSketchId;
         state.selectedEntityIds = [];
         state.selectedFeatureId = null;
         isDocRedo = true;
       });
       if (isDocRedo) {
-        get().regenerateFeatureTree();
+        await get().regenerateFeatureTree();
       }
     },
     canUndo: () => {
@@ -4597,6 +4775,13 @@ export const useCADStore = create<CADState>()(
     },
 
     resetDocument: () => {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+          window.localStorage.removeItem(CAD_PERSISTENCE_KEY);
+        } catch (e) {
+          // ignore
+        }
+      }
       const doc = createInitialDocument();
       set({
         document: doc,
@@ -4621,6 +4806,22 @@ export const useCADStore = create<CADState>()(
     },
   })),
 );
+
+// 自動持久化訂閱機制 (Auto Persistence Subscription)
+if (typeof window !== 'undefined') {
+  (window as any).__CAD_STORE__ = useCADStore;
+  if (window.localStorage) {
+    useCADStore.subscribe((state) => {
+      try {
+        if (state.document) {
+          window.localStorage.setItem(CAD_PERSISTENCE_KEY, JSON.stringify(state.document));
+        }
+      } catch (e) {
+        // ignore
+      }
+    });
+  }
+}
 
 // 常用的 state Selectors
 export const useCADDocument = () => useCADStore((state) => state.document);

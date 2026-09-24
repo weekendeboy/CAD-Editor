@@ -10,6 +10,7 @@ import {
   WorkerResponse,
   ExtrudeProfileResponseData,
   FeatureEvalOp,
+  FeatureTransform,
   MeshResult,
   KernelDiagnostic,
   BodyResult,
@@ -17,6 +18,14 @@ import {
   FeatureResult,
   KernelResult,
 } from './SolidEngine.types';
+import type {
+  Vector3D,
+  BoundingBox3D,
+  GeometrySignature,
+  TopoReference,
+  TopologyMap,
+  TopoResolutionOptions,
+} from './PersistentTopology.types';
 import type {
   MeshSubshapeMapping,
   RuntimeBRepFaceRef,
@@ -32,11 +41,14 @@ import {
 import {
   extractTopologyMap,
   resolveTopoReferenceToOCC,
+  FeatureTopologyContext,
 } from './TopologyExtractor';
-import type { SketchProfile, ProfileSegment } from '../../types/cad';
+import { WorkerOCCAssetResolver } from './WorkerOCCAssetResolver';
+import type { SketchProfile, ProfileSegment, Point3D } from '../../types/cad';
 
 let oc: any = null;
 let currentSolid: any = null; // Store the current solid compound for evaluation and export (History Replay Body State)
+const globalFeatureTopologyContexts = new Map<string, FeatureTopologyContext>();
 
 /**
  * 特徵評估結果快取 (Feature Evaluation Cache)
@@ -122,55 +134,180 @@ function safeDelete(obj: any): void {
 }
 
 /**
+ * Safe pointer validation check for OpenCASCADE WASM objects.
+ * Verifies object existence, non-null status, and ensures the pointer has not been freed.
+ */
+function isPointerValid(obj: any): boolean {
+  if (!obj) return false;
+  try {
+    if (typeof obj.IsNull === 'function' && obj.IsNull()) {
+      return false;
+    }
+    let ptr: number | null = null;
+    if (obj.$$ && typeof obj.$$.ptr === 'number') {
+      ptr = obj.$$.ptr;
+    } else if (typeof obj.getPointer === 'function') {
+      ptr = obj.getPointer();
+    }
+    if (ptr !== null && ptr !== undefined && ptr !== 0) {
+      if (deletedPointers.has(ptr)) {
+        return false;
+      }
+    }
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
  * 【P4 架構修復】在寫入快取時，強制建立一份深拷貝的 Shape。
  * 保證即使上層管線中途刪除了 currentSolid，快取仍擁有自己獨立的 C++ 實體記憶體指標。
  */
 function cacheShapeClone(featureId: string, sourceShape: any, occ: any, cacheMap: { set: (id: string, shape: any) => void }) {
-  if (!sourceShape || sourceShape.IsNull()) return;
+  if (!isPointerValid(sourceShape)) return;
   const copyMaker = new occ.BRepBuilderAPI_Copy_2(sourceShape, true, false);
   const copy = copyMaker.Shape();
   safeDelete(copyMaker);
   cacheMap.set(featureId, copy);
 }
 
-const getBaseUrl = () => {
-  if (self.location.pathname.includes('/assets/')) {
-    return self.location.origin + self.location.pathname.split('/assets/')[0] + '/';
+function runSmokeTest(occ: any): { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number } {
+  console.log(
+    '[OCC Worker] MakeBox bindings:',
+    Object.keys(occ).filter((k) => k.startsWith('BRepPrimAPI_MakeBox'))
+  );
+
+  let boxMaker: any = null;
+  let boxShape: any = null;
+  let bbox: any = null;
+  try {
+    if (typeof occ.BRepPrimAPI_MakeBox_1 === 'function') {
+      boxMaker = new occ.BRepPrimAPI_MakeBox_1(10, 10, 10);
+    } else if (typeof occ.BRepPrimAPI_MakeBox_2 === 'function') {
+      const origin = new occ.gp_Pnt_3(0, 0, 0);
+      try {
+        boxMaker = new occ.BRepPrimAPI_MakeBox_2(origin, 10, 10, 10);
+      } finally {
+        safeDelete(origin);
+      }
+    } else {
+      throw new Error('No compatible BRepPrimAPI_MakeBox constructor found in OCC bindings.');
+    }
+    boxShape = boxMaker.Shape();
+
+    bbox = new occ.Bnd_Box_1();
+    if (typeof occ.BRepBndLib?.Add === 'function') {
+      try {
+        occ.BRepBndLib.Add(boxShape, bbox, false);
+      } catch (_) {
+        occ.BRepBndLib.Add(boxShape, bbox);
+      }
+    } else if (typeof occ.BRepBndLib?.Add_1 === 'function') {
+      occ.BRepBndLib.Add_1(boxShape, bbox, false);
+    }
+
+    const minPnt = bbox.CornerMin();
+    const maxPnt = bbox.CornerMax();
+
+    const result = {
+      minX: Math.round(minPnt.X()),
+      minY: Math.round(minPnt.Y()),
+      minZ: Math.round(minPnt.Z()),
+      maxX: Math.round(maxPnt.X()),
+      maxY: Math.round(maxPnt.Y()),
+      maxZ: Math.round(maxPnt.Z()),
+    };
+
+    safeDelete(minPnt);
+    safeDelete(maxPnt);
+
+    if (
+      result.minX !== 0 ||
+      result.minY !== 0 ||
+      result.minZ !== 0 ||
+      result.maxX !== 10 ||
+      result.maxY !== 10 ||
+      result.maxZ !== 10
+    ) {
+      throw new Error(
+        `Smoke test box bounding box mismatch: expected [0,0,0] to [10,10,10], got [${result.minX},${result.minY},${result.minZ}] to [${result.maxX},${result.maxY},${result.maxZ}]`
+      );
+    }
+
+    return result;
+  } finally {
+    if (bbox) safeDelete(bbox);
+    if (boxShape) safeDelete(boxShape);
+    if (boxMaker) safeDelete(boxMaker);
   }
-  return self.location.origin + '/';
-};
+}
 
 async function initWorker(wasmBuffer?: ArrayBuffer, occBaseUrl?: string) {
-  if (!oc) {
-    const baseUrl = occBaseUrl || getBaseUrl();
-    const jsUrl = `${baseUrl}opencascade.wasm.js`;
-    const wasmUrl = `${baseUrl}opencascade.wasm.wasm`;
+  if (oc) {
+    return;
+  }
+
+  const resolver = new WorkerOCCAssetResolver(occBaseUrl);
+  const jsUrl = resolver.getJsUrl();
+  const wasmUrl = resolver.getWasmUrl();
+
+  console.log('[OCC Worker] bootstrap:start');
+  console.log('[OCC Worker] asset JS:', jsUrl);
+  console.log('[OCC Worker] asset WASM:', wasmUrl);
+
+  try {
+    const scriptRes = await fetch(jsUrl);
+    if (!scriptRes.ok) {
+      throw new Error(`Failed to fetch OCC JS from ${jsUrl}: ${scriptRes.status} ${scriptRes.statusText}`);
+    }
+    const scriptText = await scriptRes.text();
+
+    if (scriptText.trim().startsWith('<') || scriptText.includes('<!DOCTYPE')) {
+      throw new Error(`OCC JS URL (${jsUrl}) returned HTML page instead of JavaScript. SPA fallback detected.`);
+    }
 
     try {
-      (self as any).importScripts(jsUrl);
-    } catch (e) {
-      console.warn('importScripts failed, falling back to fetch+eval.', e);
-      const scriptRes = await fetch(jsUrl);
-      if (!scriptRes.ok) {
-        throw new Error(`Failed to fetch OCC JS: ${scriptRes.status}`);
+      await import(/* @vite-ignore */ jsUrl);
+    } catch (_) {
+      const blob = new Blob([scriptText], { type: 'application/javascript' });
+      const blobUrl = URL.createObjectURL(blob);
+      try {
+        await import(/* @vite-ignore */ blobUrl);
+      } finally {
+        URL.revokeObjectURL(blobUrl);
       }
-      const scriptText = await scriptRes.text();
-      new Function(scriptText)();
+    }
+
+    if (typeof (self as any).initOpenCascade !== 'function') {
+      throw new Error(`OCC JS loaded from ${jsUrl} but self.initOpenCascade is not defined.`);
     }
 
     let activeWasmBuffer = wasmBuffer;
     if (!activeWasmBuffer) {
       try {
-        const parts = [
+        let partNames = [
           'opencascade.wasm.part0.bin',
           'opencascade.wasm.part1.bin',
           'opencascade.wasm.part2.bin',
           'opencascade.wasm.part3.bin',
         ];
+
+        try {
+          const manifestRes = await fetch(resolver.getManifestUrl());
+          if (manifestRes.ok) {
+            const manifest = await manifestRes.json();
+            if (Array.isArray(manifest.parts) && manifest.parts.length > 0) {
+              partNames = manifest.parts;
+            }
+          }
+        } catch (_) {}
+
         const buffers = await Promise.all(
-          parts.map(async (part) => {
-            const res = await fetch(`${baseUrl}occ/${part}`);
-            if (!res.ok) throw new Error(`Chunk ${part} fetch failed: ${res.status}`);
+          partNames.map(async (part) => {
+            const chunkUrl = resolver.getChunkUrl(part);
+            const res = await fetch(chunkUrl);
+            if (!res.ok) throw new Error(`Chunk ${part} fetch failed from ${chunkUrl}: ${res.status}`);
             return res.arrayBuffer();
           })
         );
@@ -192,11 +329,28 @@ async function initWorker(wasmBuffer?: ArrayBuffer, occBaseUrl?: string) {
       }
     }
 
+    if (!activeWasmBuffer || activeWasmBuffer.byteLength === 0) {
+      throw new Error('Invalid or empty WASM binary buffer.');
+    }
+
     (self as any).opencascade = {
       wasmBinary: activeWasmBuffer,
     };
 
     oc = await (self as any).initOpenCascade((self as any).opencascade);
+
+    if (!oc) {
+      throw new Error('initOpenCascade returned null or undefined.');
+    }
+
+    const bbox = runSmokeTest(oc);
+    console.log('[OCC Worker] bootstrap:ready');
+    console.log('[OCC Worker] smokeTest:', bbox);
+  } catch (error: any) {
+    oc = null;
+    currentSolid = null;
+    console.error('[OCC Worker] bootstrap:failed', error);
+    throw new Error(`OCC initialization failed: ${error?.message || String(error)}`);
   }
 }
 
@@ -249,6 +403,333 @@ function createAx2(pnt: any, dir: any, occ: any): any {
     return new occ.gp_Ax2_1(pnt, dir);
   }
   return new occ.gp_Ax2_3(pnt, dir);
+}
+
+function transformPoint3D(p: { x: number; y: number; z: number }, transform: FeatureTransform): { x: number; y: number; z: number } {
+  if (transform.type === 'translation' && transform.translation) {
+    return {
+      x: p.x + transform.translation.x,
+      y: p.y + transform.translation.y,
+      z: p.z + transform.translation.z,
+    };
+  } else if (transform.type === 'rotation' && transform.rotationAx1) {
+    const { origin, direction, angle } = transform.rotationAx1;
+    const cosA = Math.cos(angle);
+    const sinA = Math.sin(angle);
+    const ux = direction.x, uy = direction.y, uz = direction.z;
+    const wx = p.x - origin.x, wy = p.y - origin.y, wz = p.z - origin.z;
+    const dot = ux * wx + uy * wy + uz * wz;
+    const cx = uy * wz - uz * wy;
+    const cy = uz * wx - ux * wz;
+    const cz = ux * wy - uy * wx;
+
+    const rx = wx * cosA + cx * sinA + ux * dot * (1 - cosA);
+    const ry = wy * cosA + cy * sinA + uy * dot * (1 - cosA);
+    const rz = wz * cosA + cz * sinA + uz * dot * (1 - cosA);
+
+    return { x: origin.x + rx, y: origin.y + ry, z: origin.z + rz };
+  } else if (transform.type === 'mirror' && transform.mirrorPlane) {
+    const { origin, normal } = transform.mirrorPlane;
+    const nx = normal.x, ny = normal.y, nz = normal.z;
+    const dist = (p.x - origin.x) * nx + (p.y - origin.y) * ny + (p.z - origin.z) * nz;
+    return {
+      x: p.x - 2 * dist * nx,
+      y: p.y - 2 * dist * ny,
+      z: p.z - 2 * dist * nz,
+    };
+  }
+  return p;
+}
+
+function transformVector3D(v: Vector3D, transform: FeatureTransform): Vector3D {
+  if (transform.type === 'translation') {
+    return v;
+  } else if (transform.type === 'rotation' && transform.rotationAx1) {
+    const { direction, angle } = transform.rotationAx1;
+    const cosA = Math.cos(angle);
+    const sinA = Math.sin(angle);
+    const ux = direction.x, uy = direction.y, uz = direction.z;
+    const dot = ux * v.x + uy * v.y + uz * v.z;
+    const cx = uy * v.z - uz * v.y;
+    const cy = uz * v.x - ux * v.z;
+    const cz = ux * v.y - uy * v.x;
+
+    return {
+      x: v.x * cosA + cx * sinA + ux * dot * (1 - cosA),
+      y: v.y * cosA + cy * sinA + uy * dot * (1 - cosA),
+      z: v.z * cosA + cz * sinA + uz * dot * (1 - cosA),
+    };
+  } else if (transform.type === 'mirror' && transform.mirrorPlane) {
+    const { normal } = transform.mirrorPlane;
+    const nx = normal.x, ny = normal.y, nz = normal.z;
+    const dot = v.x * nx + v.y * ny + v.z * nz;
+    return {
+      x: v.x - 2 * dot * nx,
+      y: v.y - 2 * dot * ny,
+      z: v.z - 2 * dot * nz,
+    };
+  }
+  return v;
+}
+
+function transformBoundingBox3D(bbox: BoundingBox3D, transform: FeatureTransform): BoundingBox3D {
+  if (!bbox) return bbox;
+  const corners = [
+    { x: bbox.min.x, y: bbox.min.y, z: bbox.min.z },
+    { x: bbox.max.x, y: bbox.min.y, z: bbox.min.z },
+    { x: bbox.min.x, y: bbox.max.y, z: bbox.min.z },
+    { x: bbox.max.x, y: bbox.max.y, z: bbox.min.z },
+    { x: bbox.min.x, y: bbox.min.y, z: bbox.max.z },
+    { x: bbox.max.x, y: bbox.min.y, z: bbox.max.z },
+    { x: bbox.min.x, y: bbox.max.y, z: bbox.max.z },
+    { x: bbox.max.x, y: bbox.max.y, z: bbox.max.z },
+  ];
+
+  const xformed = corners.map((c) => transformPoint3D(c, transform));
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+  for (const p of xformed) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.z < minZ) minZ = p.z;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+    if (p.z > maxZ) maxZ = p.z;
+  }
+
+  return {
+    min: { x: minX, y: minY, z: minZ },
+    max: { x: maxX, y: maxY, z: maxZ },
+  };
+}
+
+function transformGeometrySignature(sig: GeometrySignature, transform: FeatureTransform): GeometrySignature {
+  if (!sig || !transform) return sig;
+  return {
+    ...sig,
+    centroid: transformPoint3D(sig.centroid, transform),
+    boundingBox: transformBoundingBox3D(sig.boundingBox, transform),
+    direction: sig.direction ? transformVector3D(sig.direction, transform) : undefined,
+    normal: sig.normal ? transformVector3D(sig.normal, transform) : undefined,
+  };
+}
+
+function transformTopologyReference(ref: any, transform: any): any {
+  if (!ref || !transform) return ref;
+
+  const applyTx = (pt: Point3D) => {
+    if (!pt) return pt;
+    if (transform.type === 'translation' && transform.translation) {
+      return {
+        x: pt.x + (transform.translation.x || 0),
+        y: pt.y + (transform.translation.y || 0),
+        z: pt.z + (transform.translation.z || 0),
+      };
+    } else if (transform.type === 'rotation' || transform.type === 'mirror') {
+      return transformPoint3D(pt, transform);
+    }
+    return {
+      x: pt.x + (transform.translation?.x || 0),
+      y: pt.y + (transform.translation?.y || 0),
+      z: pt.z + (transform.translation?.z || 0),
+    };
+  };
+
+  const newRef = { ...ref };
+
+  if (newRef.center) newRef.center = applyTx(newRef.center);
+  if (newRef.start) newRef.start = applyTx(newRef.start);
+  if (newRef.end) newRef.end = applyTx(newRef.end);
+  if (newRef.point1) newRef.point1 = applyTx(newRef.point1);
+  if (newRef.point2) newRef.point2 = applyTx(newRef.point2);
+
+  if (newRef.signature) {
+    newRef.signature = transformGeometrySignature(newRef.signature, transform);
+  }
+
+  return newRef;
+}
+
+function applyTransformToShape(
+  shape: any,
+  transform: FeatureTransform,
+  occ: any
+): any {
+  if (!isPointerValid(shape) || !transform) return shape;
+  const trsf = new occ.gp_Trsf_1();
+  let shapeCopy: any = null;
+  try {
+    if (transform.type === 'translation' && transform.translation) {
+      const vec = new occ.gp_Vec_4(transform.translation.x, transform.translation.y, transform.translation.z);
+      setTranslationVec(trsf, vec);
+      safeDelete(vec);
+    } else if (transform.type === 'rotation' && transform.rotationAx1) {
+      const axOrigin = transform.rotationAx1.origin;
+      const axDir = transform.rotationAx1.direction;
+
+      const pnt = new occ.gp_Pnt_3(axOrigin.x, axOrigin.y, axOrigin.z);
+      const dir = new occ.gp_Dir_4(axDir.x, axDir.y, axDir.z);
+      const ax1 = new occ.gp_Ax1_2(pnt, dir);
+      setRotationAx1(trsf, ax1, transform.rotationAx1.angle);
+      safeDelete(ax1);
+      safeDelete(dir);
+      safeDelete(pnt);
+    } else if (transform.type === 'mirror' && transform.mirrorPlane) {
+      const pnt = new occ.gp_Pnt_3(transform.mirrorPlane.origin.x, transform.mirrorPlane.origin.y, transform.mirrorPlane.origin.z);
+      const dir = new occ.gp_Dir_4(transform.mirrorPlane.normal.x, transform.mirrorPlane.normal.y, transform.mirrorPlane.normal.z);
+      const ax2 = createAx2(pnt, dir, occ);
+      setMirrorAx2(trsf, ax2);
+      safeDelete(ax2);
+      safeDelete(dir);
+      safeDelete(pnt);
+    }
+
+    const copyMaker = new occ.BRepBuilderAPI_Copy_2(shape, true, false);
+    shapeCopy = copyMaker.Shape();
+    safeDelete(copyMaker);
+
+    const xform = new occ.BRepBuilderAPI_Transform_2(shapeCopy, trsf, true);
+    const transformedShape = xform.Shape();
+    safeDelete(xform);
+    safeDelete(shapeCopy);
+    return transformedShape;
+  } finally {
+    safeDelete(trsf);
+  }
+}
+
+export function resolveAxisFromEdgeRef(
+  edgeRef: any,
+  topologyMap: TopologyMap | undefined,
+  occ: any,
+  solid: any,
+  options?: TopoResolutionOptions
+): { origin: Point3D; direction: Point3D; isValid: boolean; reference: { axisOrigin: Point3D; axisDirection: Point3D } } | null {
+  if (!edgeRef || !solid || (typeof solid.IsNull === 'function' && solid.IsNull()) || !occ || !topologyMap) {
+    return null;
+  }
+
+  const resolutionOptions: TopoResolutionOptions = options ?? { resolutionMode: 'STRICT' };
+  const targetRef: TopoReference = edgeRef.topoRef || (edgeRef.persistentId ? edgeRef : undefined);
+  let resolvedEdge: any = null;
+
+  if (targetRef) {
+    const res = resolveTopoReferenceToOCC(targetRef, topologyMap, occ, solid, resolutionOptions);
+    if (res.status === 'resolved' && res.occShape && (typeof res.occShape.IsNull !== 'function' || !res.occShape.IsNull())) {
+      resolvedEdge = res.occShape;
+    }
+  }
+
+  // Issue 2: EVOLVE mode 禁止 edgeIndex fallback
+  // STRICT 模式保持既有行為
+  if (resolutionOptions.resolutionMode !== 'EVOLVE') {
+    if (!resolvedEdge && typeof edgeRef.edgeIndex === 'number' && edgeRef.edgeIndex >= 0 && edgeRef.edgeIndex < topologyMap.edges.length) {
+      const fallbackRef = topologyMap.edges[edgeRef.edgeIndex];
+      const res = resolveTopoReferenceToOCC(fallbackRef, topologyMap, occ, solid, resolutionOptions);
+      if (res.status === 'resolved' && res.occShape && (typeof res.occShape.IsNull !== 'function' || !res.occShape.IsNull())) {
+        resolvedEdge = res.occShape;
+      }
+    }
+  }
+
+  if (!resolvedEdge || (typeof resolvedEdge.IsNull === 'function' && resolvedEdge.IsNull())) {
+    return null;
+  }
+
+  try {
+    let origin: Point3D | null = null;
+    let direction: Point3D | null = null;
+
+    let curveAdaptor: any = null;
+    try {
+      curveAdaptor = new occ.BRepAdaptor_Curve_2(resolvedEdge);
+      const cType = curveAdaptor.GetType();
+      if (cType === occ.GeomAbs_CurveType.GeomAbs_Line) {
+        const lineObj = curveAdaptor.Line();
+        const loc = lineObj.Location();
+        const dir = lineObj.Direction();
+        origin = { x: loc.X(), y: loc.Y(), z: loc.Z() };
+        direction = { x: dir.X(), y: dir.Y(), z: dir.Z() };
+        safeDelete(loc);
+        safeDelete(dir);
+        safeDelete(lineObj);
+      } else if (cType === occ.GeomAbs_CurveType.GeomAbs_Circle) {
+        const circObj = curveAdaptor.Circle();
+        const loc = circObj.Location();
+        const pos = circObj.Position();
+        const dir = pos.Direction();
+        origin = { x: loc.X(), y: loc.Y(), z: loc.Z() };
+        direction = { x: dir.X(), y: dir.Y(), z: dir.Z() };
+        safeDelete(loc);
+        safeDelete(pos);
+        safeDelete(dir);
+        safeDelete(circObj);
+      }
+    } catch (_) {
+      // 幾何適配失敗時降級至頂點探測
+    } finally {
+      safeDelete(curveAdaptor);
+    }
+
+    if (!origin || !direction) {
+      const vExp = new occ.TopExp_Explorer_2(
+        resolvedEdge,
+        occ.TopAbs_ShapeEnum.TopAbs_VERTEX,
+        occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+      );
+      let p1: Point3D | null = null;
+      let p2: Point3D | null = null;
+      if (vExp.More()) {
+        const v1 = occ.TopoDS.Vertex_1(vExp.Current());
+        const pt1 = occ.BRep_Tool.Pnt(v1);
+        p1 = { x: pt1.X(), y: pt1.Y(), z: pt1.Z() };
+        safeDelete(pt1);
+        safeDelete(v1);
+        vExp.Next();
+      }
+      if (vExp.More()) {
+        const v2 = occ.TopoDS.Vertex_1(vExp.Current());
+        const pt2 = occ.BRep_Tool.Pnt(v2);
+        p2 = { x: pt2.X(), y: pt2.Y(), z: pt2.Z() };
+        safeDelete(pt2);
+        safeDelete(v2);
+        vExp.Next();
+      }
+      safeDelete(vExp);
+
+      if (p1 && p2) {
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const dz = p2.z - p1.z;
+        const len = Math.hypot(dx, dy, dz);
+        if (len > 1e-6) {
+          origin = p1;
+          direction = { x: dx / len, y: dy / len, z: dz / len };
+        }
+      }
+    }
+
+    if (origin && direction) {
+      const dirLen = Math.hypot(direction.x, direction.y, direction.z);
+      if (dirLen > 1e-6) {
+        const normalizedDir = { x: direction.x / dirLen, y: direction.y / dirLen, z: direction.z / dirLen };
+        return {
+          origin,
+          direction: normalizedDir,
+          isValid: true,
+          reference: {
+            axisOrigin: origin,
+            axisDirection: normalizedDir,
+          },
+        };
+      }
+    }
+  } finally {
+    safeDelete(resolvedEdge);
+  }
+
+  return null;
 }
 
 function getEdgeDirection(
@@ -902,19 +1383,205 @@ function buildPathWire(
   return wire;
 }
 
-function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
+function createFeatureSolid(
+  op: FeatureEvalOp,
+  occ: any,
+  parentSolid?: any,
+  snapshots?: Map<string, HistoryReplaySnapshot<any>>
+): any {
   if (!op.profiles || op.profiles.length === 0) {
     throw new Error(`Feature ${op.featureId || op.type} has no profiles to evaluate`);
+  }
+
+  // 若 EXTRUDE 依賴 SKETCH 的評估結果：
+  if ((op as any).sketchId && (op as any).featureResults && (op as any).featureResults[(op as any).sketchId]?.evaluatedPlane) {
+    op.plane = (op as any).featureResults[(op as any).sketchId].evaluatedPlane;
   }
 
   const isRevolve = op.type === 'REVOLVE' || op.type === 'REVOLVE_CUT';
   const featureSolids: any[] = [];
 
   const plane: any = op.plane || {};
-  const origin = plane.origin || { x: 0, y: 0, z: 0 };
-  const normal = plane.normal || { x: 0, y: 0, z: 1 };
-  const xAxis = plane.xAxis || { x: 1, y: 0, z: 0 };
-  const yAxis = plane.yAxis || { x: 0, y: 1, z: 0 };
+  let origin = plane.origin || { x: 0, y: 0, z: 0 };
+  let normal = plane.normal || { x: 0, y: 0, z: 1 };
+  let xAxis = plane.xAxis || { x: 1, y: 0, z: 0 };
+  let yAxis = plane.yAxis || { x: 0, y: 1, z: 0 };
+
+  if (plane.attachedFaceRef) {
+    const parentId = plane.attachedFaceRef.parentFeatureId;
+    const faceIndex = plane.attachedFaceRef.faceIndex;
+    let targetParent: any = null;
+
+    if (isPointerValid(parentSolid)) {
+      targetParent = parentSolid;
+    }
+
+    console.log(`[P03 TRACE] Dynamic Face:\nparentFeatureId = ${parentId}\nfaceIndex = ${faceIndex}`);
+
+    // 1. 優先從本回合剛剛算完的特徵結果 (featureResults) 中提取
+    if (parentId && (op as any).featureResults && (op as any).featureResults[parentId]) {
+      const parentOpResult = (op as any).featureResults[parentId];
+      if (parentOpResult && isPointerValid(parentOpResult.solid)) {
+        targetParent = parentOpResult.solid;
+      }
+    }
+
+    // 2. 若本回合還沒存，才退回找快照
+    if ((!targetParent || !isPointerValid(targetParent)) && parentId && snapshots?.has(parentId)) {
+      const snap = snapshots.get(parentId);
+      if (isPointerValid(snap?.cumulativeBody)) {
+        targetParent = snap.cumulativeBody;
+      } else if (isPointerValid(snap?.solid)) {
+        targetParent = snap.solid;
+      }
+    }
+
+    // 3. 容錯回退：若找不到該 ID 或實體為空，自動使用 snapshots 中最後一個有效的 Solid 快照
+    if ((!targetParent || !isPointerValid(targetParent)) && snapshots) {
+      const allSnaps = Array.from(snapshots.values());
+      for (let i = allSnaps.length - 1; i >= 0; i--) {
+        const candidate = allSnaps[i]?.cumulativeBody || (allSnaps[i] as any)?.solid;
+        if (isPointerValid(candidate)) {
+          targetParent = candidate;
+          break;
+        }
+      }
+    }
+
+    if ((!targetParent || !isPointerValid(targetParent)) && isPointerValid(parentSolid)) {
+      targetParent = parentSolid;
+    }
+
+    console.log('[Dynamic Face Debug] Sketch attachedFaceRef:', plane.attachedFaceRef);
+
+    if (!isPointerValid(targetParent)) {
+      throw new Error(`FACE_EVALUATION_FAILED: Dynamic Face parent solid '${parentId}' not found or null.`);
+    }
+
+    let faceExplorer: any = null;
+    let bestFace: { center: { x: number; y: number; z: number }; normal: { x: number; y: number; z: number } } | null = null;
+    let maxProj = -Infinity;
+
+    // 幾何指紋校驗（Geometric Guard）: 提取目標面預期的法向向量 (單位化)
+    const refNormal = (plane.attachedFaceRef as any)?.faceNormal || plane.normal || { x: 0, y: 0, z: 1 };
+    const normLen = Math.hypot(refNormal.x, refNormal.y, refNormal.z) || 1;
+    const expectedNormal = {
+      x: refNormal.x / normLen,
+      y: refNormal.y / normLen,
+      z: refNormal.z / normLen,
+    };
+
+    try {
+      faceExplorer = new occ.TopExp_Explorer_2(
+        targetParent,
+        occ.TopAbs_ShapeEnum.TopAbs_FACE,
+        occ.TopAbs_ShapeEnum.TopAbs_SHAPE
+      );
+
+      while (faceExplorer.More()) {
+        const currentFace = occ.TopoDS.Face_1(faceExplorer.Current());
+
+        try {
+          const surf = new occ.BRepAdaptor_Surface_2(currentFace, true);
+          if (surf.GetType() === occ.GeomAbs_SurfaceType.GeomAbs_Plane) {
+            const occPlane = surf.Plane();
+            const axis = occPlane.Axis();
+            const norm = axis.Direction();
+
+            const uMin = surf.FirstUParameter();
+            const uMax = surf.LastUParameter();
+            const vMin = surf.FirstVParameter();
+            const vMax = surf.LastVParameter();
+            const uMid = (uMin + uMax) / 2.0;
+            const vMid = (vMin + vMax) / 2.0;
+
+            // Correctly evaluate surface point at (uMid, vMid) from BRepAdaptor_Surface
+            const cp = surf.Value(uMid, vMid);
+
+            const dotProduct =
+              norm.X() * expectedNormal.x +
+              norm.Y() * expectedNormal.y +
+              norm.Z() * expectedNormal.z;
+
+            // 1. 嚴格過濾：法向必須平行且同向 (dotProduct 趨近 1)
+            if (dotProduct > 0.99) {
+              // 2. 極值比較：計算該面中心沿預期法向的投影值
+              const proj =
+                cp.X() * expectedNormal.x +
+                cp.Y() * expectedNormal.y +
+                cp.Z() * expectedNormal.z;
+
+              if (proj > maxProj) {
+                maxProj = proj;
+                bestFace = {
+                  center: { x: cp.X(), y: cp.Y(), z: cp.Z() },
+                  normal: { x: norm.X(), y: norm.Y(), z: norm.Z() },
+                };
+              }
+            }
+
+            safeDelete(cp);
+            safeDelete(norm);
+            safeDelete(axis);
+            safeDelete(occPlane);
+          }
+          safeDelete(surf);
+        } catch (err) {
+          console.warn('SolidWorker: Error in face evaluation:', err);
+        }
+
+        faceExplorer.Next();
+      }
+      safeDelete(faceExplorer);
+    } catch (fErr) {
+      if (faceExplorer) safeDelete(faceExplorer);
+      throw new Error(`FACE_EVALUATION_FAILED: Error exploring parent solid faces: ${fErr}`);
+    }
+
+    if (!bestFace) {
+      throw new Error(`FACE_EVALUATION_FAILED: Could not find matching dynamic face on parent solid '${parentId}'.`);
+    }
+
+    // 核心數學投影：原草圖平面原點沿著 bestFace.normal 投影至目標實體面
+    const d =
+      (bestFace.center.x - origin.x) * bestFace.normal.x +
+      (bestFace.center.y - origin.y) * bestFace.normal.y +
+      (bestFace.center.z - origin.z) * bestFace.normal.z;
+
+    origin = {
+      x: Math.round((origin.x + d * bestFace.normal.x) * 10000) / 10000,
+      y: Math.round((origin.y + d * bestFace.normal.y) * 10000) / 10000,
+      z: Math.round((origin.z + d * bestFace.normal.z) * 10000) / 10000,
+    };
+    normal = bestFace.normal;
+
+    op.plane = {
+      ...op.plane,
+      origin,
+      normal,
+      xAxis,
+      yAxis,
+    };
+    (op as any).evaluatedPlane = op.plane;
+
+    console.log(`[P03 TRACE] Evaluated Face Origin:\nz = ${origin.z}`);
+    console.log(`[P03 TRACE] Extrude2 Profile:\nstartZ = ${origin.z}`);
+
+    console.log('[Dynamic Face Debug] Evaluated Face Origin:', origin);
+    console.log('[Dynamic Face Debug] Final Wire Z Position:', origin.z);
+  }
+
+  console.log('[P03 TRACE] Extrude2 input', {
+    featureId: op.featureId,
+    type: op.type,
+    sketchId: (op as any).sketchId,
+    originalPlane: op.plane,
+    attachedFaceRef: (op.plane as any)?.attachedFaceRef,
+    evaluatedPlane: (op as any).evaluatedPlane,
+    firstProfilePoint: op.profiles?.[0]?.outerLoop?.[0] || op.profiles?.[0]?.segments?.[0]?.start,
+    evaluatedOrigin: origin,
+    evaluatedNormal: normal
+  });
 
   for (const profile of op.profiles) {
     const localFace = createFaceFromProfile(profile, occ);
@@ -923,8 +1590,24 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
       const transformedFace = transformFaceTo3D(localFace, { origin, normal, xAxis, yAxis }, occ);
       safeDelete(localFace);
 
-      const axisOrigin = op.axis?.origin || { x: 0, y: 0, z: 0 };
-      const axisDirVec = op.axis?.direction || { x: 0, y: 1, z: 0 };
+      let axisOrigin = op.axis?.origin || { x: 0, y: 0, z: 0 };
+      let axisDirVec = op.axis?.direction || { x: 0, y: 1, z: 0 };
+      const axisEdgeRef = (op.axis as any)?.edgeRef || (op as any)?.axisEdgeRef;
+
+      if (axisEdgeRef && isPointerValid(parentSolid)) {
+        console.log('[P05 TRACE] Triggering Axis Dynamic Resolution for EdgeRef in createFeatureSolid:', axisEdgeRef);
+        const topMap = extractTopologyMap(parentSolid, occ, op.featureId || 'revolve-axis', 'main-body', 0);
+        const resolvedAxis = resolveAxisFromEdgeRef(axisEdgeRef, topMap, occ, parentSolid, { resolutionMode: 'STRICT' });
+        if (resolvedAxis && resolvedAxis.isValid) {
+          axisOrigin = resolvedAxis.reference.axisOrigin;
+          axisDirVec = resolvedAxis.reference.axisDirection;
+          console.log('[P05 TRACE] Resolved New Axis Origin:', axisOrigin);
+        } else if (resolvedAxis && (resolvedAxis as any).origin) {
+          axisOrigin = (resolvedAxis as any).origin;
+          axisDirVec = (resolvedAxis as any).direction;
+          console.log('[P05 TRACE] Resolved New Axis Origin:', axisOrigin);
+        }
+      }
 
       let angle = typeof op.angle === 'number' && !isNaN(op.angle) ? op.angle : 2 * Math.PI;
       if (Math.abs(angle) > 2 * Math.PI + 1e-4) {
@@ -1021,8 +1704,8 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
       const fromXDir = new occ.gp_Dir_4(1, 0, 0);
       const fromAx = new occ.gp_Ax3_3(fromOrig, fromNorm, fromXDir);
 
-      const toOrig = new occ.gp_Pnt_3(origin.x, origin.y, origin.z);
-      const toNorm = new occ.gp_Dir_4(normal.x, normal.y, normal.z);
+      const toOrig = new occ.gp_Pnt_3(op.plane.origin.x, op.plane.origin.y, op.plane.origin.z);
+      const toNorm = new occ.gp_Dir_4(op.plane.normal.x, op.plane.normal.y, op.plane.normal.z);
       const toXDir = new occ.gp_Dir_4(xAxis.x, xAxis.y, xAxis.z);
       const toAx = new occ.gp_Ax3_3(toOrig, toNorm, toXDir);
 
@@ -1035,6 +1718,8 @@ function createFeatureSolid(op: FeatureEvalOp, occ: any): any {
       if (dot < 0) {
         toAx.YReverse();
       }
+
+      console.log(`[OCC Transform Debug] EXTRUDE Profile is using Z: ${op.plane.origin.z}`);
 
       const alignTrsf = new occ.gp_Trsf_1();
       alignTrsf.SetDisplacement(fromAx, toAx);
@@ -1113,7 +1798,8 @@ function tessellateSolid(
   const featureId = options?.featureId || 'feature';
   let topologyMap: any = null;
   try {
-    topologyMap = extractTopologyMap(solid, occ, featureId, bodyId, generation);
+    const provContext = featureId ? globalFeatureTopologyContexts.get(featureId) : undefined;
+    topologyMap = extractTopologyMap(solid, occ, featureId, bodyId, generation, provContext);
   } catch (_) {
     topologyMap = null;
   }
@@ -1183,11 +1869,14 @@ function tessellateSolid(
 
     let gprops: any = null;
     try {
-      gprops = new occ.GProp_GProps();
+      const GPropCtor = occ.GProp_GProps_1 || occ.GProp_GProps_2 || occ.GProp_GProps;
+      gprops = new GPropCtor();
       if (typeof occ.BRepGProp.SurfaceProperties_1 === 'function') {
-        occ.BRepGProp.SurfaceProperties_1(face, gprops);
+        occ.BRepGProp.SurfaceProperties_1(face, gprops, 0.001, false);
+      } else if (typeof occ.BRepGProp.SurfaceProperties_2 === 'function') {
+        occ.BRepGProp.SurfaceProperties_2(face, gprops, 0.001, false);
       } else if (typeof occ.BRepGProp.SurfaceProperties === 'function') {
-        occ.BRepGProp.SurfaceProperties(face, gprops);
+        occ.BRepGProp.SurfaceProperties(face, gprops, 0.001, false);
       }
       area = gprops.Mass();
       const cMass = gprops.CentreOfMass();
@@ -1483,8 +2172,11 @@ function tessellateSolid(
 
       let length: number | undefined = undefined;
       try {
-        const gprops = new occ.GProp_GProps();
-        occ.BRepGProp.LinearProperties(edge, gprops);
+        const GPropCtor = occ.GProp_GProps_1 || occ.GProp_GProps_2 || occ.GProp_GProps;
+        const gprops = new GPropCtor();
+        if (typeof occ.BRepGProp.LinearProperties === 'function') {
+          occ.BRepGProp.LinearProperties(edge, gprops, false, false);
+        }
         length = gprops.Mass();
         safeDelete(gprops);
       } catch (_) {}
@@ -1637,7 +2329,7 @@ function tessellateSolid(
   };
 }
 
-const _self = self as any;
+const _self = typeof self !== 'undefined' ? (self as any) : (globalThis as any);
 
 _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
   const req = e.data;
@@ -1839,7 +2531,11 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           const op = operations[i];
           if (op.featureId && snapshotStore.has(op.featureId)) {
             const snap = snapshotStore.get(op.featureId)!;
-            featureResults[op.featureId] = snap.featureResult;
+            const fRes = snap.featureResult;
+            if (fRes && snap.cumulativeBody) {
+              (fRes as any).solid = snap.cumulativeBody;
+            }
+            featureResults[op.featureId] = fRes;
             if (snap.cumulativeMesh.diagnostics) {
               allDiagnostics.push(...snap.cumulativeMesh.diagnostics);
             }
@@ -1850,9 +2546,107 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         }
 
         let hasAnySuccess = evalStartIndex > 0;
+        const resolvedPatternAxes = new Map<string, { origin: Point3D; direction: Point3D }>();
+
+        for (const op of operations) {
+          if (op.featureId) {
+            if (op.type === 'EXTRUDE' || op.type === 'CUT_EXTRUDE') {
+              globalFeatureTopologyContexts.set(op.featureId, {
+                featureId: op.featureId,
+                featureType: op.type,
+                sketchId: op.sketchId,
+                profiles: op.profiles,
+                profile: (op as any).profile,
+                depth: op.depth,
+                direction: op.direction,
+                plane: op.plane,
+              });
+            }
+          }
+        }
 
         for (let i = evalStartIndex; i < operations.length; i++) {
           const op = operations[i];
+          (op as any).featureResults = featureResults;
+
+          // 若為展平的 Pattern Instance，於遇到第一個 Instance 時對 patternInputSolid (currentSolid) 唯一解算一次旋轉軸並快取
+          if (op.parentPatternFeatureId && op.transform?.type === 'rotation' && op.transform.rotationAx1) {
+            let cachedAxis = resolvedPatternAxes.get(op.parentPatternFeatureId);
+            if (!cachedAxis) {
+              const axisEdgeRef =
+                (op.transform.rotationAx1 as any).axisEdgeRef ||
+                (op.transform.rotationAx1 as any).edgeRef ||
+                (op as any).axisEdgeRef ||
+                (op.axis as any)?.edgeRef;
+
+              let axisOrigin = op.transform.rotationAx1.origin || { x: 0, y: 0, z: 0 };
+              let axisDirVec = op.transform.rotationAx1.direction || { x: 0, y: 0, z: 1 };
+
+              if (axisEdgeRef && isPointerValid(currentSolid)) {
+                console.log('[P05 TRACE] Evaluating pattern axis reference once on patternInputSolid for:', op.parentPatternFeatureId);
+                const axisRefFeatureId =
+                  typeof (axisEdgeRef as any)?.featureId === 'string' && (axisEdgeRef as any).featureId.trim().length > 0
+                    ? (axisEdgeRef as any).featureId.trim()
+                    : typeof (axisEdgeRef as any)?.topoRef?.featureId === 'string' && (axisEdgeRef as any).topoRef.featureId.trim().length > 0
+                    ? (axisEdgeRef as any).topoRef.featureId.trim()
+                    : undefined;
+
+                const axisRefPersistentId =
+                  (axisEdgeRef as any)?.persistentId ||
+                  (axisEdgeRef as any)?.topoRef?.persistentId ||
+                  undefined;
+
+                const topologyMapFeatureId = axisRefFeatureId ?? op.parentPatternFeatureId;
+
+                console.log(`[P05 AXIS MAP]
+patternFeatureId: ${op.parentPatternFeatureId}
+axisReferenceFeatureId: ${axisRefFeatureId ?? 'undefined'}
+topologyMapFeatureId: ${topologyMapFeatureId}
+axisReferencePersistentId: ${axisRefPersistentId ?? 'undefined'}`);
+
+                if (!axisRefFeatureId) {
+                  console.warn('[P05 AXIS MAP] axisEdgeRef.featureId is missing or empty, falling back to parentPatternFeatureId');
+                }
+
+                const provContext = topologyMapFeatureId ? globalFeatureTopologyContexts.get(topologyMapFeatureId) : undefined;
+                const topMap = extractTopologyMap(
+                  currentSolid,
+                  occ,
+                  topologyMapFeatureId,
+                  'main-body',
+                  i,
+                  provContext
+                );
+                const resolvedAxis = resolveAxisFromEdgeRef(axisEdgeRef, topMap, occ, currentSolid, { resolutionMode: 'EVOLVE' });
+                if (resolvedAxis && resolvedAxis.isValid) {
+                  axisOrigin = resolvedAxis.reference.axisOrigin;
+                  axisDirVec = resolvedAxis.reference.axisDirection;
+                  console.log('[P05 TRACE] Successfully resolved pattern axis:', { axisOrigin, axisDirVec });
+                  console.log(`[P05 AXIS RESOLVED]\naxisOrigin:\n{ x: ${axisOrigin.x}, y: ${axisOrigin.y}, z: ${axisOrigin.z} }`);
+                } else if (resolvedAxis && (resolvedAxis as any).origin) {
+                  axisOrigin = (resolvedAxis as any).origin;
+                  axisDirVec = (resolvedAxis as any).direction;
+                  console.log('[P05 TRACE] Successfully resolved pattern axis:', { axisOrigin, axisDirVec });
+                  console.log(`[P05 AXIS RESOLVED]\naxisOrigin:\n{ x: ${axisOrigin.x}, y: ${axisOrigin.y}, z: ${axisOrigin.z} }`);
+                } else {
+                  console.error(`[TNP FATAL] 動態旋轉軸解析徹底失敗！拒絕使用靜態舊座標退化！`);
+                  throw new Error(`[Topology Error] 前置幾何變更導致旋轉軸參照遺失 (Dangling Reference)！`);
+                }
+              }
+
+              cachedAxis = { origin: axisOrigin, direction: axisDirVec };
+              resolvedPatternAxes.set(op.parentPatternFeatureId, cachedAxis);
+            }
+
+            // 強制將唯一解算好的旋轉軸寫入後續所有該 Pattern Instance 的 rotationAx1 中
+            op.transform.rotationAx1.origin = cachedAxis.origin;
+            op.transform.rotationAx1.direction = cachedAxis.direction;
+            if (op.axis) {
+              op.axis.origin = cachedAxis.origin;
+              op.axis.direction = cachedAxis.direction;
+            }
+          }
+
           const tStart = performance.now();
           const featureDiag: KernelDiagnostic[] = [];
           let success = false;
@@ -1865,9 +2659,27 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               op.type === 'REVOLVE' ||
               op.type === 'REVOLVE_CUT'
             ) {
-              const featureSolid = createFeatureSolid(op, occ);
+              let featureSolid: any = null;
+              if (op.originalFeatureId) {
+                const sourceRes = (op as any).featureResults ? (op as any).featureResults[op.originalFeatureId] : undefined;
+                const sourceShape = sourceRes?.toolShape || featureEvaluationCache.getToolShape(op.originalFeatureId);
+                if (isPointerValid(sourceShape)) {
+                  const copyMaker = new occ.BRepBuilderAPI_Copy_2(sourceShape, true, false);
+                  featureSolid = copyMaker.Shape();
+                  safeDelete(copyMaker);
+                }
+              }
+              if (!featureSolid) {
+                featureSolid = createFeatureSolid(op, occ, currentSolid, snapshotStore);
+              }
               if (!featureSolid || featureSolid.IsNull()) {
                 throw new Error(`Feature ${op.featureId || op.type} returned an empty solid`);
+              }
+
+              if (op.transform) {
+                const xformed = applyTransformToShape(featureSolid, op.transform, occ);
+                safeDelete(featureSolid);
+                featureSolid = xformed;
               }
 
               // 【P4 核心修復】隔離 Cache 記憶體所有權
@@ -1883,15 +2695,19 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   currentSolid = featureSolid; // 直接接管所有權
                 } else if (isCut) {
                   featureDiag.push({
-                    level: 'warning',
-                    message: `Cut operation '${op.featureId || op.type}' ignored because no base solid exists.`,
+                    level: 'error',
+                    message: '缺少前置基礎實體或已被抑制',
                     featureId: op.featureId,
                   });
                   safeDelete(featureSolid);
+                  success = false;
                 }
               } else {
                 if (!isCut) {
                   const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, featureSolid);
+                  if (typeof fuse.SetFuzzyValue === 'function') {
+                    fuse.SetFuzzyValue(1e-4);
+                  }
                   fuse.Build();
                   if (fuse.IsDone()) {
                     const newSolid = fuse.Shape();
@@ -1906,6 +2722,9 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   safeDelete(fuse);
                 } else {
                   const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, featureSolid);
+                  if (typeof cut.SetFuzzyValue === 'function') {
+                    cut.SetFuzzyValue(1e-4);
+                  }
                   cut.Build();
                   if (cut.IsDone()) {
                     const newSolid = cut.Shape();
@@ -1979,6 +2798,12 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               }
 
               if (featureSolid && !featureSolid.IsNull()) {
+                if (op.transform) {
+                  const xformed = applyTransformToShape(featureSolid, op.transform, occ);
+                  safeDelete(featureSolid);
+                  featureSolid = xformed;
+                }
+
                 if (op.featureId) {
                   cacheShapeClone(op.featureId, featureSolid, occ, featureSolidCache);
                 }
@@ -1989,7 +2814,13 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   if (!isCut) {
                     currentSolid = featureSolid;
                   } else {
+                    featureDiag.push({
+                      level: 'error',
+                      message: '缺少前置基礎實體或已被抑制',
+                      featureId: op.featureId,
+                    });
                     safeDelete(featureSolid);
+                    success = false;
                   }
                 } else {
                   if (!isCut) {
@@ -2063,6 +2894,12 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               safeDelete(thruSections);
 
               if (featureSolid && !featureSolid.IsNull()) {
+                if (op.transform) {
+                  const xformed = applyTransformToShape(featureSolid, op.transform, occ);
+                  safeDelete(featureSolid);
+                  featureSolid = xformed;
+                }
+
                 if (op.featureId) {
                   cacheShapeClone(op.featureId, featureSolid, occ, featureSolidCache);
                 }
@@ -2073,7 +2910,13 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   if (!isCut) {
                     currentSolid = featureSolid;
                   } else {
+                    featureDiag.push({
+                      level: 'error',
+                      message: '缺少前置基礎實體或已被抑制',
+                      featureId: op.featureId,
+                    });
                     safeDelete(featureSolid);
+                    success = false;
                   }
                 } else {
                   if (!isCut) {
@@ -2124,8 +2967,9 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 const targetTools: TargetToolItem[] = [];
 
                 for (const tid of op.targetFeatureIds) {
-                  const toolShape = featureEvaluationCache.getToolShape(tid);
-                  if (toolShape && !toolShape.IsNull()) {
+                  const sourceRes = (op as any).featureResults ? (op as any).featureResults[tid] : undefined;
+                  const toolShape = sourceRes?.toolShape || featureEvaluationCache.getToolShape(tid);
+                  if (isPointerValid(toolShape)) {
                     const targetOp = operations.find((o) => o.featureId === tid);
                     const isCut = targetOp
                       ? targetOp.operation === 'CUT' ||
@@ -2180,11 +3024,18 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                         setTranslationVec(trsf, vec);
 
                         for (const tool of targetTools) {
-                          const xform = new occ.BRepBuilderAPI_Transform_2(tool.toolShape, trsf, true);
+                          if (!isPointerValid(tool.toolShape)) continue;
+
+                          const copyMaker = new occ.BRepBuilderAPI_Copy_2(tool.toolShape, true, false);
+                          const toolCopy = copyMaker.Shape();
+                          safeDelete(copyMaker);
+
+                          const xform = new occ.BRepBuilderAPI_Transform_2(toolCopy, trsf, true);
                           const transformedCopy = xform.Shape();
+                          safeDelete(toolCopy);
 
                           if (tool.isCut) {
-                            if (currentSolid !== null) {
+                            if (isPointerValid(currentSolid)) {
                               const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, transformedCopy);
                               cut.Build();
                               if (cut.IsDone()) {
@@ -2204,7 +3055,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                           } else {
                             if (currentSolid === null) {
                               currentSolid = transformedCopy;
-                            } else {
+                            } else if (isPointerValid(currentSolid)) {
                               const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, transformedCopy);
                               fuse.Build();
                               if (fuse.IsDone()) {
@@ -2236,8 +3087,59 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                     if (!pat) {
                       throw new Error(`Circular Pattern requires patternCircular configuration`);
                     }
-                    const axisOrigin = pat.axis?.origin || { x: 0, y: 0, z: 0 };
-                    const axisDirVec = pat.axis?.direction || { x: 0, y: 0, z: 1 };
+                    let axisOrigin = pat?.axis?.origin || { x: 0, y: 0, z: 0 };
+                    let axisDirVec = pat?.axis?.direction || { x: 0, y: 0, z: 1 };
+
+                    // 💥 擷取傳進來的邊線拓撲參照
+                    const axisEdgeRef = (pat?.axis as any)?.edgeRef || (pat as any)?.axisEdgeRef || (op as any)?.axisEdgeRef || (op.axis as any)?.edgeRef;
+                    if (axisEdgeRef && isPointerValid(currentSolid)) {
+                      console.log('[P05 TRACE] Triggering Axis Dynamic Resolution for EdgeRef:', axisEdgeRef);
+                      const axisRefFeatureId =
+                        typeof (axisEdgeRef as any)?.featureId === 'string' && (axisEdgeRef as any).featureId.trim().length > 0
+                          ? (axisEdgeRef as any).featureId.trim()
+                          : typeof (axisEdgeRef as any)?.topoRef?.featureId === 'string' && (axisEdgeRef as any).topoRef.featureId.trim().length > 0
+                          ? (axisEdgeRef as any).topoRef.featureId.trim()
+                          : undefined;
+
+                      const axisRefPersistentId =
+                        (axisEdgeRef as any)?.persistentId ||
+                        (axisEdgeRef as any)?.topoRef?.persistentId ||
+                        undefined;
+
+                      const topologyMapFeatureId = axisRefFeatureId ?? (op.featureId || 'pattern-axis');
+
+                      console.log(`[P05 AXIS MAP]
+patternFeatureId: ${op.featureId}
+axisReferenceFeatureId: ${axisRefFeatureId ?? 'undefined'}
+topologyMapFeatureId: ${topologyMapFeatureId}
+axisReferencePersistentId: ${axisRefPersistentId ?? 'undefined'}`);
+
+                      if (!axisRefFeatureId) {
+                        console.warn('[P05 AXIS MAP] axisEdgeRef.featureId is missing or empty, falling back to op.featureId');
+                      }
+
+                      const provContext = topologyMapFeatureId ? globalFeatureTopologyContexts.get(topologyMapFeatureId) : undefined;
+                      const topMap = extractTopologyMap(
+                        currentSolid,
+                        occ,
+                        topologyMapFeatureId,
+                        'main-body',
+                        i + 1,
+                        provContext
+                      );
+                      const resolvedAxis = resolveAxisFromEdgeRef(axisEdgeRef, topMap, occ, currentSolid, { resolutionMode: 'EVOLVE' });
+
+                      if (resolvedAxis && resolvedAxis.isValid) {
+                        axisOrigin = resolvedAxis.reference.axisOrigin;
+                        axisDirVec = resolvedAxis.reference.axisDirection;
+                        console.log(`[TNP DIAGNOSTIC] 成功透過指紋找到新旋轉軸！新原點:`, axisOrigin);
+                        console.log(`[P05 AXIS RESOLVED]\naxisOrigin:\n{ x: ${axisOrigin.x}, y: ${axisOrigin.y}, z: ${axisOrigin.z} }`);
+                      } else {
+                        // 💥 抓出現行犯！
+                        console.error(`[TNP FATAL] 動態旋轉軸解析徹底失敗！拒絕使用靜態舊座標 [${(resolvedAxis as any)?.origin?.x}, ${(resolvedAxis as any)?.origin?.y}] 退化！`);
+                        throw new Error(`[Topology Error] 前置幾何變更導致旋轉軸參照遺失 (Dangling Reference)！`);
+                      }
+                    }
                     const count = typeof pat.count === 'number' && pat.count > 0 ? pat.count : 1;
                     let totalAngle =
                       typeof pat.totalAngle === 'number' && !isNaN(pat.totalAngle)
@@ -2280,11 +3182,18 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                       setRotationAx1(trsf, rotAxis, angle);
 
                       for (const tool of targetTools) {
-                        const xform = new occ.BRepBuilderAPI_Transform_2(tool.toolShape, trsf, true);
+                        if (!isPointerValid(tool.toolShape)) continue;
+
+                        const copyMaker = new occ.BRepBuilderAPI_Copy_2(tool.toolShape, true, false);
+                        const toolCopy = copyMaker.Shape();
+                        safeDelete(copyMaker);
+
+                        const xform = new occ.BRepBuilderAPI_Transform_2(toolCopy, trsf, true);
                         const transformedCopy = xform.Shape();
+                        safeDelete(toolCopy);
 
                         if (tool.isCut) {
-                          if (currentSolid !== null) {
+                          if (isPointerValid(currentSolid)) {
                             const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, transformedCopy);
                             cut.Build();
                             if (cut.IsDone()) {
@@ -2306,7 +3215,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                         } else {
                           if (currentSolid === null) {
                             currentSolid = transformedCopy;
-                          } else {
+                          } else if (isPointerValid(currentSolid)) {
                             const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, transformedCopy);
                             fuse.Build();
                             if (fuse.IsDone()) {
@@ -2353,11 +3262,18 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                     setMirrorAx2(trsf, ax2);
 
                     for (const tool of targetTools) {
-                      const xform = new occ.BRepBuilderAPI_Transform_2(tool.toolShape, trsf, true);
+                      if (!isPointerValid(tool.toolShape)) continue;
+
+                      const copyMaker = new occ.BRepBuilderAPI_Copy_2(tool.toolShape, true, false);
+                      const toolCopy = copyMaker.Shape();
+                      safeDelete(copyMaker);
+
+                      const xform = new occ.BRepBuilderAPI_Transform_2(toolCopy, trsf, true);
                       const mirroredCopy = xform.Shape();
+                      safeDelete(toolCopy);
 
                       if (tool.isCut) {
-                        if (currentSolid !== null) {
+                        if (isPointerValid(currentSolid)) {
                           const cut = new occ.BRepAlgoAPI_Cut_3(currentSolid, mirroredCopy);
                           cut.Build();
                           if (cut.IsDone()) {
@@ -2379,7 +3295,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                       } else {
                         if (currentSolid === null) {
                           currentSolid = mirroredCopy;
-                        } else {
+                        } else if (isPointerValid(currentSolid)) {
                           const fuse = new occ.BRepAlgoAPI_Fuse_3(currentSolid, mirroredCopy);
                           fuse.Build();
                           if (fuse.IsDone()) {
@@ -2418,19 +3334,31 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               success = true;
             } else if (op.type === 'FILLET_3D') {
               if (!currentSolid || currentSolid.IsNull()) {
-                throw new Error(`Fillet 3D requires an existing base solid`);
+                featureDiag.push({
+                  level: 'error',
+                  message: '缺少前置基礎實體或已被抑制',
+                  featureId: op.featureId,
+                });
+                success = false;
+              } else {
+                const radius =
+                  typeof op.fillet3D?.radius === 'number' && !isNaN(op.fillet3D.radius)
+                    ? op.fillet3D.radius
+                    : 1.0;
+
+                if (radius <= 0) {
+                  featureDiag.push({
+                    level: 'error',
+                    message: `Fillet 3D radius must be greater than 0, got ${radius}`,
+                    featureId: op.featureId,
+                  });
+                  success = false;
+                } else {
+
+              let edgeRefs = op.fillet3D?.edgeRefs || [];
+              if (op.transform) {
+                edgeRefs = edgeRefs.map((ref: any) => transformTopologyReference(ref, op.transform));
               }
-
-              const radius =
-                typeof op.fillet3D?.radius === 'number' && !isNaN(op.fillet3D.radius)
-                  ? op.fillet3D.radius
-                  : 1.0;
-
-              if (radius <= 0) {
-                throw new Error(`Fillet 3D radius must be greater than 0, got ${radius}`);
-              }
-
-              const edgeRefs = op.fillet3D?.edgeRefs || [];
               const prevOpId = i > 0 ? operations[i - 1].featureId : 'base';
               const currentGeneration = i;
               const topologyMap = extractTopologyMap(
@@ -2445,30 +3373,35 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               let unresolvedCount = 0;
 
               for (const ref of edgeRefs) {
+                let resolvedShape: any = null;
+                let resolveErr: string | undefined = undefined;
+
                 const res = resolveTopoReferenceToOCC(ref, topologyMap, occ, currentSolid);
-                if (
-                  res.status === 'resolved' &&
-                  res.occShape &&
-                  (typeof res.occShape.IsNull !== 'function' || !res.occShape.IsNull())
-                ) {
-                  if (occ.BRep_Tool.Degenerated(res.occShape)) {
+                if (res.status === 'resolved' && res.occShape && !res.occShape.IsNull()) {
+                  resolvedShape = res.occShape;
+                } else {
+                  resolveErr = res.error;
+                }
+
+                if (resolvedShape && !resolvedShape.IsNull()) {
+                  if (occ.BRep_Tool.Degenerated(resolvedShape)) {
                     unresolvedCount++;
                     featureDiag.push({
                       level: 'warning',
                       message: `邊線 ${ref.persistentId} 為退化邊，已跳過 Fillet 3D 運算。`,
                       featureId: op.featureId,
                     });
-                    safeDelete(res.occShape);
+                    safeDelete(resolvedShape);
                   } else {
-                    validOccEdges.push(res.occShape);
+                    validOccEdges.push(resolvedShape);
                   }
                 } else {
                   unresolvedCount++;
                   featureDiag.push({
                     level: 'warning',
                     message:
-                      res.error ||
-                      `邊線拓撲參照 ${ref.persistentId} 解析失敗 (${res.status})。`,
+                      resolveErr ||
+                      `邊線拓撲參照 ${ref.persistentId} 解析失敗。`,
                     featureId: op.featureId,
                   });
                 }
@@ -2618,25 +3551,39 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   safeDelete(fillet);
                 }
               }
+            }
+          }
 
               // 語意邊界 (Architecture Contract v1):
               // Fillet 為修飾特徵，成果已反映於 currentSolid。
               // 嚴禁將整顆零件的 currentSolid 當成該特徵的 toolShape 存入 featureEvaluationCache。
             } else if (op.type === 'CHAMFER_3D') {
               if (!currentSolid || currentSolid.IsNull()) {
-                throw new Error(`Chamfer 3D requires an existing base solid`);
+                featureDiag.push({
+                  level: 'error',
+                  message: '缺少前置基礎實體或已被抑制',
+                  featureId: op.featureId,
+                });
+                success = false;
+              } else {
+                const distance =
+                  typeof op.chamfer3D?.distance === 'number' && !isNaN(op.chamfer3D.distance)
+                    ? op.chamfer3D.distance
+                    : 1.0;
+
+                if (distance <= 0) {
+                  featureDiag.push({
+                    level: 'error',
+                    message: `Chamfer 3D distance must be greater than 0, got ${distance}`,
+                    featureId: op.featureId,
+                  });
+                  success = false;
+                } else {
+
+              let edgeRefs = op.chamfer3D?.edgeRefs || [];
+              if (op.transform) {
+                edgeRefs = edgeRefs.map((ref: any) => transformTopologyReference(ref, op.transform));
               }
-
-              const distance =
-                typeof op.chamfer3D?.distance === 'number' && !isNaN(op.chamfer3D.distance)
-                  ? op.chamfer3D.distance
-                  : 1.0;
-
-              if (distance <= 0) {
-                throw new Error(`Chamfer 3D distance must be greater than 0, got ${distance}`);
-              }
-
-              const edgeRefs = op.chamfer3D?.edgeRefs || [];
               const prevOpId = i > 0 ? operations[i - 1].featureId : 'base';
               const currentGeneration = i;
               const topologyMap = extractTopologyMap(
@@ -2651,30 +3598,35 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               let unresolvedCount = 0;
 
               for (const ref of edgeRefs) {
+                let resolvedShape: any = null;
+                let resolveErr: string | undefined = undefined;
+
                 const res = resolveTopoReferenceToOCC(ref, topologyMap, occ, currentSolid);
-                if (
-                  res.status === 'resolved' &&
-                  res.occShape &&
-                  (typeof res.occShape.IsNull !== 'function' || !res.occShape.IsNull())
-                ) {
-                  if (occ.BRep_Tool.Degenerated(res.occShape)) {
+                if (res.status === 'resolved' && res.occShape && !res.occShape.IsNull()) {
+                  resolvedShape = res.occShape;
+                } else {
+                  resolveErr = res.error;
+                }
+
+                if (resolvedShape && !resolvedShape.IsNull()) {
+                  if (occ.BRep_Tool.Degenerated(resolvedShape)) {
                     unresolvedCount++;
                     featureDiag.push({
                       level: 'warning',
                       message: `邊線 ${ref.persistentId} 為退化邊，已跳過 Chamfer 3D 運算。`,
                       featureId: op.featureId,
                     });
-                    safeDelete(res.occShape);
+                    safeDelete(resolvedShape);
                   } else {
-                    validOccEdges.push(res.occShape);
+                    validOccEdges.push(resolvedShape);
                   }
                 } else {
                   unresolvedCount++;
                   featureDiag.push({
                     level: 'warning',
                     message:
-                      res.error ||
-                      `邊線拓撲參照 ${ref.persistentId} 解析失敗 (${res.status})。`,
+                      resolveErr ||
+                      `邊線拓撲參照 ${ref.persistentId} 解析失敗。`,
                     featureId: op.featureId,
                   });
                 }
@@ -2822,26 +3774,40 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   safeDelete(chamfer);
                 }
               }
+            }
+          }
 
               // 語意邊界 (Architecture Contract v1):
               // Chamfer 為修飾特徵，成果已反映於 currentSolid。
               // 嚴禁將整顆零件的 currentSolid 當成該特徵的 toolShape 存入 featureEvaluationCache。
             } else if (op.type === 'SHELL_3D') {
               if (!currentSolid || currentSolid.IsNull()) {
-                throw new Error(`Shell 3D requires an existing base solid`);
-              }
+                featureDiag.push({
+                  level: 'error',
+                  message: '缺少前置基礎實體或已被抑制',
+                  featureId: op.featureId,
+                });
+                success = false;
+              } else {
+                const rawThickness =
+                  typeof op.shell3D?.thickness === 'number' && !isNaN(op.shell3D.thickness)
+                    ? op.shell3D.thickness
+                    : 1.5;
+                if (rawThickness <= 0) {
+                  featureDiag.push({
+                    level: 'error',
+                    message: `Shell 3D thickness must be greater than 0, got ${rawThickness}`,
+                    featureId: op.featureId,
+                  });
+                  success = false;
+                } else {
+                  const isInside = op.shell3D?.direction !== 'outside';
+                  const offset = isInside ? -Math.abs(rawThickness) : Math.abs(rawThickness);
 
-              const rawThickness =
-                typeof op.shell3D?.thickness === 'number' && !isNaN(op.shell3D.thickness)
-                  ? op.shell3D.thickness
-                  : 1.5;
-              if (rawThickness <= 0) {
-                throw new Error(`Shell 3D thickness must be greater than 0, got ${rawThickness}`);
-              }
-              const isInside = op.shell3D?.direction !== 'outside';
-              const offset = isInside ? -Math.abs(rawThickness) : Math.abs(rawThickness);
-
-              const removedFaceRefs = op.shell3D?.removedFaceRefs || [];
+                  let removedFaceRefs = op.shell3D?.removedFaceRefs || [];
+                  if (op.transform) {
+                    removedFaceRefs = removedFaceRefs.map((ref: any) => transformTopologyReference(ref, op.transform));
+                  }
               const prevOpId = i > 0 ? operations[i - 1].featureId : 'base';
               const currentGeneration = i;
               const topologyMap = extractTopologyMap(
@@ -2997,13 +3963,12 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                   safeDelete(hollow);
                 }
               }
+            }
+          }
 
               // 語意邊界 (Architecture Contract v1):
               // Shell 為修飾特徵，成果已反映於 currentSolid。
               // 嚴禁將整顆零件的 currentSolid 當成該特徵的 toolShape 存入 featureEvaluationCache。
-              if (success) {
-                hasAnySuccess = true;
-              }
             }
 
             if (success) {
@@ -3040,6 +4005,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             diagnostics: featureDiag,
             error: errorMessage,
             executionTimeMs: performance.now() - tStart,
+            evaluatedPlane: (op as any).evaluatedPlane,
             // 語意契約欄位 (Architecture Contract v1):
             // 明確標記工具體與結果實體參照，嚴禁將整顆零件的 currentSolid 當作單一特徵自身產物
             toolShape: isGenerative ? op.type : undefined,
@@ -3048,6 +4014,9 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
           if (op.featureId) {
             featureResults[op.featureId] = fRes;
+            if (op.parentPatternFeatureId) {
+              featureResults[op.parentPatternFeatureId] = fRes;
+            }
 
             // 更新 FeatureEvaluationCache 中該特徵的評估結果資訊 (維持 toolShape 與 fRes 一致)
             const existingEntry = featureEvaluationCache.get(op.featureId);
@@ -3061,9 +4030,36 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
               });
             }
 
+            // 1. 恢復：儲存累積實體供 Dynamic Face 與拓撲歷史解析使用
+            if (success && isPointerValid(currentSolid)) {
+              const copyMaker = new occ.BRepBuilderAPI_Copy_2(currentSolid, true, false);
+              const shapeCopy = copyMaker.Shape();
+              safeDelete(copyMaker);
+              (fRes as any).solid = shapeCopy; // 恢復：儲存累積實體供 Dynamic Face 使用
+            }
+
+            // 2. 獨立儲存乾淨的 ToolShape (專供 Pattern / Mirror 使用)
+            const cachedToolShape = op.featureId ? featureEvaluationCache.getToolShape(op.featureId) : null;
+            if (success && cachedToolShape && isPointerValid(cachedToolShape)) {
+              const copyMaker = new occ.BRepBuilderAPI_Copy_2(cachedToolShape, true, false);
+              const cleanToolShape = copyMaker.Shape();
+              safeDelete(copyMaker);
+              (fRes as any).toolShape = cleanToolShape;
+
+              // 同步更新 featureEvaluationCache
+              const entry = featureEvaluationCache.get(op.featureId);
+              if (entry) {
+                // 如果原本有舊的，先清理
+                if (entry.toolShape && !entry.toolShape.IsNull() && entry.toolShape !== cleanToolShape) {
+                  safeDelete(entry.toolShape);
+                }
+                entry.toolShape = cleanToolShape;
+              }
+            }
+
             // 存入歷史回放實體快照 (snapshotStore)
             // 保存「執行至此特徵後整顆零件的累計 currentSolid 快照」，專供歷史重播與回退優化使用
-            if (success && currentSolid && !currentSolid.IsNull()) {
+            if (success && isPointerValid(currentSolid)) {
               const copyMaker = new occ.BRepBuilderAPI_Copy_2(currentSolid, true, false);
               const shapeCopy = copyMaker.Shape();
               safeDelete(copyMaker);
@@ -3080,6 +4076,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 cumulativeBody: shapeCopy,
                 cumulativeMesh: meshCopy,
                 featureResult: fRes,
+                solid: shapeCopy,
               });
             }
           }
@@ -3088,7 +4085,9 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         let meshResult: MeshResult | null = null;
         let bodies: BodyResult[] = [];
 
-        if (currentSolid && !currentSolid.IsNull()) {
+        const hasSolid = currentSolid && !currentSolid.IsNull();
+
+        if (hasSolid) {
           const lastOp = operations.length > 0 ? operations[operations.length - 1] : null;
           meshResult = tessellateSolid(currentSolid, occ, {
             bodyId: 'main-body',
@@ -3096,6 +4095,16 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             featureId: lastOp ? lastOp.featureId : 'final',
           });
           meshResult.diagnostics = allDiagnostics;
+
+          if (meshResult && meshResult.vertices) {
+            let maxZ = -Infinity, minZ = Infinity;
+            for (let i = 2; i < meshResult.vertices.length; i += 3) {
+              const z = meshResult.vertices[i];
+              if (z > maxZ) maxZ = z;
+              if (z < minZ) minZ = z;
+            }
+            console.log(`[Worker Mesh Verify] Final Mesh Z Range: [min: ${minZ}, max: ${maxZ}]`);
+          }
 
           let boundingBox: BodyResult['boundingBox'] = undefined;
           try {
@@ -3136,12 +4145,13 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           ];
         } else {
           meshResult = {
-            success: false,
+            success: true,
             vertices: new Float32Array(0),
             normals: new Float32Array(0),
             indices: new Uint32Array(0),
             diagnostics: allDiagnostics,
           };
+          bodies = [];
         }
 
         // 【P4 核心修復】隔離 Mesh Buffer，切斷 Transferable 的 Detached Bug
@@ -3172,8 +4182,8 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
 
         const kernelResult: KernelResult = {
           taskId: req.taskId,
-          success: hasAnySuccess,
-          finalMesh: safeMeshResult,
+          success: true,
+          finalMesh: hasSolid ? safeMeshResult : null,
           featureResults,
           bodies,
           diagnostics: allDiagnostics,
@@ -3672,13 +4682,13 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             const targetShapes: any[] = [];
             for (const tid of targetIds) {
               const ts = featureEvaluationCache.getToolShape(tid);
-              if (ts && (typeof ts.IsNull !== 'function' || !ts.IsNull())) {
+              if (isPointerValid(ts)) {
                 targetShapes.push(ts);
               }
             }
 
             // 若快取未命中則以 tempSolid 作為備用來源
-            if (targetShapes.length === 0 && tempSolid && (typeof tempSolid.IsNull !== 'function' || !tempSolid.IsNull())) {
+            if (targetShapes.length === 0 && isPointerValid(tempSolid)) {
               targetShapes.push(tempSolid);
             }
 
@@ -3699,9 +4709,16 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 setTranslationVec(trsf, vec);
 
                 for (const tShape of targetShapes) {
-                  const xform = new occ.BRepBuilderAPI_Transform_2(tShape, trsf, true);
+                  if (!isPointerValid(tShape)) continue;
+
+                  const copyMaker = new occ.BRepBuilderAPI_Copy_2(tShape, true, false);
+                  const tCopy = copyMaker.Shape();
+                  safeDelete(copyMaker);
+
+                  const xform = new occ.BRepBuilderAPI_Transform_2(tCopy, trsf, true);
                   const transformedCopy = xform.Shape();
                   instanceShapes.push(transformedCopy);
+                  safeDelete(tCopy);
                   safeDelete(xform);
                 }
                 safeDelete(trsf);
@@ -3735,8 +4752,25 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             const pat = op.patternCircular;
             const targetIds = op.targetFeatureIds || (pat as any)?.targetFeatureIds || [];
 
-            const axisOrigin = pat?.axis?.origin || (pat as any)?.axisOrigin || { x: 0, y: 0, z: 0 };
-            const axisDirVec = pat?.axis?.direction || (pat as any)?.axisDirection || { x: 0, y: 0, z: 1 };
+            let axisOrigin = pat?.axis?.origin || (pat as any)?.axisOrigin || { x: 0, y: 0, z: 0 };
+            let axisDirVec = pat?.axis?.direction || (pat as any)?.axisDirection || { x: 0, y: 0, z: 1 };
+            const axisEdgeRef = (pat?.axis as any)?.edgeRef || (pat as any)?.axisEdgeRef || op.axisEdgeRef || (op.axis as any)?.edgeRef;
+            if (axisEdgeRef && isPointerValid(tempSolid)) {
+              console.log('[P05 TRACE] Triggering Axis Dynamic Resolution for EdgeRef (Preview):', axisEdgeRef);
+              const previewTopoMap = extractTopologyMap(tempSolid, occ, 'preview-topo', 'main-body', 1);
+              const resolvedAxis = resolveAxisFromEdgeRef(axisEdgeRef, previewTopoMap, occ, tempSolid, { resolutionMode: 'EVOLVE' });
+              if (resolvedAxis && resolvedAxis.isValid) {
+                axisOrigin = resolvedAxis.reference.axisOrigin;
+                axisDirVec = resolvedAxis.reference.axisDirection;
+                console.log('[P05 TRACE] Resolved New Axis Origin (Preview):', axisOrigin);
+              } else if (resolvedAxis && (resolvedAxis as any).origin) {
+                axisOrigin = (resolvedAxis as any).origin;
+                axisDirVec = (resolvedAxis as any).direction;
+                console.log('[P05 TRACE] Resolved New Axis Origin (Preview):', axisOrigin);
+              } else {
+                console.warn('[P05 TRACE] Preview axis resolution failed, fallback to nominal axis (Preview fallback)');
+              }
+            }
             const count = typeof pat?.count === 'number' && pat.count > 0 ? pat.count : 1;
             let totalAngle =
               typeof pat?.totalAngle === 'number' && !isNaN(pat.totalAngle)
@@ -3756,13 +4790,13 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             const targetShapes: any[] = [];
             for (const tid of targetIds) {
               const ts = featureEvaluationCache.getToolShape(tid);
-              if (ts && (typeof ts.IsNull !== 'function' || !ts.IsNull())) {
+              if (isPointerValid(ts)) {
                 targetShapes.push(ts);
               }
             }
 
             // 若快取未命中則以 tempSolid 作為備用來源
-            if (targetShapes.length === 0 && tempSolid && (typeof tempSolid.IsNull !== 'function' || !tempSolid.IsNull())) {
+            if (targetShapes.length === 0 && isPointerValid(tempSolid)) {
               targetShapes.push(tempSolid);
             }
 
@@ -3799,9 +4833,16 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
                 setRotationAx1(trsf, rotAxis, angle);
 
                 for (const tShape of targetShapes) {
-                  const xform = new occ.BRepBuilderAPI_Transform_2(tShape, trsf, true);
+                  if (!isPointerValid(tShape)) continue;
+
+                  const copyMaker = new occ.BRepBuilderAPI_Copy_2(tShape, true, false);
+                  const tCopy = copyMaker.Shape();
+                  safeDelete(copyMaker);
+
+                  const xform = new occ.BRepBuilderAPI_Transform_2(tCopy, trsf, true);
                   const transformedCopy = xform.Shape();
                   instanceShapes.push(transformedCopy);
+                  safeDelete(tCopy);
                   safeDelete(xform);
                 }
                 safeDelete(trsf);
@@ -3846,12 +4887,12 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             const targetShapes: any[] = [];
             for (const tid of targetIds) {
               const ts = featureEvaluationCache.getToolShape(tid);
-              if (ts && (typeof ts.IsNull !== 'function' || !ts.IsNull())) {
+              if (isPointerValid(ts)) {
                 targetShapes.push(ts);
               }
             }
 
-            if (targetShapes.length === 0 && tempSolid && (typeof tempSolid.IsNull !== 'function' || !tempSolid.IsNull())) {
+            if (targetShapes.length === 0 && isPointerValid(tempSolid)) {
               targetShapes.push(tempSolid);
             }
 
@@ -3868,9 +4909,16 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
             const instanceShapes: any[] = [];
             try {
               for (const tShape of targetShapes) {
-                const xform = new occ.BRepBuilderAPI_Transform_2(tShape, trsf, true);
+                if (!isPointerValid(tShape)) continue;
+
+                const copyMaker = new occ.BRepBuilderAPI_Copy_2(tShape, true, false);
+                const tCopy = copyMaker.Shape();
+                safeDelete(copyMaker);
+
+                const xform = new occ.BRepBuilderAPI_Transform_2(tCopy, trsf, true);
                 const mirroredCopy = xform.Shape();
                 instanceShapes.push(mirroredCopy);
+                safeDelete(tCopy);
                 safeDelete(xform);
               }
             } finally {
@@ -4232,12 +5280,10 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
         const format = req.payload?.format || 'STEP';
         const operations = req.payload?.operations as FeatureEvalOp[] | undefined;
 
-        if (operations && Array.isArray(operations) && operations.length > 0) {
-          if (currentSolid) {
-            safeDelete(currentSolid);
-            currentSolid = null;
-          }
-
+        // 【強固修復】：若當前已有有效的 currentSolid，優先直接使用 currentSolid 進行匯出，
+        // 確保所有高階特徵（如 Fillet, Chamfer, Shell, Sweep, Loft, Pattern 等）與完整布林歷史保持一致，
+        // 避免不必要的重複重算或因 naive 迴圈未涵蓋高階特徵而導致匯出失敗。
+        if (!isPointerValid(currentSolid) && operations && Array.isArray(operations) && operations.length > 0) {
           let accumSolid: any = null;
           for (const op of operations) {
             if (op.operation === 'JOIN') {
@@ -4281,7 +5327,7 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
           currentSolid = accumSolid;
         }
 
-        if (!currentSolid) {
+        if (!isPointerValid(currentSolid)) {
           throw new Error('No solid available to export. Make sure to generate a 3D solid first.');
         }
 
@@ -4414,3 +5460,25 @@ _self.onmessage = async (e: MessageEvent<SolidTaskRequest | WorkerRequest>) => {
     } as SolidTaskResponse);
   }
 };
+
+export function setWorkerOCC(instance: any): void {
+  oc = instance;
+}
+
+export async function executeWorkerTask(req: SolidTaskRequest | WorkerRequest): Promise<SolidTaskResponse> {
+  return new Promise((resolve, reject) => {
+    const originalPostMessage = _self.postMessage;
+    _self.postMessage = (res: SolidTaskResponse, _transfer?: any) => {
+      _self.postMessage = originalPostMessage;
+      if (res.success) {
+        resolve(res);
+      } else {
+        reject(new Error(res.error || 'Worker task failed'));
+      }
+    };
+    _self.onmessage({ data: req } as any).catch((err: any) => {
+      _self.postMessage = originalPostMessage;
+      reject(err);
+    });
+  });
+}

@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useCADStore } from '../store/cadStore';
-import { Point2D, LineEntity, CircleEntity, ArcEntity, PolylineEntity, SketchFeature, CADEntity2D, Constraint, ConstraintType } from '../types/cad';
+import { Point2D, LineEntity, CircleEntity, ArcEntity, PolylineEntity, SketchFeature, CADEntity2D, Constraint, ConstraintType, ORIGIN_ENTITY_ID } from '../types/cad';
 import { DrawSession, createInitialDrawSession } from '../types/sketchInteraction';
 import { findSnapPoint, SnapResult } from '../core/2d/SnapManager';
 import { calculate3PointArc, calculatePolygonVertices, calculateTTRCircle, calculate3TCircle } from '../core/2d/GeometryMath';
@@ -1811,7 +1811,25 @@ export function useDrawMachine() {
             setDeferredTangent(null);
           }
 
-          if (startSnap && startSnap.entityId !== newLine.id && isRealSketchEntity(startSnap.entityId) && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
+          if (startSnap && (startSnap.entityId === 'origin' || startSnap.entityId === 'ORIGIN' || startSnap.entityId === ORIGIN_ENTITY_ID)) {
+            const originConstraint: Constraint = {
+              id: crypto.randomUUID(),
+              type: 'coincident',
+              entityIds: [newLine.id, ORIGIN_ENTITY_ID],
+              pointIndices: [0, 0],
+            };
+            addConstraint(originConstraint);
+            console.log('[DrawMachine] Auto coincident constraint added with ORIGIN:', originConstraint);
+          } else if (Math.hypot(newLine.start.x, newLine.start.y) < 1e-3) {
+            const originConstraint: Constraint = {
+              id: crypto.randomUUID(),
+              type: 'coincident',
+              entityIds: [newLine.id, ORIGIN_ENTITY_ID],
+              pointIndices: [0, 0],
+            };
+            addConstraint(originConstraint);
+            console.log('[DrawMachine] Auto coincident constraint added with ORIGIN (coords fallback):', originConstraint);
+          } else if (startSnap && startSnap.entityId !== newLine.id && isRealSketchEntity(startSnap.entityId) && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
             addConstraint({
               id: crypto.randomUUID(),
               type: 'coincident',
@@ -1820,7 +1838,25 @@ export function useDrawMachine() {
             });
           }
 
-          if (res.snap && res.snap.entityId !== newLine.id && isRealSketchEntity(res.snap.entityId) && (res.snap.type === 'endpoint' || res.snap.type === 'center') && res.snap.pointIndex !== undefined) {
+          if (res.snap && (res.snap.entityId === 'origin' || res.snap.entityId === 'ORIGIN' || res.snap.entityId === ORIGIN_ENTITY_ID)) {
+            const originConstraint: Constraint = {
+              id: crypto.randomUUID(),
+              type: 'coincident',
+              entityIds: [newLine.id, ORIGIN_ENTITY_ID],
+              pointIndices: [1, 0],
+            };
+            addConstraint(originConstraint);
+            console.log('[DrawMachine] Auto coincident constraint added with ORIGIN:', originConstraint);
+          } else if (Math.hypot(newLine.end.x, newLine.end.y) < 1e-3) {
+            const originConstraint: Constraint = {
+              id: crypto.randomUUID(),
+              type: 'coincident',
+              entityIds: [newLine.id, ORIGIN_ENTITY_ID],
+              pointIndices: [1, 0],
+            };
+            addConstraint(originConstraint);
+            console.log('[DrawMachine] Auto coincident constraint added with ORIGIN (coords fallback):', originConstraint);
+          } else if (res.snap && res.snap.entityId !== newLine.id && isRealSketchEntity(res.snap.entityId) && (res.snap.type === 'endpoint' || res.snap.type === 'center') && res.snap.pointIndex !== undefined) {
             addConstraint({
               id: crypto.randomUUID(),
               type: 'coincident',
@@ -1983,7 +2019,15 @@ export function useDrawMachine() {
             setFirstEntityId(newEntityId);
             setLastEntityId(newEntityId);
 
-            if (startSnap && startSnap.entityId !== newEntityId && isRealSketchEntity(startSnap.entityId) && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
+            if (startSnap && (startSnap.entityId === 'origin' || startSnap.entityId === 'ORIGIN' || startSnap.entityId === ORIGIN_ENTITY_ID)) {
+              const startPtIdx = polylineMode === 'ARC' && arcData ? 1 : 0;
+              addConstraint({
+                id: crypto.randomUUID(),
+                type: 'coincident',
+                entityIds: [newEntityId, ORIGIN_ENTITY_ID],
+                pointIndices: [startPtIdx, 0],
+              });
+            } else if (startSnap && startSnap.entityId !== newEntityId && isRealSketchEntity(startSnap.entityId) && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
               const startPtIdx = polylineMode === 'ARC' && arcData ? 1 : 0;
               addConstraint({
                 id: crypto.randomUUID(),
@@ -2038,7 +2082,15 @@ export function useDrawMachine() {
             setLastEntityId(newEntityId);
           }
 
-          if (res.snap && res.snap.entityId !== newEntityId && !isClosing && isRealSketchEntity(res.snap.entityId) && (res.snap.type === 'endpoint' || res.snap.type === 'center') && res.snap.pointIndex !== undefined) {
+          if (res.snap && (res.snap.entityId === 'origin' || res.snap.entityId === 'ORIGIN' || res.snap.entityId === ORIGIN_ENTITY_ID) && !isClosing) {
+            const newEndIndex = polylineMode === 'ARC' && arcData ? 2 : 1;
+            addConstraint({
+              id: crypto.randomUUID(),
+              type: 'coincident',
+              entityIds: [newEntityId, ORIGIN_ENTITY_ID],
+              pointIndices: [newEndIndex, 0],
+            });
+          } else if (res.snap && res.snap.entityId !== newEntityId && !isClosing && isRealSketchEntity(res.snap.entityId) && (res.snap.type === 'endpoint' || res.snap.type === 'center') && res.snap.pointIndex !== undefined) {
             const newEndIndex = polylineMode === 'ARC' && arcData ? 2 : 1;
             addConstraint({
               id: crypto.randomUUID(),
@@ -2081,6 +2133,7 @@ export function useDrawMachine() {
             currentCursor: clickPt,
             step: 1,
           });
+          setStartSnap(res.snap);
         } else if (drawSession.startPoint) {
           const dx = clickPt.x - drawSession.startPoint.x;
           const dy = clickPt.y - drawSession.startPoint.y;
@@ -2098,6 +2151,33 @@ export function useDrawMachine() {
             };
             addEntity(newCircle);
             setLastRadius(radius);
+
+            if (startSnap && (startSnap.entityId === 'origin' || startSnap.entityId === 'ORIGIN' || startSnap.entityId === ORIGIN_ENTITY_ID)) {
+              const circleOriginConstraint: Constraint = {
+                id: crypto.randomUUID(),
+                type: 'coincident',
+                entityIds: [newCircle.id, ORIGIN_ENTITY_ID],
+                pointIndices: [0, 0],
+              };
+              addConstraint(circleOriginConstraint);
+              console.log('[DrawMachine] Auto coincident constraint added with ORIGIN for CIRCLE:', circleOriginConstraint);
+            } else if (Math.hypot(newCircle.center.x, newCircle.center.y) < 1e-3) {
+              const circleOriginConstraint: Constraint = {
+                id: crypto.randomUUID(),
+                type: 'coincident',
+                entityIds: [newCircle.id, ORIGIN_ENTITY_ID],
+                pointIndices: [0, 0],
+              };
+              addConstraint(circleOriginConstraint);
+              console.log('[DrawMachine] Auto coincident constraint added with ORIGIN for CIRCLE (coords fallback):', circleOriginConstraint);
+            } else if (startSnap && isRealSketchEntity(startSnap.entityId) && (startSnap.type === 'endpoint' || startSnap.type === 'center') && startSnap.pointIndex !== undefined) {
+              addConstraint({
+                id: crypto.randomUUID(),
+                type: 'coincident',
+                entityIds: [newCircle.id, startSnap.entityId],
+                pointIndices: [0, startSnap.pointIndex],
+              });
+            }
           }
 
           cancelDrawing();
@@ -2110,6 +2190,7 @@ export function useDrawMachine() {
             currentCursor: clickPt,
             step: 1,
           });
+          setStartSnap(res.snap);
         } else if (drawSession.startPoint) {
           const p1 = drawSession.startPoint;
           const p2 = clickPt;
@@ -2213,6 +2294,61 @@ export function useDrawMachine() {
               type: 'vertical',
               entityIds: [rightLine.id],
             });
+
+            const isOriginSnap = (snap: any) =>
+              snap && (snap.entityId === 'origin' || snap.entityId === 'ORIGIN' || snap.entityId === ORIGIN_ENTITY_ID);
+
+            if (isOriginSnap(startSnap) || Math.hypot(p1.x, p1.y) < 1e-3) {
+              const cornerLines = [
+                { ent: bottomLine, pt: bottomLine.start, idx: 0 },
+                { ent: bottomLine, pt: bottomLine.end, idx: 1 },
+                { ent: topLine, pt: topLine.start, idx: 0 },
+                { ent: topLine, pt: topLine.end, idx: 1 },
+              ];
+              let best = cornerLines[0];
+              let minDist = Infinity;
+              for (const cl of cornerLines) {
+                const d = Math.hypot(cl.pt.x - p1.x, cl.pt.y - p1.y);
+                if (d < minDist) {
+                  minDist = d;
+                  best = cl;
+                }
+              }
+              const rectOriginConstraint: Constraint = {
+                id: crypto.randomUUID(),
+                type: 'coincident',
+                entityIds: [best.ent.id, ORIGIN_ENTITY_ID],
+                pointIndices: [best.idx, 0],
+              };
+              addConstraint(rectOriginConstraint);
+              console.log('[DrawMachine] Auto coincident constraint added with ORIGIN for RECTANGLE (p1):', rectOriginConstraint);
+            }
+
+            if (isOriginSnap(res.snap) || Math.hypot(p2.x, p2.y) < 1e-3) {
+              const cornerLines = [
+                { ent: bottomLine, pt: bottomLine.start, idx: 0 },
+                { ent: bottomLine, pt: bottomLine.end, idx: 1 },
+                { ent: topLine, pt: topLine.start, idx: 0 },
+                { ent: topLine, pt: topLine.end, idx: 1 },
+              ];
+              let best = cornerLines[0];
+              let minDist = Infinity;
+              for (const cl of cornerLines) {
+                const d = Math.hypot(cl.pt.x - p2.x, cl.pt.y - p2.y);
+                if (d < minDist) {
+                  minDist = d;
+                  best = cl;
+                }
+              }
+              const rectOriginConstraint: Constraint = {
+                id: crypto.randomUUID(),
+                type: 'coincident',
+                entityIds: [best.ent.id, ORIGIN_ENTITY_ID],
+                pointIndices: [best.idx, 0],
+              };
+              addConstraint(rectOriginConstraint);
+              console.log('[DrawMachine] Auto coincident constraint added with ORIGIN for RECTANGLE (p2):', rectOriginConstraint);
+            }
           }
 
           cancelDrawing();
@@ -2327,7 +2463,14 @@ export function useDrawMachine() {
             const p1Index = 1;
             const p2Index = 2;
 
-            if (snapP1 && (snapP1.type === 'endpoint' || snapP1.type === 'center') && snapP1.pointIndex !== undefined && isRealSketchEntity(snapP1.entityId)) {
+            if (snapP1 && (snapP1.entityId === 'origin' || snapP1.entityId === 'ORIGIN' || snapP1.entityId === ORIGIN_ENTITY_ID)) {
+              addConstraint({
+                id: crypto.randomUUID(),
+                type: 'coincident',
+                entityIds: [newArc.id, ORIGIN_ENTITY_ID],
+                pointIndices: [p1Index, 0],
+              });
+            } else if (snapP1 && (snapP1.type === 'endpoint' || snapP1.type === 'center') && snapP1.pointIndex !== undefined && isRealSketchEntity(snapP1.entityId)) {
               addConstraint({
                 id: crypto.randomUUID(),
                 type: 'coincident',
@@ -2336,7 +2479,14 @@ export function useDrawMachine() {
               });
             }
 
-            if (snapP2 && (snapP2.type === 'endpoint' || snapP2.type === 'center') && snapP2.pointIndex !== undefined && isRealSketchEntity(snapP2.entityId)) {
+            if (snapP2 && (snapP2.entityId === 'origin' || snapP2.entityId === 'ORIGIN' || snapP2.entityId === ORIGIN_ENTITY_ID)) {
+              addConstraint({
+                id: crypto.randomUUID(),
+                type: 'coincident',
+                entityIds: [newArc.id, ORIGIN_ENTITY_ID],
+                pointIndices: [p2Index, 0],
+              });
+            } else if (snapP2 && (snapP2.type === 'endpoint' || snapP2.type === 'center') && snapP2.pointIndex !== undefined && isRealSketchEntity(snapP2.entityId)) {
               addConstraint({
                 id: crypto.randomUUID(),
                 type: 'coincident',

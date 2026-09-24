@@ -1,5 +1,32 @@
 export type TopoSubShapeType = 'VERTEX' | 'EDGE' | 'FACE' | 'SOLID';
 
+export type TopoSemanticRole =
+  | 'lateral_edge'
+  | 'profile_edge_start'
+  | 'profile_edge_end'
+  | 'start_cap'
+  | 'end_cap'
+  | 'lateral_face'
+  | 'revolve_axis'
+  | string;
+
+export interface TopoProvenance {
+  // 來源特徵 ID (如 extrude-base-101)
+  sourceFeatureId: string;
+  // 來源草圖 ID
+  sourceSketchId?: string;
+  // 來源截面 Profile ID
+  sourceProfileId?: string;
+  // 來源頂點索引 (如草圖外框第 k 個頂點)
+  sourceVertexIndex?: number;
+  // 來源線段索引 (如草圖外框第 k 個線段)
+  sourceSegmentIndex?: number;
+  // 語意角色 (如 lateral_edge)
+  sourceSemanticRole?: TopoSemanticRole;
+  // 拓撲路徑識別子 (如 extrude:lateral_edge:v_1)
+  sourceTopologyPath?: string;
+}
+
 export interface Vector3D {
   x: number;
   y: number;
@@ -40,6 +67,8 @@ export interface TopoReference {
   signature: GeometrySignature;
   // 該特徵歷史版本號
   generation: number;
+  // 語意來源 (Semantic Provenance)
+  provenance?: TopoProvenance;
 }
 
 export interface TopologyMap {
@@ -60,6 +89,12 @@ export type ResolutionStatus =
   | 'body_mismatch'
   | 'kind_mismatch'
   | 'signature_mismatch';
+
+export type TopologyResolutionMode = 'STRICT' | 'EVOLVE';
+
+export interface TopoResolutionOptions {
+  resolutionMode?: TopologyResolutionMode;
+}
 
 export interface TopoResolutionResult {
   status: ResolutionStatus;

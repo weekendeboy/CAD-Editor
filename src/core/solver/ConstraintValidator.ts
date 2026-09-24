@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { CADEntity2D, Constraint, ConstraintType } from '../../types/cad';
+import { CADEntity2D, Constraint, ConstraintType, ORIGIN_ENTITY_ID } from '../../types/cad';
+
+const isOriginId = (id: string) => id === 'origin' || id === 'ORIGIN' || id === ORIGIN_ENTITY_ID;
 
 /**
  * 驗證是否可對選取的圖元套用「水平 (Horizontal)」約束
@@ -13,8 +15,9 @@ export function canApplyHorizontal(
   hasOriginSelected: boolean = false,
   existingConstraints: Constraint[] = []
 ): boolean {
-  if (selectedEntities.length === 1 && selectedEntities[0].type === 'line') {
-    const lineId = selectedEntities[0].id;
+  const realEntities = selectedEntities.filter((e) => !isOriginId(e.id));
+  if (realEntities.length === 1 && realEntities[0].type === 'line') {
+    const lineId = realEntities[0].id;
     const hasVertical = existingConstraints.some(
       (c) => c.type === 'vertical' && c.entityIds.includes(lineId)
     );
@@ -31,8 +34,9 @@ export function canApplyVertical(
   hasOriginSelected: boolean = false,
   existingConstraints: Constraint[] = []
 ): boolean {
-  if (selectedEntities.length === 1 && selectedEntities[0].type === 'line') {
-    const lineId = selectedEntities[0].id;
+  const realEntities = selectedEntities.filter((e) => !isOriginId(e.id));
+  if (realEntities.length === 1 && realEntities[0].type === 'line') {
+    const lineId = realEntities[0].id;
     const hasHorizontal = existingConstraints.some(
       (c) => c.type === 'horizontal' && c.entityIds.includes(lineId)
     );
@@ -52,24 +56,27 @@ export function canApplyHorizontalVertical(
   selectedEntities: CADEntity2D[] = [],
   hasOriginSelected: boolean = false
 ): boolean {
-  const totalSelectedCount = selectedEntities.length + (hasOriginSelected ? 1 : 0);
+  const containsOrigin = hasOriginSelected || selectedEntities.some((e) => isOriginId(e.id));
+  const realEntities = selectedEntities.filter((e) => !isOriginId(e.id));
+  const totalSelectedCount = realEntities.length + (containsOrigin ? 1 : 0);
+
   if (totalSelectedCount === 1) {
-    return selectedEntities[0]?.type === 'line';
+    return realEntities[0]?.type === 'line';
   }
   if (totalSelectedCount === 2) {
-    if (hasOriginSelected && selectedEntities.length === 1) {
+    if (containsOrigin && realEntities.length === 1) {
       return true;
     }
-    if (selectedEntities.length === 2) {
-      const allCurves = selectedEntities.every(
+    if (realEntities.length === 2) {
+      const allCurves = realEntities.every(
         (e) => e.type === 'circle' || e.type === 'arc'
       );
       if (allCurves) return true;
 
-      const hasCurve = selectedEntities.some(
+      const hasCurve = realEntities.some(
         (e) => e.type === 'circle' || e.type === 'arc'
       );
-      const hasLine = selectedEntities.some((e) => e.type === 'line');
+      const hasLine = realEntities.some((e) => e.type === 'line');
       if (hasCurve && hasLine) return true;
     }
   }
@@ -84,9 +91,11 @@ export function canApplyCoincident(
   selectedEntities: CADEntity2D[] = [],
   hasOriginSelected: boolean = false
 ): boolean {
-  const totalSelectedCount = selectedEntities.length + (hasOriginSelected ? 1 : 0);
+  const containsOrigin = hasOriginSelected || selectedEntities.some((e) => isOriginId(e.id));
+  const realEntities = selectedEntities.filter((e) => !isOriginId(e.id));
+  const totalSelectedCount = realEntities.length + (containsOrigin ? 1 : 0);
   if (totalSelectedCount !== 2) return false;
-  return hasOriginSelected ? selectedEntities.length === 1 : selectedEntities.length === 2;
+  return containsOrigin ? realEntities.length === 1 : realEntities.length === 2;
 }
 
 /**
@@ -96,12 +105,14 @@ export function isAllLines(
   selectedEntities: CADEntity2D[] = [],
   hasOriginSelected: boolean = false
 ): boolean {
-  const totalSelectedCount = selectedEntities.length + (hasOriginSelected ? 1 : 0);
+  const containsOrigin = hasOriginSelected || selectedEntities.some((e) => isOriginId(e.id));
+  const realEntities = selectedEntities.filter((e) => !isOriginId(e.id));
+  const totalSelectedCount = realEntities.length + (containsOrigin ? 1 : 0);
   return (
     totalSelectedCount >= 2 &&
-    !hasOriginSelected &&
-    selectedEntities.length >= 2 &&
-    selectedEntities.every((e) => e.type === 'line')
+    !containsOrigin &&
+    realEntities.length >= 2 &&
+    realEntities.every((e) => e.type === 'line')
   );
 }
 
@@ -112,12 +123,14 @@ export function isBothLines(
   selectedEntities: CADEntity2D[] = [],
   hasOriginSelected: boolean = false
 ): boolean {
-  const totalSelectedCount = selectedEntities.length + (hasOriginSelected ? 1 : 0);
+  const containsOrigin = hasOriginSelected || selectedEntities.some((e) => isOriginId(e.id));
+  const realEntities = selectedEntities.filter((e) => !isOriginId(e.id));
+  const totalSelectedCount = realEntities.length + (containsOrigin ? 1 : 0);
   return (
     totalSelectedCount === 2 &&
-    !hasOriginSelected &&
-    selectedEntities.length === 2 &&
-    selectedEntities.every((e) => e.type === 'line')
+    !containsOrigin &&
+    realEntities.length === 2 &&
+    realEntities.every((e) => e.type === 'line')
   );
 }
 

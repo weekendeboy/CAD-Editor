@@ -7,8 +7,26 @@ import type {
   BoundingBox3D,
   TopoResolutionResult,
   ResolutionStatus,
+  TopoResolutionOptions,
+  TopoProvenance,
 } from './PersistentTopology.types';
 import { resolveTopoReference } from './TopologyMapper';
+
+export interface FeatureTopologyContext {
+  featureId?: string;
+  featureType?: string;
+  sketchId?: string;
+  profile?: any;
+  profiles?: any[];
+  depth?: number;
+  direction?: string;
+  plane?: {
+    origin?: Vector3D;
+    normal?: Vector3D;
+    xAxis?: Vector3D;
+    yAxis?: Vector3D;
+  };
+}
 
 export interface OCCSubShapeResolution {
   status: ResolutionStatus;
@@ -24,9 +42,10 @@ export function resolveTopoReferenceToOCC(
   ref: TopoReference,
   topologyMap: TopologyMap,
   occ: any,
-  solid: any
+  solid: any,
+  options?: TopoResolutionOptions
 ): OCCSubShapeResolution {
-  const resolution = resolveTopoReference(ref, topologyMap);
+  const resolution = resolveTopoReference(ref, topologyMap, options);
   if (resolution.status !== 'resolved') {
     return {
       status: resolution.status,
@@ -219,20 +238,14 @@ export function extractFaceSignatures(
       let adaptor: any = null;
 
       try {
-        const GPropCtor = occ.GProp_GProps_1 || occ.GProp_GProps;
+        const GPropCtor = occ.GProp_GProps_1 || occ.GProp_GProps_2 || occ.GProp_GProps;
         gprops = new GPropCtor();
         if (typeof occ.BRepGProp.SurfaceProperties_1 === 'function') {
-          try {
-            occ.BRepGProp.SurfaceProperties_1(face, gprops, false, false);
-          } catch (_) {
-            occ.BRepGProp.SurfaceProperties_1(face, gprops);
-          }
+          occ.BRepGProp.SurfaceProperties_1(face, gprops, 0.001, false);
+        } else if (typeof occ.BRepGProp.SurfaceProperties_2 === 'function') {
+          occ.BRepGProp.SurfaceProperties_2(face, gprops, 0.001, false);
         } else if (typeof occ.BRepGProp.SurfaceProperties === 'function') {
-          try {
-            occ.BRepGProp.SurfaceProperties(face, gprops, false, false);
-          } catch (_) {
-            occ.BRepGProp.SurfaceProperties(face, gprops);
-          }
+          occ.BRepGProp.SurfaceProperties(face, gprops, 0.001, false);
         }
 
         const area = gprops.Mass();
@@ -345,6 +358,66 @@ export function extractFaceSignatures(
 }
 
 /**
+ * 依據特徵上下文與截面幾何，推論 Extrude 所產生之邊線的語意來源 (Semantic Provenance)
+ */
+export function inferExtrudeEdgeProvenance(
+  centroid: Vector3D,
+  direction: Vector3D | undefined,
+  length: number | undefined,
+  context: FeatureTopologyContext,
+  featureId: string
+): TopoProvenance | undefined {
+  const plane = context.plane || {
+    origin: { x: 0, y: 0, z: 0 },
+    normal: { x: 0, y: 0, z: 1 },
+    xAxis: { x: 1, y: 0, z: 0 },
+    yAxis: { x: 0, y: 1, z: 0 },
+  };
+  const norm = plane.normal || { x: 0, y: 0, z: 1 };
+  const xAxis = plane.xAxis || { x: 1, y: 0, z: 0 };
+  const yAxis = plane.yAxis || { x: 0, y: 1, z: 0 };
+  const origin = plane.origin || { x: 0, y: 0, z: 0 };
+
+  const profiles = context.profiles || (context.profile ? [context.profile] : []);
+  if (profiles.length === 0) return undefined;
+
+  // 1. 判斷是否為側邊（Lateral Edge）：方向與拉伸法向高度平行
+  if (direction) {
+    const dot = Math.abs(direction.x * norm.x + direction.y * norm.y + direction.z * norm.z);
+    if (dot > 0.85) {
+      // 側邊投影至草圖 2D 平面
+      const dx = centroid.x - origin.x;
+      const dy = centroid.y - origin.y;
+      const dz = centroid.z - origin.z;
+      const u = dx * xAxis.x + dy * xAxis.y + dz * xAxis.z;
+      const v = dx * yAxis.x + dy * yAxis.y + dz * yAxis.z;
+
+      // 比對草圖截面各頂點
+      for (const prof of profiles) {
+        const pts: { x: number; y: number }[] =
+          prof.outerLoop || (prof.segments ? prof.segments.map((s: any) => s.start) : []);
+        for (let k = 0; k < pts.length; k++) {
+          const pt = pts[k];
+          const dist = Math.hypot(u - pt.x, v - pt.y);
+          if (dist < 1.0) {
+            return {
+              sourceFeatureId: featureId,
+              sourceSketchId: context.sketchId,
+              sourceProfileId: prof.id,
+              sourceSemanticRole: 'lateral_edge',
+              sourceVertexIndex: k,
+              sourceTopologyPath: `extrude:lateral_edge:v_${k}`,
+            };
+          }
+        }
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
  * 萃取 B-Rep 中所有邊（Edge）的幾何簽章與持久化參考
  */
 export function extractEdgeSignatures(
@@ -352,7 +425,8 @@ export function extractEdgeSignatures(
   occ: any,
   featureId: string,
   bodyId: string = 'main-body',
-  generation: number = 1
+  generation: number = 1,
+  context?: FeatureTopologyContext
 ): TopoReference[] {
   const edges: TopoReference[] = [];
   if (!shape || shape.IsNull()) return edges;
@@ -397,14 +471,10 @@ export function extractEdgeSignatures(
       let curveAdaptor: any = null;
 
       try {
-        const GPropCtor = occ.GProp_GProps_1 || occ.GProp_GProps;
+        const GPropCtor = occ.GProp_GProps_1 || occ.GProp_GProps_2 || occ.GProp_GProps;
         gprops = new GPropCtor();
         if (typeof occ.BRepGProp.LinearProperties === 'function') {
-          try {
-            occ.BRepGProp.LinearProperties(edge, gprops, false, false);
-          } catch (_) {
-            occ.BRepGProp.LinearProperties(edge, gprops);
-          }
+          occ.BRepGProp.LinearProperties(edge, gprops, false, false);
         }
 
         const length = gprops.Mass();
@@ -485,6 +555,21 @@ export function extractEdgeSignatures(
         const hash = hashSignature(signature);
         const persistentId = `topo_EDGE_${featureId}_${index}_${hash}`;
 
+        let provenance: TopoProvenance | undefined = undefined;
+        if ((edge as any).provenance) {
+          provenance = (edge as any).provenance;
+        } else if ((edge as any).sourceTopologyPath) {
+          provenance = {
+            sourceFeatureId: (edge as any).sourceFeatureId || featureId,
+            sourceTopologyPath: (edge as any).sourceTopologyPath,
+            sourceSemanticRole: (edge as any).sourceSemanticRole,
+            sourceVertexIndex: (edge as any).sourceVertexIndex,
+            sourceSegmentIndex: (edge as any).sourceSegmentIndex,
+          };
+        } else if (context && (context.profiles || context.profile)) {
+          provenance = inferExtrudeEdgeProvenance(centroid, direction, roundVal(length), context, featureId);
+        }
+
         edges.push({
           persistentId,
           featureId,
@@ -492,6 +577,7 @@ export function extractEdgeSignatures(
           subShapeType: 'EDGE',
           signature,
           generation,
+          provenance,
         });
 
         index++;
@@ -606,10 +692,11 @@ export function extractTopologyMap(
   occ: any,
   featureId: string,
   bodyId: string = 'main-body',
-  generation: number = 1
+  generation: number = 1,
+  context?: FeatureTopologyContext
 ): TopologyMap {
   const faces = extractFaceSignatures(shape, occ, featureId, bodyId, generation);
-  const edges = extractEdgeSignatures(shape, occ, featureId, bodyId, generation);
+  const edges = extractEdgeSignatures(shape, occ, featureId, bodyId, generation, context);
   const vertices = extractVertexSignatures(shape, occ, featureId, bodyId, generation);
 
   return {

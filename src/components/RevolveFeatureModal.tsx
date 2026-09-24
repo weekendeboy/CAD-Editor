@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useCADStore } from '../store/cadStore';
 import { useDraggableModal } from '../hooks/useDraggableModal';
 import {
@@ -29,6 +29,7 @@ export interface RevolveFeatureModalProps {
 
 interface RevolveFeatureModalContentProps {
   mode: 'REVOLVE' | 'REVOLVE_CUT';
+  featureId?: string;
   onClose: () => void;
 }
 
@@ -38,6 +39,7 @@ interface RevolveFeatureModalContentProps {
  */
 const RevolveFeatureModalContent: React.FC<RevolveFeatureModalContentProps> = ({
   mode,
+  featureId,
   onClose,
 }) => {
   const featureTree = useCADStore((s) => s.document?.featureTree) || [];
@@ -93,6 +95,42 @@ const RevolveFeatureModalContent: React.FC<RevolveFeatureModalContentProps> = ({
       setViewMode('3D');
     }
   }, [viewMode, setViewMode]);
+
+  const rollbackTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // 當進入特徵編輯模式時，自動將 3D 回退索引設定至目標特徵位置前，隔離編輯預覽
+  useEffect(() => {
+    if (!featureId) return;
+
+    if (rollbackTimerRef.current) {
+      clearTimeout(rollbackTimerRef.current);
+      rollbackTimerRef.current = null;
+    }
+
+    // 1. 組件掛載/進入編輯時，退回歷史
+    const currentState = useCADStore.getState();
+    const tree = currentState.document.featureTree;
+    const idx = tree.findIndex((f) => f.id === featureId);
+    if (idx >= 0) {
+      if (currentState.document.rollbackIndex !== idx) {
+        currentState.setRollbackIndex(idx);
+      }
+    }
+
+    // 2. 只有在組件真正卸載 (Unmount) 或 featureId 改變時，才恢復到樹的末端
+    return () => {
+      if (rollbackTimerRef.current) {
+        clearTimeout(rollbackTimerRef.current);
+      }
+      rollbackTimerRef.current = setTimeout(() => {
+        const state = useCADStore.getState();
+        const treeLen = state.document.featureTree.length;
+        if (state.document.rollbackIndex !== treeLen) {
+          state.setRollbackIndex(treeLen);
+        }
+      }, 0);
+    };
+  }, [featureId]);
 
   // 當前選取草圖物件與線段實體
   const targetSketch = useMemo(() => {

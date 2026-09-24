@@ -41,6 +41,8 @@ export interface HistoryReplaySnapshot<TShape = any> {
   stepIndex: number;
   /** 該步驟完成後，整顆零件當下的累計 B-Rep 實體 (Current Solid 快照) */
   cumulativeBody: TShape;
+  /** 實體相容欄位 (Latest Evaluated Solid) */
+  solid?: TShape;
   /** 累計實體的離散化網格 */
   cumulativeMesh: MeshResult;
   /** 該特徵的評估結果 */

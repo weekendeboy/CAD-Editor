@@ -4,6 +4,8 @@ import {
   markDownstreamDirty,
   isBodyModifyingFeature,
   getRegenPlan,
+  validateFeatureDependencies,
+  getDirectDependencies,
 } from '../FeatureRegenEngine';
 import { compileFeaturePlan } from '../FeaturePipelineAdapter';
 import type {
@@ -359,3 +361,63 @@ test('Prompt 03 - Suppression Toggle: 切換抑制實體特徵應使後續實體
   assert.equal(dirtyTree.find((f) => f.id === 'fillet-1')?.isDirty, true);
   assert.equal(dirtyTree.find((f) => f.id === 'ext-1')?.isDirty, undefined);
 });
+
+test('Prompt 03 - Surface Sketch: 懸空 main-body 自動修復為最近上游實體特徵並啟動 DAG 傳播', () => {
+  const tree = [
+    makeMockSketch('sk-1', 'Base Sketch'),
+    makeMockExtrude('ext-1', 'Base Box', 'sk-1'),
+    {
+      id: 'sk-2',
+      name: 'Top Surface Sketch',
+      type: 'SKETCH',
+      dependencies: ['main-body'],
+      attachedFaceRef: { parentFeatureId: 'main-body', faceIndex: 5 },
+      suppressed: false,
+    } as any,
+    makeMockExtrude('ext-2', 'Top Cylinder', 'sk-2'),
+  ];
+
+  // 1. 驗證 validateFeatureDependencies 自動補正且無 orphan 錯誤，且保持純函式不就地修改唯讀物件
+  const brokenMap = validateFeatureDependencies(tree);
+  assert.equal(brokenMap.size, 0);
+
+  // 2. 驗證 getDirectDependencies 返回正確的實體特徵 ID
+  const deps = getDirectDependencies(tree[2], tree);
+  assert.deepEqual(deps, ['ext-1']);
+
+  // 3. 驗證修改 Base Box (ext-1) 後，草圖 (sk-2) 與頂面圓柱 (ext-2) 皆被標記為髒
+  const dirtyTree = markDownstreamDirty(tree, 'ext-1');
+  const dirtyIds = dirtyTree.filter((f) => f.isDirty).map((f) => f.id);
+  assert.deepEqual(dirtyIds, ['ext-1', 'sk-2', 'ext-2']);
+});
+
+test('Prompt 03 - Immutability: 凍結唯讀特徵物件 (Frozen Object) 執行 validateFeatureDependencies 與 getRegenPlan 不得拋錯', () => {
+  const frozenSketch: any = Object.freeze({
+    id: 'sk-frozen',
+    name: 'Frozen Surface Sketch',
+    type: 'SKETCH',
+    dependencies: Object.freeze(['main-body']),
+    attachedFaceRef: Object.freeze({ parentFeatureId: 'main-body', faceIndex: 0 }),
+    suppressed: false,
+    plane: DatumFrontPlane,
+  });
+
+  const frozenTree: any = [
+    Object.freeze(makeMockSketch('sk-1', 'Base Sketch')),
+    Object.freeze(makeMockExtrude('ext-1', 'Base Box', 'sk-1')),
+    frozenSketch,
+  ];
+
+  // 必須保證純函式運行，絕對不能拋出 TypeError: Cannot assign to read only property
+  assert.doesNotThrow(() => {
+    const broken = validateFeatureDependencies(frozenTree);
+    assert.equal(broken.size, 0);
+  });
+
+  assert.doesNotThrow(() => {
+    const plan = getRegenPlan(frozenTree, frozenTree.length, ['ext-1']);
+    assert.equal(plan.brokenDependencies.size, 0);
+    assert.equal(plan.hasCycle, false);
+  });
+});
+

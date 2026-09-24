@@ -235,11 +235,6 @@ export const FilletChamferShellModal: React.FC<FilletChamferShellModalProps> = (
     prevModeRef.current = mode;
 
     if (!isOpen) {
-      if (originalRollbackIndexRef.current !== null) {
-        const restoreIdx = originalRollbackIndexRef.current;
-        originalRollbackIndexRef.current = null;
-        setRollbackIndex(restoreIdx);
-      }
       setFilletChamferPreview(null);
       return;
     }
@@ -251,18 +246,6 @@ export const FilletChamferShellModal: React.FC<FilletChamferShellModalProps> = (
       }
 
       const tree = document?.featureTree || [];
-
-      // 若為編輯既有特徵模式：將 3D Viewport 回退至該特徵前一個狀態 (Rollback to Pre-Feature Mesh)
-      // 避免視圖顯示當前特徵而導致 Face/Edge selection 附帶自身 featureId 造成循環依賴
-      if (featureId) {
-        const targetIdx = tree.findIndex((f) => f.id === featureId);
-        if (targetIdx !== -1) {
-          if (originalRollbackIndexRef.current === null) {
-            originalRollbackIndexRef.current = document?.rollbackIndex ?? tree.length;
-          }
-          setRollbackIndex(targetIdx);
-        }
-      }
 
       if (mode === 'FILLET_3D') {
         if (targetFeature && targetFeature.type === 'FILLET_3D') {
@@ -322,12 +305,46 @@ export const FilletChamferShellModal: React.FC<FilletChamferShellModalProps> = (
     featureId,
     targetFeature,
     document?.featureTree,
-    document?.rollbackIndex,
     viewMode,
     setViewMode,
     setFilletChamferPreview,
-    setRollbackIndex,
   ]);
+
+  const rollbackTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // 當進入特徵編輯模式時，自動將 3D 回退索引設定至目標特徵位置前，隔離編輯預覽
+  useEffect(() => {
+    if (!featureId) return;
+
+    if (rollbackTimerRef.current) {
+      clearTimeout(rollbackTimerRef.current);
+      rollbackTimerRef.current = null;
+    }
+
+    // 1. 組件掛載/進入編輯時，退回歷史
+    const currentState = useCADStore.getState();
+    const tree = currentState.document.featureTree;
+    const idx = tree.findIndex((f) => f.id === featureId);
+    if (idx >= 0) {
+      if (currentState.document.rollbackIndex !== idx) {
+        currentState.setRollbackIndex(idx);
+      }
+    }
+
+    // 2. 只有在組件真正卸載 (Unmount) 或 featureId 改變時，才恢復到樹的末端
+    return () => {
+      if (rollbackTimerRef.current) {
+        clearTimeout(rollbackTimerRef.current);
+      }
+      rollbackTimerRef.current = setTimeout(() => {
+        const state = useCADStore.getState();
+        const treeLen = state.document.featureTree.length;
+        if (state.document.rollbackIndex !== treeLen) {
+          state.setRollbackIndex(treeLen);
+        }
+      }, 0);
+    };
+  }, [featureId]);
 
   // 當 3D 視圖選取面觸發 selectedFaceInfo 時實作 Toggle 機制
   useEffect(() => {
@@ -363,14 +380,9 @@ export const FilletChamferShellModal: React.FC<FilletChamferShellModalProps> = (
 
   // 關閉 Modal 時清除預覽並恢復歷史 Rollback 指針
   const handleClose = useCallback(() => {
-    if (originalRollbackIndexRef.current !== null) {
-      const restoreIndex = originalRollbackIndexRef.current;
-      originalRollbackIndexRef.current = null;
-      setRollbackIndex(restoreIndex);
-    }
     setFilletChamferPreview(null);
     onClose();
-  }, [onClose, setFilletChamferPreview, setRollbackIndex]);
+  }, [onClose, setFilletChamferPreview]);
 
   // 即時 3D Live Preview 計算 (Debounce 120ms，調用 SolidEngine 的 OCC 實體幾何運算)
   useEffect(() => {
@@ -654,11 +666,6 @@ export const FilletChamferShellModal: React.FC<FilletChamferShellModalProps> = (
         addFeature(newFeature);
       }
     }
-
-    if (originalRollbackIndexRef.current !== null) {
-      originalRollbackIndexRef.current = null;
-    }
-    setRollbackIndex(tree.length);
 
     setFilletChamferPreview(null);
     setViewMode('3D');

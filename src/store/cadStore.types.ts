@@ -1,4 +1,4 @@
-import { CADDocument, CADEntity2D, CADLayer, Constraint, Point2D, Point3D, ExtrudeFeature, CADFeature, CustomPlane } from '../types/cad';
+import { CADDocument, CADEntity2D, CADLayer, Constraint, Point2D, Point3D, ExtrudeFeature, CADFeature, CustomPlane, AttachedFaceRef } from '../types/cad';
 import {
   KernelResult,
   KernelDiagnostic,
@@ -93,6 +93,7 @@ export interface SketchDraftSnapshot {
 export interface SketchSession {
   isActive: boolean;
   sketchId: string | null;
+  savedRollbackIndex?: number | null;
   initialEntities: CADEntity2D[];
   initialConstraints: Constraint[];
   initialDimensions: any[];
@@ -153,7 +154,7 @@ export interface CADActions {
   updateDatumPlaneOffset: (planeFeatureId: string, distance: number) => void;
   toggleFeatureVisibility: (featureId: string) => void;
   createSketchOnPlane: (planeId: string) => string; // 依附於指定基準面建立新草圖，回傳草圖 ID 並設為 activeSketchId
-  createSketchOnFacePlane: (plane: CustomPlane) => string; // 依附於實體表面建立新草圖
+  createSketchOnFacePlane: (plane: CustomPlane, attachedFaceRef?: AttachedFaceRef) => string; // 依附於實體表面建立新草圖
   setSelectedFaceInfo: (
     face: {
       point: Point3D;
@@ -230,7 +231,7 @@ export interface CADActions {
   enterSketchSession: (sketchId: string) => void;
   startSketchSession?: (sketchId: string) => void;
   commitSketchSession: () => Promise<void>;
-  cancelSketchSession: () => void;
+  cancelSketchSession: () => void | Promise<void>;
 
   // 2D 圖元編輯 Actions
   addEntity: (entity: CADEntity2D) => void;
@@ -286,8 +287,8 @@ export interface CADActions {
   toggleOrtho: () => void;
   toggleShowProfiles: () => void;
   resetDocument: () => void;
-  undo: () => void;
-  redo: () => void;
+  undo: () => void | Promise<void>;
+  redo: () => void | Promise<void>;
   canUndo: () => boolean;
   canRedo: () => boolean;
 

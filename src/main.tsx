@@ -2,6 +2,13 @@ import React, { Component, ErrorInfo, ReactNode, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
+import { useCADStore } from './store/cadStore';
+import { solidEngine } from './core/3d/SolidEngine';
+
+if (typeof window !== 'undefined') {
+  (window as any).__CAD_STORE__ = useCADStore;
+  (window as any).__SOLID_ENGINE__ = solidEngine;
+}
 
 interface ErrorBoundaryProps {
   children: ReactNode;

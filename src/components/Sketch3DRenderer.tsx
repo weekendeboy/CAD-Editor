@@ -20,15 +20,40 @@ import { getArcSweepAngle } from '../core/2d/GeometryMath';
  */
 export const Sketch3DRenderer: React.FC = () => {
   const featureTree = useCADStore((state) => state.document.featureTree);
+  const rollbackIndex = useCADStore((state) => state.document.rollbackIndex);
   const activeSketchId = useCADStore((state) => state.activeSketchId);
   const extrudePreview = useCADStore((state) => state.extrudePreview);
   const revolvePreview = useCADStore((state) => state.revolvePreview);
 
+  const activeSlice = useMemo(() => {
+    return (featureTree || []).slice(0, Math.max(0, rollbackIndex ?? 0));
+  }, [featureTree, rollbackIndex]);
+
   const sketches = useMemo(() => {
-    return (featureTree || []).filter(
+    return activeSlice.filter(
       (f): f is SketchFeature => f.type === 'SKETCH' && !f.suppressed && f.visible !== false
     );
-  }, [featureTree]);
+  }, [activeSlice]);
+
+  const editingFeatureId = featureTree && typeof rollbackIndex === 'number' && rollbackIndex < featureTree.length ? featureTree[rollbackIndex]?.id : null;
+  const previewFeatureId = extrudePreview?.isOpen ? (editingFeatureId || extrudePreview.sketchId) : null;
+  const canonicalFeatureIds = useMemo(() => activeSlice.map((f) => f.id), [activeSlice]);
+  const canonicalSolidIds = useMemo(() => {
+    return activeSlice
+      .filter((f) => f.type === 'EXTRUDE' || f.type === 'CUT_EXTRUDE' || f.type === 'REVOLVE' || f.type === 'REVOLVE_CUT' || f.type === 'SWEEP' || f.type === 'LOFT')
+      .map((f) => f.id);
+  }, [activeSlice]);
+  const renderedSketchIds = useMemo(() => sketches.map((s) => s.id), [sketches]);
+
+  console.log('[EDIT TRACE] Sketch3DRenderer', {
+    editingFeatureId,
+    rollbackIndex,
+    canonicalFeatureIds,
+    canonicalSolidIds,
+    previewFeatureId,
+    renderedSolidFeatureIds: canonicalSolidIds,
+    renderedSketchIds,
+  });
 
   // 為每個草圖建構 3D 頂點段 (每 2 頂點構成一條線段，供 lineSegments 批次渲染)
   const sketchMeshes = useMemo(() => {

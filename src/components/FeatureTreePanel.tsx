@@ -25,6 +25,8 @@ export const FeatureTreePanel: React.FC<FeatureTreePanelProps> = ({ onEditFeatur
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isDraggingRollback, setIsDraggingRollback] = useState(false);
   const [selectedPlaneId, setSelectedPlaneId] = useState<string | null>(null);
+  const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ index: number; position: 'before' | 'after' } | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -36,6 +38,7 @@ export const FeatureTreePanel: React.FC<FeatureTreePanelProps> = ({ onEditFeatur
     toggleFeatureSuppression,
     renameFeature,
     removeFeature,
+    reorderFeature,
     updateFeature,
     setRollbackIndex,
     createSketchOnPlane,
@@ -316,7 +319,58 @@ export const FeatureTreePanel: React.FC<FeatureTreePanelProps> = ({ onEditFeatur
                 </div>
 
                 {/* 渲染 FeatureTreeItem */}
-                <div data-feature-index={idx} className="relative group/tree-item">
+                <div
+                  data-feature-index={idx}
+                  draggable={!isPast && !isDraggingRollback}
+                  onDragStart={(e) => {
+                    if (isPast) return;
+                    e.dataTransfer.setData('text/plain', String(idx));
+                    e.dataTransfer.effectAllowed = 'move';
+                    setDraggedIdx(idx);
+                  }}
+                  onDragOver={(e) => {
+                    if (isPast || draggedIdx === null) return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const midY = rect.top + rect.height / 2;
+                    const position = e.clientY < midY ? 'before' : 'after';
+                    setDropTarget({ index: idx, position });
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    const srcStr = e.dataTransfer.getData('text/plain');
+                    const srcIndex = parseInt(srcStr, 10);
+                    if (!isNaN(srcIndex) && srcIndex >= 0 && srcIndex < featureTree.length) {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const midY = rect.top + rect.height / 2;
+                      let targetIndex = e.clientY < midY ? idx : idx + 1;
+                      if (targetIndex > srcIndex) {
+                        targetIndex -= 1;
+                      }
+                      if (targetIndex !== srcIndex && targetIndex >= 0 && targetIndex < featureTree.length) {
+                        reorderFeature(srcIndex, targetIndex);
+                      }
+                    }
+                    setDraggedIdx(null);
+                    setDropTarget(null);
+                  }}
+                  onDragEnd={() => {
+                    setDraggedIdx(null);
+                    setDropTarget(null);
+                  }}
+                  className={`relative group/tree-item transition-all ${
+                    draggedIdx === idx ? 'opacity-40' : ''
+                  }`}
+                >
+                  {/* 拖曳重排放置提示線 (Drop Indicator) */}
+                  {dropTarget && dropTarget.index === idx && draggedIdx !== idx && (
+                    <div
+                      className={`absolute left-0 right-0 h-0.5 bg-amber-400 z-30 shadow-[0_0_8px_rgba(251,191,36,0.9)] pointer-events-none rounded ${
+                        dropTarget.position === 'before' ? '-top-0.5' : '-bottom-0.5'
+                      }`}
+                    />
+                  )}
                   <FeatureTreeItem
                     feature={feature}
                     isSelected={selectedFeatureId === feature.id}

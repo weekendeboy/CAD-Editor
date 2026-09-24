@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useCADStore } from '../store/cadStore';
-import { Constraint, CADEntity2D, Point2D } from '../types/cad';
+import { Constraint, CADEntity2D, Point2D, ORIGIN_ENTITY_ID } from '../types/cad';
 
 interface ConstraintBadgeRendererProps {
   constraints: Constraint[];
@@ -78,6 +78,10 @@ function getConstraintCenter(
   const pts: Point2D[] = [];
 
   constraint.entityIds.forEach((entityId, i) => {
+    if (entityId === 'origin' || entityId === 'ORIGIN' || entityId === ORIGIN_ENTITY_ID) {
+      pts.push({ x: 0, y: 0 });
+      return;
+    }
     const entity = entities.find((e) => e.id === entityId);
     if (!entity) return;
 

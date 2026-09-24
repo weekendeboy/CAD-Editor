@@ -78,9 +78,9 @@ export const DimensionRenderer: React.FC<DimensionRendererProps> = ({
         const isSelected = selectedDimensionIds.includes(dim.id);
         const isReference = !!(dim as any).isReference;
 
-        // 色彩定義：選取狀態使用醒目的藍色
-        const strokeColor = isSelected ? '#3b82f6' : isReference ? '#67e8f9' : '#10b981';
-        const textColor = isSelected ? '#60a5fa' : isReference ? '#cffafe' : '#34d399';
+        // 色彩定義：選取狀態使用醒目的亮黃色 (#facc15)
+        const strokeColor = isSelected ? '#facc15' : isReference ? '#67e8f9' : '#10b981';
+        const textColor = isSelected ? '#fef08a' : isReference ? '#cffafe' : '#34d399';
 
         try {
           if (dim.type === 'linear') {

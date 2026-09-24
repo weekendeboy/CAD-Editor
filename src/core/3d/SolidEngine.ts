@@ -14,7 +14,7 @@ import {
 } from './SolidEngine.types';
 import type { SketchProfile } from '../../types/cad';
 import { buildFeatureEvalOps } from './FeaturePipelineAdapter';
-import SolidWorker from './SolidWorker.ts?worker';
+import { WorkerOCCAssetResolver } from './WorkerOCCAssetResolver';
 
 export class SolidEngine {
   private worker: Worker | null = null;
@@ -29,10 +29,16 @@ export class SolidEngine {
     // Lazy worker creation to prevent module evaluation crashes in constrained environments
   }
 
+  public setWorker(worker: any): void {
+    this.worker = worker;
+    this.worker.onmessage = this.handleMessage.bind(this);
+    this.initPromise = Promise.resolve();
+  }
+
   private getWorker(): Worker | null {
     if (!this.worker && typeof window !== 'undefined' && typeof Worker !== 'undefined') {
       try {
-        this.worker = new SolidWorker();
+        this.worker = new Worker(new URL('./SolidWorker.ts', import.meta.url), { type: 'module' });
         this.worker.onmessage = this.handleMessage.bind(this);
         this.worker.onerror = (err) => {
           console.error('SolidWorker error:', err);
@@ -99,19 +105,8 @@ export class SolidEngine {
       this.initPromise = (async () => {
         // Fetch the WASM binary on the main thread to ensure proper cookie handling and origin context.
         // We load chunked parts (<20MB each) to strictly conform to Cloud Run's 32MB HTTP response limit.
-        const getOccBaseUrl = (): string => {
-          if (typeof window !== 'undefined' && window.location) {
-            const base = (import.meta as any).env?.BASE_URL || '/';
-            try {
-              return new URL('occ/', new URL(base, window.location.href)).href;
-            } catch {
-              return '/occ/';
-            }
-          }
-          return '/occ/';
-        };
-
-        const occBaseUrl = getOccBaseUrl();
+        const resolver = new WorkerOCCAssetResolver();
+        const occBaseUrl = resolver.getOccBaseUrl();
         let wasmBuffer: ArrayBuffer | null = null;
 
         // Step 1: Try chunked loading via manifest or standard chunks
@@ -124,7 +119,7 @@ export class SolidEngine {
           ];
 
           try {
-            const manifestRes = await fetch(`${occBaseUrl}manifest.json`);
+            const manifestRes = await fetch(resolver.getManifestUrl());
             if (manifestRes.ok) {
               const manifest = await manifestRes.json();
               if (Array.isArray(manifest.parts) && manifest.parts.length > 0) {
@@ -137,9 +132,10 @@ export class SolidEngine {
 
           const buffers = await Promise.all(
             partNames.map(async (partName) => {
-              const res = await fetch(`${occBaseUrl}${partName}`);
+              const chunkUrl = resolver.getChunkUrl(partName);
+              const res = await fetch(chunkUrl);
               if (!res.ok) {
-                throw new Error(`Failed to fetch chunk ${partName}: ${res.status} ${res.statusText}`);
+                throw new Error(`Failed to fetch chunk ${partName} from ${chunkUrl}: ${res.status} ${res.statusText}`);
               }
               return res.arrayBuffer();
             })
@@ -156,9 +152,9 @@ export class SolidEngine {
         } catch (chunkErr) {
           console.warn('Chunked WASM load failed, attempting monolithic fallback:', chunkErr);
           // Step 2: Fallback to monolithic wasm fetch (served with gzip stream by Vite middleware)
-          const response = await fetch(`${occBaseUrl}opencascade.wasm.wasm`);
+          const response = await fetch(resolver.getWasmUrl());
           if (!response.ok) {
-            throw new Error(`Failed to fetch WASM binary: ${response.status} ${response.statusText}`);
+            throw new Error(`Failed to fetch WASM binary from ${resolver.getWasmUrl()}: ${response.status} ${response.statusText}`);
           }
           wasmBuffer = await response.arrayBuffer();
         }

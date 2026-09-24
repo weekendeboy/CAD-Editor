@@ -511,6 +511,29 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect, o
   const rollbackIndex = document?.rollbackIndex ?? 0;
   const planes = document?.planes ?? {};
   const show3DEdges = useCADStore((state) => state.show3DEdges);
+  const extrudePreview = useCADStore((state) => state.extrudePreview);
+
+  const editingFeatureId = featureTree && rollbackIndex < featureTree.length ? featureTree[rollbackIndex]?.id : null;
+  const previewFeatureId = extrudePreview?.isOpen ? (editingFeatureId || extrudePreview.sketchId) : null;
+  const canonicalFeatureIds = useMemo(() => (featureTree || []).slice(0, Math.max(0, rollbackIndex)).map((f) => f.id), [featureTree, rollbackIndex]);
+  const canonicalSolidIds = useMemo(() => {
+    return (featureTree || [])
+      .slice(0, Math.max(0, rollbackIndex))
+      .filter((f) => f.type === 'EXTRUDE' || f.type === 'CUT_EXTRUDE' || f.type === 'REVOLVE' || f.type === 'REVOLVE_CUT' || f.type === 'SWEEP' || f.type === 'LOFT')
+      .map((f) => f.id);
+  }, [featureTree, rollbackIndex]);
+
+  useEffect(() => {
+    console.log('[EDIT TRACE]', {
+      editingFeatureId,
+      rollbackIndex,
+      canonicalFeatureIds,
+      canonicalSolidIds,
+      previewFeatureId,
+      renderedSolidFeatureIds: canonicalSolidIds,
+      renderedSketchIds: (featureTree || []).slice(0, Math.max(0, rollbackIndex)).filter((f) => f.type === 'SKETCH' && !f.suppressed && f.visible !== false).map((f) => f.id),
+    });
+  }, [editingFeatureId, rollbackIndex, canonicalFeatureIds, canonicalSolidIds, previewFeatureId, featureTree]);
 
   // 金屬質感灰色 Standard 材質 (color="#cbd5e1", metalness=0.2, roughness=0.5)
   // polygonOffset 讓面稍微後退，確保特徵邊線 (Edges) 清晰顯示且無 Z-fighting 閃爍
@@ -619,7 +642,7 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect, o
 
   // 當 Store 中的 cumulativePartMesh 更新時，轉換為 Three.js BufferGeometry 供 Canvas 渲染
   useEffect(() => {
-    if (!cumulativePartMesh || !cumulativePartMesh.vertices || cumulativePartMesh.vertices.length === 0) {
+    if (canonicalSolidIds.length === 0 || !cumulativePartMesh || !cumulativePartMesh.vertices || cumulativePartMesh.vertices.length === 0) {
       setGeometry((prev) => {
         if (prev) prev.dispose();
         return null;
@@ -643,14 +666,14 @@ const CumulativePartMesh: React.FC<CumulativePartMeshProps> = ({ onFaceSelect, o
       if (prev) prev.dispose();
       return geom;
     });
-  }, [cumulativePartMesh]);
+  }, [cumulativePartMesh, canonicalSolidIds]);
 
-  // 初次載入或當 Store 尚無累積網格但有特徵時，觸發 Store 重算
+  // 初次載入或當 Store 尚無累積網格但有實體特徵時，觸發 Store 重算
   useEffect(() => {
-    if (!cumulativePartMesh && featureTree.length > 0) {
+    if (!cumulativePartMesh && canonicalSolidIds.length > 0) {
       useCADStore.getState().regenerateFeatureTree();
     }
-  }, [cumulativePartMesh, featureTree.length]);
+  }, [cumulativePartMesh, canonicalSolidIds.length]);
 
   // 卸載時清理 Geometry 記憶體
   useEffect(() => {
@@ -853,7 +876,38 @@ const FaceHighlightAndOverlay: React.FC<FaceHighlightAndOverlayProps> = ({
       { x: selectedFace.point.x, y: selectedFace.point.y, z: selectedFace.point.z },
       { x: selectedFace.normal.x, y: selectedFace.normal.y, z: selectedFace.normal.z }
     );
-    useCADStore.getState().createSketchOnFacePlane(newPlane);
+
+    let parentFeatId = (selectedFace.faceRef?.topoRef as any)?.featureId;
+    const currentTree = useCADStore.getState().document.featureTree;
+    const isValidFeature = parentFeatId && currentTree.some((f) => f.id === parentFeatId);
+
+    if (!isValidFeature) {
+      const lastSolidFeature = [...currentTree]
+        .reverse()
+        .find(
+          (f) =>
+            f.type === 'EXTRUDE' ||
+            f.type === 'REVOLVE' ||
+            f.type === 'LOFT' ||
+            f.type === 'SWEEP' ||
+            f.type === 'CUT_EXTRUDE' ||
+            f.type === 'REVOLVE_CUT'
+        );
+      parentFeatId = lastSolidFeature ? lastSolidFeature.id : undefined;
+    }
+
+    console.log('[AttachedFace Debug] Bound Sketch to Parent Feature ID:', parentFeatId);
+
+    const attachedFaceRef = selectedFace.faceRef
+      ? {
+          parentFeatureId: parentFeatId!,
+          faceIndex: selectedFace.faceRef.faceIndex,
+          persistentId: (selectedFace.faceRef.topoRef as any)?.persistentId || selectedFace.faceRef.runtimeId,
+          faceNormal: { x: selectedFace.normal.x, y: selectedFace.normal.y, z: selectedFace.normal.z },
+          faceCenter: { x: selectedFace.point.x, y: selectedFace.point.y, z: selectedFace.point.z },
+        }
+      : undefined;
+    useCADStore.getState().createSketchOnFacePlane(newPlane, attachedFaceRef);
     setSelectedFace(null);
     useCADStore.getState().setSelectedFaceInfo(null);
   };
@@ -1328,7 +1382,38 @@ const CAD3DCanvas: React.FC = () => {
   const handleCreateSketchFromBar = () => {
     if (!selectedFaceInfo) return;
     const newPlane = createPlaneFromFaceNormal(selectedFaceInfo.point, selectedFaceInfo.normal);
-    createSketchOnFacePlane(newPlane);
+
+    let parentFeatId = (selectedFaceInfo.faceRef?.topoRef as any)?.featureId;
+    const currentTree = useCADStore.getState().document.featureTree;
+    const isValidFeature = parentFeatId && currentTree.some((f) => f.id === parentFeatId);
+
+    if (!isValidFeature) {
+      const lastSolidFeature = [...currentTree]
+        .reverse()
+        .find(
+          (f) =>
+            f.type === 'EXTRUDE' ||
+            f.type === 'REVOLVE' ||
+            f.type === 'LOFT' ||
+            f.type === 'SWEEP' ||
+            f.type === 'CUT_EXTRUDE' ||
+            f.type === 'REVOLVE_CUT'
+        );
+      parentFeatId = lastSolidFeature ? lastSolidFeature.id : undefined;
+    }
+
+    console.log('[AttachedFace Debug] Bound Sketch to Parent Feature ID:', parentFeatId);
+
+    const attachedFaceRef = selectedFaceInfo.faceRef
+      ? {
+          parentFeatureId: parentFeatId!,
+          faceIndex: selectedFaceInfo.faceRef.faceIndex,
+          persistentId: (selectedFaceInfo.faceRef.topoRef as any)?.persistentId || selectedFaceInfo.faceRef.runtimeId,
+          faceNormal: selectedFaceInfo.normal,
+          faceCenter: selectedFaceInfo.point,
+        }
+      : undefined;
+    createSketchOnFacePlane(newPlane, attachedFaceRef);
     setSelectedFaceInfo(null);
   };
 

@@ -28,7 +28,7 @@ import {
   DatumTopPlane,
   DatumRightPlane,
 } from '../../types/cad';
-import type { FeatureEvalOp } from './SolidEngine.types';
+import type { FeatureEvalOp, FeatureTransform } from './SolidEngine.types';
 import type { TopoReference } from './PersistentTopology.types';
 import { findClosedProfiles } from '../2d/TopologyEngine';
 import { getArcMidPoint } from '../2d/GeometryMath';
@@ -160,6 +160,17 @@ export function compileFeaturePlan(
               plane: boundPlane,
             };
           }
+          const attachedRef = sketchFeature.attachedFaceRef || sketchFeature.plane?.attachedFaceRef;
+          if (attachedRef) {
+            activeSketch = {
+              ...activeSketch,
+              attachedFaceRef: attachedRef,
+              plane: {
+                ...activeSketch.plane,
+                attachedFaceRef: attachedRef,
+              },
+            };
+          }
           sketchMap.set(activeSketch.id, activeSketch);
           break;
         }
@@ -174,6 +185,7 @@ export function compileFeaturePlan(
   const ops: FeatureEvalOp[] = [];
   const historyToOpIndex: Array<number | null> = new Array(featureTree.length).fill(null);
   const featureIdToOpIndex: Record<string, number> = {};
+  const compiledOpsByFeatureId = new Map<string, FeatureEvalOp>();
 
   // 第二階段：依序走訪特徵產生運算指令，並建立精確 Mapping
   for (let h = 0; h < clampedIndex; h++) {
@@ -202,12 +214,18 @@ export function compileFeaturePlan(
               : availableProfiles;
 
           if (profiles.length > 0) {
+            const attachedRef = sketch.attachedFaceRef || sketch.plane?.attachedFaceRef;
+            let opPlane = sketch.plane;
+            if (attachedRef) {
+              opPlane = { ...opPlane, attachedFaceRef: attachedRef };
+            }
             ops.push({
               featureId: extrudeFeature.id,
               type: 'EXTRUDE',
               operation: 'JOIN',
               profiles,
-              plane: sketch.plane,
+              plane: opPlane,
+              sketchId: extrudeFeature.sketchId,
               depth: typeof extrudeFeature.depth === 'number' ? extrudeFeature.depth : 10,
               direction: extrudeFeature.direction || 'normal',
             });
@@ -231,12 +249,18 @@ export function compileFeaturePlan(
               : availableProfiles;
 
           if (profiles.length > 0) {
+            const attachedRef = sketch.attachedFaceRef || sketch.plane?.attachedFaceRef;
+            let opPlane = sketch.plane;
+            if (attachedRef) {
+              opPlane = { ...opPlane, attachedFaceRef: attachedRef };
+            }
             ops.push({
               featureId: cutFeature.id,
               type: 'CUT_EXTRUDE',
               operation: 'CUT',
               profiles,
-              plane: sketch.plane,
+              plane: opPlane,
+              sketchId: cutFeature.sketchId,
               depth: typeof cutFeature.depth === 'number' ? cutFeature.depth : 10,
               direction: cutFeature.direction || 'normal',
               throughAll: cutFeature.throughAll,
@@ -254,7 +278,12 @@ export function compileFeaturePlan(
         }
         if (sk && availableProfiles && availableProfiles.length > 0) {
 
-          const plane = sk.plane;
+          const attachedRef = sk.attachedFaceRef || sk.plane?.attachedFaceRef;
+          let opPlane = sk.plane;
+          if (attachedRef) {
+            opPlane = { ...opPlane, attachedFaceRef: attachedRef };
+          }
+          const plane = opPlane;
           let axisLine: LineEntity | undefined;
 
           if (sk.entities && sk.entities.length > 0) {
@@ -315,7 +344,8 @@ export function compileFeaturePlan(
               type: revFeature.type,
               operation: revFeature.type === 'REVOLVE' ? 'JOIN' : 'CUT',
               profiles: targetProfiles,
-              plane: sk.plane,
+              plane: opPlane,
+              sketchId: revFeature.sketchId,
               axis: {
                 origin: axisOrigin,
                 direction: axisDirection,
@@ -328,45 +358,161 @@ export function compileFeaturePlan(
         const feat = feature as LinearPatternFeature;
         const dir1 = normalizeVec3(feat.dir1);
         const dir2 = feat.dir2 ? normalizeVec3(feat.dir2) : undefined;
+        const count1 = Math.max(1, feat.count1 || 2);
+        const spacing1 = feat.spacing1 || 0;
+        const count2 = feat.count2 ? Math.max(1, feat.count2) : 1;
+        const spacing2 = feat.spacing2 || 0;
+        const targetIds = feat.targetFeatureIds || [];
 
-        ops.push({
-          featureId: feat.id,
-          type: 'LINEAR_PATTERN',
-          operation: 'JOIN',
-          targetFeatureIds: feat.targetFeatureIds || [],
-          profiles: [],
-          plane: DatumFrontPlane,
-          patternLinear: {
-            dir1,
-            count1: Math.max(2, feat.count1 || 2),
-            spacing1: feat.spacing1 || 10,
-            dir2,
-            count2: feat.count2 ? Math.max(1, feat.count2) : undefined,
-            spacing2: feat.spacing2,
-          },
-        });
+        let unrolledCount = 0;
+        for (let pIdx = 0; pIdx < count1; pIdx++) {
+          for (let qIdx = 0; qIdx < count2; qIdx++) {
+            if (pIdx === 0 && qIdx === 0) continue;
+
+            const dx = pIdx * spacing1 * dir1.x + qIdx * spacing2 * (dir2?.x || 0);
+            const dy = pIdx * spacing1 * dir1.y + qIdx * spacing2 * (dir2?.y || 0);
+            const dz = pIdx * spacing1 * dir1.z + qIdx * spacing2 * (dir2?.z || 0);
+
+            const transform: FeatureTransform = {
+              type: 'translation',
+              translation: { x: dx, y: dy, z: dz },
+            };
+
+            for (const tid of targetIds) {
+              const origOp = compiledOpsByFeatureId.get(tid);
+              if (origOp) {
+                const unrolledOp: FeatureEvalOp = {
+                  ...origOp,
+                  featureId: `${feat.id}_unroll_${tid}_p${pIdx}_q${qIdx}`,
+                  parentPatternFeatureId: feat.id,
+                  originalFeatureId: tid,
+                  transform,
+                  sketchId: undefined,
+                  profiles: undefined,
+                  plane: undefined,
+                  attachedFaceRef: undefined,
+                };
+                ops.push(unrolledOp);
+                unrolledCount++;
+              }
+            }
+          }
+        }
+
+        if (unrolledCount === 0) {
+          ops.push({
+            featureId: feat.id,
+            type: 'LINEAR_PATTERN',
+            operation: 'JOIN',
+            targetFeatureIds: targetIds,
+            profiles: [],
+            plane: DatumFrontPlane,
+            patternLinear: {
+              dir1,
+              count1,
+              spacing1,
+              dir2,
+              count2,
+              spacing2,
+            },
+          });
+        }
       } else if (feature.type === 'CIRCULAR_PATTERN') {
         const feat = feature as CircularPatternFeature;
-        const axisDir = normalizeVec3(feat.axisDirection);
+        const patternAxisEdgeRef = (feat as any).axisEdgeRef || (feat as any).axis?.edgeRef;
+        const axisDir = normalizeVec3(feat.axisDirection || (feat as any).axis?.direction || { x: 0, y: 0, z: 1 });
+        const axisOrigin = feat.axisOrigin || (feat as any).axis?.origin || { x: 0, y: 0, z: 0 };
+        const count = Math.max(1, feat.count || 2);
+        let totalAngle = typeof feat.totalAngle === 'number' && !isNaN(feat.totalAngle) ? feat.totalAngle : 2 * Math.PI;
+        if (Math.abs(totalAngle) > 2 * Math.PI + 0.1) {
+          totalAngle = (totalAngle * Math.PI) / 180;
+        }
+        const equalSpacing = feat.equalSpacing ?? true;
+        const isSymmetric = Boolean(feat.isSymmetric);
+        const targetIds = feat.targetFeatureIds || [];
 
-        ops.push({
-          featureId: feat.id,
-          type: 'CIRCULAR_PATTERN',
-          operation: 'JOIN',
-          targetFeatureIds: feat.targetFeatureIds || [],
-          profiles: [],
-          plane: DatumFrontPlane,
-          patternCircular: {
-            axis: {
-              origin: feat.axisOrigin || { x: 0, y: 0, z: 0 },
+        let deltaTheta = 0;
+        if (equalSpacing) {
+          const isFullCircle = Math.abs(Math.abs(totalAngle) - 2 * Math.PI) < 1e-4;
+          if (isFullCircle) {
+            deltaTheta = totalAngle / count;
+          } else {
+            deltaTheta = count > 1 ? totalAngle / (count - 1) : totalAngle;
+          }
+        } else {
+          deltaTheta = totalAngle;
+        }
+
+        const opAxis = {
+          origin: axisOrigin,
+          direction: axisDir,
+          edgeRef: patternAxisEdgeRef,
+        };
+
+        let unrolledCount = 0;
+        for (let k = 0; k < count; k++) {
+          const angle = isSymmetric
+            ? -(totalAngle / 2) + k * deltaTheta
+            : k * deltaTheta;
+
+          if (Math.abs(angle) < 1e-7) continue;
+
+          const transform: FeatureTransform = {
+            type: 'rotation',
+            rotationAx1: {
+              origin: axisOrigin,
               direction: axisDir,
+              angle,
+              axisEdgeRef: patternAxisEdgeRef,
             },
-            count: Math.max(2, feat.count || 2),
-            totalAngle: feat.totalAngle || 2 * Math.PI,
-            equalSpacing: feat.equalSpacing ?? true,
-            isSymmetric: Boolean(feat.isSymmetric),
-          },
-        });
+          };
+
+          for (const tid of targetIds) {
+            const origOp = compiledOpsByFeatureId.get(tid);
+            if (origOp) {
+              const unrolledOp: FeatureEvalOp = {
+                ...origOp,
+                featureId: `${feat.id}_unroll_${tid}_k${k}`,
+                parentPatternFeatureId: feat.id,
+                originalFeatureId: tid,
+                transform,
+                axis: opAxis,
+                axisEdgeRef: patternAxisEdgeRef,
+                // 💥 強制斬斷草圖殭屍相依性！這是一個純幾何變換，不需要重新求值草圖！
+                sketchId: undefined,
+                profiles: undefined,
+                plane: undefined,
+                attachedFaceRef: undefined,
+              };
+              ops.push(unrolledOp);
+              unrolledCount++;
+            }
+          }
+        }
+
+        if (unrolledCount === 0) {
+          ops.push({
+            featureId: feat.id,
+            type: 'CIRCULAR_PATTERN',
+            operation: 'JOIN',
+            targetFeatureIds: targetIds,
+            profiles: [],
+            plane: DatumFrontPlane,
+            axis: opAxis,
+            axisEdgeRef: patternAxisEdgeRef,
+            patternCircular: {
+              axis: {
+                origin: axisOrigin,
+                direction: axisDir,
+              },
+              axisEdgeRef: patternAxisEdgeRef,
+              count,
+              totalAngle,
+              equalSpacing,
+              isSymmetric,
+            },
+          });
+        }
       } else if (feature.type === 'MIRROR_3D') {
         const feat = feature as Mirror3DFeature;
         let origin: Point3D = { x: 0, y: 0, z: 0 };
@@ -388,7 +534,6 @@ export function compileFeaturePlan(
             normal = normalizeVec3(refPlane.normal);
           }
         } else if (feat.mirrorPlane?.origin && feat.mirrorPlane?.normal) {
-          // 若特徵是基於模型表面鏡射，直接使用其儲存的 origin 與 normal
           origin = feat.mirrorPlane.origin;
           normal = normalizeVec3(feat.mirrorPlane.normal);
         } else if (feat.mirrorPlaneFeatureId) {
@@ -400,22 +545,46 @@ export function compileFeaturePlan(
           }
         }
 
-        const mirrorPlaneConfig = {
-          planeId,
-          origin,
-          normal,
+        const targetIds = feat.targetFeatureIds || [];
+        const transform: FeatureTransform = {
+          type: 'mirror',
+          mirrorPlane: { origin, normal },
         };
 
-        ops.push({
-          featureId: feat.id,
-          type: 'MIRROR_3D',
-          operation: 'JOIN',
-          targetFeatureIds: feat.targetFeatureIds || [],
-          profiles: [],
-          plane: refPlane || DatumFrontPlane,
-          mirrorPlane: mirrorPlaneConfig,
-          mirror3D: mirrorPlaneConfig,
-        });
+        let unrolledCount = 0;
+        for (const tid of targetIds) {
+          const origOp = compiledOpsByFeatureId.get(tid);
+          if (origOp) {
+            const unrolledOp: FeatureEvalOp = {
+              ...origOp,
+              featureId: `${feat.id}_unroll_${tid}_mirror`,
+              parentPatternFeatureId: feat.id,
+              originalFeatureId: tid,
+              transform,
+            };
+            ops.push(unrolledOp);
+            unrolledCount++;
+          }
+        }
+
+        if (unrolledCount === 0) {
+          const mirrorPlaneConfig = {
+            planeId,
+            origin,
+            normal,
+          };
+
+          ops.push({
+            featureId: feat.id,
+            type: 'MIRROR_3D',
+            operation: 'JOIN',
+            targetFeatureIds: targetIds,
+            profiles: [],
+            plane: refPlane || DatumFrontPlane,
+            mirrorPlane: mirrorPlaneConfig,
+            mirror3D: mirrorPlaneConfig,
+          });
+        }
       } else if (feature.type === 'SWEEP') {
         const feat = feature as SweepFeature;
         const profileSk = sketchMap.get(feat.profileSketchId);
@@ -591,6 +760,7 @@ export function compileFeaturePlan(
       const opIndex = prevOpsLen;
       historyToOpIndex[h] = opIndex;
       featureIdToOpIndex[feature.id] = opIndex;
+      compiledOpsByFeatureId.set(feature.id, ops[opIndex]);
     }
   }
 

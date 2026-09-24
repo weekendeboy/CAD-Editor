@@ -14,6 +14,7 @@ import {
   CustomPlane,
   Point3D,
 } from '../types/cad';
+import type { TopoReference } from '../core/3d/PersistentTopology.types';
 import { resolveBRepEdgeToAxis } from '../core/3d/UnifiedReferenceResolver';
 import {
   LayoutGrid,
@@ -64,7 +65,9 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
       f.type === 'EXTRUDE' ||
       f.type === 'CUT_EXTRUDE' ||
       f.type === 'REVOLVE' ||
-      f.type === 'REVOLVE_CUT'
+      f.type === 'REVOLVE_CUT' ||
+      f.type === 'FILLET_3D' ||
+      f.type === 'CHAMFER_3D'
   );
 
   // 基準面清單：收集內建與自訂基準面 (包含 document.featureTree 中的 DATUM_PLANE 與 document.planes)
@@ -118,6 +121,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
   const [selectedEdgeLabel, setSelectedEdgeLabel] = useState<string | null>(null);
   const [axisDir, setAxisDir] = useState<[number, number, number]>([0, 0, 1]);
   const [axisOrigin, setAxisOrigin] = useState<[number, number, number]>([0, 0, 0]);
+  const [axisEdgeRef, setAxisEdgeRef] = useState<TopoReference | undefined>(undefined);
   const [circCount, setCircCount] = useState<number>(4);
   const [angleDeg, setAngleDeg] = useState<number>(360);
   const [equalSpacing, setEqualSpacing] = useState<boolean>(true);
@@ -194,6 +198,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
 
           setAxisDir(dir);
           setAxisOrigin(orig);
+          setAxisEdgeRef(cp.axisEdgeRef);
 
           const isStandardX =
             dir[0] === 1 && dir[1] === 0 && dir[2] === 0 && orig[0] === 0 && orig[1] === 0 && orig[2] === 0;
@@ -204,16 +209,19 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
 
           if (isStandardX) {
             setAxisType('X');
+            setAxisEdgeRef(undefined);
             setSelectedEdgeLabel(null);
           } else if (isStandardY) {
             setAxisType('Y');
+            setAxisEdgeRef(undefined);
             setSelectedEdgeLabel(null);
           } else if (isStandardZ) {
             setAxisType('Z');
+            setAxisEdgeRef(undefined);
             setSelectedEdgeLabel(null);
           } else {
             setAxisType('CUSTOM_EDGE');
-            setSelectedEdgeLabel('自訂實體軸線');
+            setSelectedEdgeLabel(cp.axisEdgeRef?.persistentId ? `拓撲邊線 (${cp.axisEdgeRef.persistentId.slice(-8)})` : '自訂實體軸線');
           }
 
           setCircCount(cp.count || 4);
@@ -314,6 +322,11 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
           res.reference.axisDirection.z,
         ]);
         setSelectedEdgeLabel(`邊線 #${selectedEdgeInfo.edgeRef.edgeIndex ?? 0}`);
+        const edgeTopoRef = selectedEdgeInfo.edgeRef.topoRef || (selectedEdgeInfo.edgeRef as any);
+        if (typeof window !== 'undefined') {
+          (window as any).__LAST_SELECTED_EDGE_TOPO_REF__ = edgeTopoRef;
+        }
+        setAxisEdgeRef(edgeTopoRef);
       }
       setSelectedEdgeInfo(null);
     }
@@ -404,11 +417,13 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
             profiles: [],
             plane: DatumFrontPlane,
             targetFeatureIds: selectedTargetFeatureIds,
+            axisEdgeRef: axisType === 'CUSTOM_EDGE' ? axisEdgeRef : undefined,
             patternCircular: {
               axis: {
                 origin: { x: axisOrigin[0], y: axisOrigin[1], z: axisOrigin[2] },
                 direction: { x: axisDir[0], y: axisDir[1], z: axisDir[2] },
               },
+              axisEdgeRef: axisType === 'CUSTOM_EDGE' ? axisEdgeRef : undefined,
               count: Math.max(1, Number(circCount) || 1),
               totalAngle: totalAngleRad,
               equalSpacing,
@@ -590,11 +605,16 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
       };
       const totalAngleRad = (Number(angleDeg) * Math.PI) / 180;
 
+      const edgeRefToSave = (axisType === 'CUSTOM_EDGE' || axisEdgeRef !== undefined || (typeof window !== 'undefined' && (window as any).__LAST_SELECTED_EDGE_TOPO_REF__))
+        ? (axisEdgeRef || (selectedEdgeInfo?.edgeRef as any)?.topoRef || (selectedEdgeInfo?.edgeRef as any) || (typeof window !== 'undefined' && (window as any).__LAST_SELECTED_EDGE_TOPO_REF__))
+        : undefined;
+
       const updates: Partial<CircularPatternFeature> = {
         name: featureName.trim() || 'CircularPattern1',
         targetFeatureIds: selectedTargetFeatureIds,
         axisOrigin: parsedAxisOrigin,
         axisDirection: parsedAxisDir,
+        axisEdgeRef: edgeRefToSave,
         count: Math.max(2, Number(circCount) || 2),
         totalAngle: totalAngleRad,
         equalSpacing,
@@ -612,6 +632,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
           targetFeatureIds: updates.targetFeatureIds!,
           axisOrigin: updates.axisOrigin!,
           axisDirection: updates.axisDirection!,
+          axisEdgeRef: edgeRefToSave,
           count: updates.count!,
           totalAngle: updates.totalAngle!,
           equalSpacing: updates.equalSpacing!,
@@ -738,6 +759,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
   return (
     <div className="fixed inset-0 z-40 pointer-events-none animate-in fade-in duration-150">
       <div
+        id="pattern-mirror-propertymanager"
         style={{ transform: `translate3d(${position.x}px, ${position.y}px, 0)`, position: 'fixed', top: 0, left: 0 }}
         className="w-96 max-h-[calc(100vh-5rem)] bg-neutral-950/95 border border-neutral-800 rounded-xl shadow-2xl overflow-hidden flex flex-col text-neutral-200 select-none pointer-events-auto"
         onClick={(e) => e.stopPropagation()}
@@ -1053,6 +1075,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
                       setAxisType('X');
                       setAxisDir([1, 0, 0]);
                       setAxisOrigin([0, 0, 0]);
+                      setAxisEdgeRef(undefined);
                       setSelectedEdgeLabel(null);
                     }}
                     className={`py-1.5 rounded text-xs font-mono font-bold border transition-colors ${
@@ -1069,6 +1092,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
                       setAxisType('Y');
                       setAxisDir([0, 1, 0]);
                       setAxisOrigin([0, 0, 0]);
+                      setAxisEdgeRef(undefined);
                       setSelectedEdgeLabel(null);
                     }}
                     className={`py-1.5 rounded text-xs font-mono font-bold border transition-colors ${
@@ -1085,6 +1109,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
                       setAxisType('Z');
                       setAxisDir([0, 0, 1]);
                       setAxisOrigin([0, 0, 0]);
+                      setAxisEdgeRef(undefined);
                       setSelectedEdgeLabel(null);
                     }}
                     className={`py-1.5 rounded text-xs font-mono font-bold border transition-colors ${
@@ -1096,6 +1121,7 @@ export const PatternMirrorModal: React.FC<PatternMirrorModalProps> = ({
                     Z 軸
                   </button>
                   <button
+                    id="btn-axis-custom-edge"
                     type="button"
                     onClick={() => {
                       setAxisType('CUSTOM_EDGE');

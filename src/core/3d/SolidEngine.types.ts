@@ -60,6 +60,7 @@ export interface FeatureEvaluationResult {
   diagnostics: KernelDiagnostic[];
   error: string | null;
   executionTimeMs: number;
+  evaluatedPlane?: CustomPlane;
 
   /**
    * 語意契約欄位 (Architecture Contract v1):
@@ -86,8 +87,29 @@ export interface KernelResult {
   mapping?: MeshSubshapeMapping;                          // Render Mesh <-> B-Rep Topology Mapping
 }
 
+export interface FeatureTransform {
+  type: 'translation' | 'rotation' | 'mirror';
+  translation?: Point3D;
+  rotationAx1?: {
+    origin: Point3D;
+    direction: Point3D;
+    angle: number;
+    axisEdgeRef?: TopoReference;
+  };
+  mirrorPlane?: {
+    origin: Point3D;
+    normal: Point3D;
+  };
+}
+
 export interface FeatureEvalOp {
   featureId: string;
+  sketchId?: string;
+  parentPatternFeatureId?: string;
+  originalFeatureId?: string;
+  transform?: FeatureTransform;
+  axisEdgeRef?: TopoReference;
+  attachedFaceRef?: TopoReference;
   type:
     | 'EXTRUDE'
     | 'CUT_EXTRUDE'
@@ -137,6 +159,7 @@ export interface FeatureEvalOp {
       origin: Point3D;
       direction: Point3D;
     };
+    axisEdgeRef?: TopoReference;
     count: number;
     totalAngle: number;
     equalSpacing: boolean;

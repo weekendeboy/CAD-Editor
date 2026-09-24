@@ -8,7 +8,7 @@ import { useCADStore } from './store/cadStore';
 import { useCadShortcuts } from './hooks/useCadShortcuts';
 import { CADSketchCanvas } from './components/CADSketchCanvas';
 const CAD3DCanvas = React.lazy(() => import('./components/CAD3DCanvas'));
-import { SketchFeature, BoundingBox2D, CADEntity2D, FeatureType } from './types/cad';
+import { SketchFeature, BoundingBox2D, CADEntity2D, FeatureType, ORIGIN_ENTITY_ID } from './types/cad';
 import { OsnapSettingsModal } from './components/OsnapSettingsModal';
 import { PolarSettingsModal } from './components/PolarSettingsModal';
 import { LayerControlBar } from './components/LayerControlBar';
@@ -205,6 +205,23 @@ export default function App() {
     setViewMode,
   } = useCADStore();
 
+  // 初次掛載時，若有持久化實體特徵，自動觸發一次重新生成以恢復 3D B-Rep 與網格
+  useEffect(() => {
+    const hasSolids = document.featureTree.some(
+      (f) =>
+        f.type === 'EXTRUDE' ||
+        f.type === 'REVOLVE' ||
+        f.type === 'CIRCULAR_PATTERN' ||
+        f.type === 'LINEAR_PATTERN' ||
+        f.type === 'FILLET_3D' ||
+        f.type === 'CHAMFER_3D' ||
+        f.type === 'SHELL_3D'
+    );
+    if (hasSolids) {
+      useCADStore.getState().regenerateFeatureTree();
+    }
+  }, []);
+
   // 清除彈窗 Timer 清理機制
 
   useEffect(() => {
@@ -228,9 +245,10 @@ export default function App() {
   const solverState = activeSketch?.solverState || 'UnderDefined';
 
   // 選取實體提取相容虛擬原點 (Virtual Origin Compatible)
-  const hasOrigin = selectedEntityIds.includes('origin');
+  const isOriginId = (id: string) => id === 'origin' || id === 'ORIGIN' || id === ORIGIN_ENTITY_ID;
+  const hasOrigin = selectedEntityIds.some(isOriginId);
   const realSelectedEntities =
-    currentEntities.filter((e) => selectedEntityIds.includes(e.id)) || [];
+    currentEntities.filter((e) => selectedEntityIds.includes(e.id) && !isOriginId(e.id)) || [];
   const totalSelectedCount = selectedEntityIds.length;
   
   const currentConstraints =
@@ -296,7 +314,7 @@ export default function App() {
     const entId2 = selectedEntityIds[1];
 
     const getEntityPoints = (id: string): { pt: { x: number; y: number }; idx: number }[] => {
-      if (id === 'origin') {
+      if (isOriginId(id)) {
         return [{ pt: { x: 0, y: 0 }, idx: 0 }];
       }
       const ent = currentEntities.find((e) => e.id === id);
@@ -382,12 +400,14 @@ export default function App() {
       }
     }
 
-    addConstraint({
+    const newConstraint = {
       id: crypto.randomUUID(),
-      type: 'coincident',
+      type: 'coincident' as const,
       entityIds: [entId1, entId2],
       ...(pointIndices ? { pointIndices } : {}),
-    });
+    };
+    addConstraint(newConstraint);
+    console.log('[App] Added coincident constraint:', newConstraint);
   };
 
   const handleAddParallel = () => {
@@ -1122,6 +1142,7 @@ export default function App() {
           <div className="flex items-center gap-3 shrink-0">
             <div className="flex items-center gap-2">
               <button
+                id="btn-undo"
                 onClick={undo}
                 disabled={!canUndo()}
                 className="p-1.5 rounded text-neutral-400 hover:text-white disabled:opacity-30 disabled:hover:text-neutral-400"
@@ -1130,6 +1151,7 @@ export default function App() {
                 <Undo2 size={18} />
               </button>
               <button
+                id="btn-redo"
                 onClick={redo}
                 disabled={!canRedo()}
                 className="p-1.5 rounded text-neutral-400 hover:text-white disabled:opacity-30 disabled:hover:text-neutral-400"
@@ -1343,6 +1365,7 @@ export default function App() {
 
             {/* 長料/除料特徵群組 */}
             <button
+              id="btn-toolbar-extrude"
               onClick={() => { if (sketchSession.isActive) commitSketchSession(); setExtrudeModalConfig({ isOpen: true, mode: 'EXTRUDE' }); }}
               className="p-1.5 rounded transition-colors text-neutral-400 hover:text-blue-400 hover:bg-neutral-800"
               title="伸長長料 (Extrude Boss)"
@@ -1350,6 +1373,7 @@ export default function App() {
               <Box size={18} />
             </button>
             <button
+              id="btn-toolbar-cut-extrude"
               onClick={() => { if (sketchSession.isActive) commitSketchSession(); setExtrudeModalConfig({ isOpen: true, mode: 'CUT_EXTRUDE' }); }}
               className="p-1.5 rounded transition-colors text-neutral-400 hover:text-amber-400 hover:bg-neutral-800"
               title="伸長除料 (Extrude Cut)"
@@ -1362,6 +1386,7 @@ export default function App() {
 
             {/* 旋轉特徵群組 */}
             <button
+              id="btn-toolbar-revolve"
               onClick={() => { if (sketchSession.isActive) commitSketchSession(); setRevolveModalConfig({ isOpen: true, mode: 'REVOLVE' }); }}
               className="p-1.5 rounded transition-colors text-neutral-400 hover:text-purple-400 hover:bg-neutral-800"
               title="旋轉長料 (Revolve Boss)"
@@ -1369,6 +1394,7 @@ export default function App() {
               <RotateCw size={18} />
             </button>
             <button
+              id="btn-toolbar-cut-revolve"
               onClick={() => { if (sketchSession.isActive) commitSketchSession(); setRevolveModalConfig({ isOpen: true, mode: 'REVOLVE_CUT' }); }}
               className="p-1.5 rounded transition-colors text-neutral-400 hover:text-rose-400 hover:bg-neutral-800"
               title="旋轉除料 (Revolve Cut)"
@@ -1381,6 +1407,7 @@ export default function App() {
 
             {/* 多草圖成形群組 */}
             <button
+              id="btn-toolbar-sweep"
               onClick={() => setSweepLoftModalConfig({ isOpen: true, mode: 'SWEEP' })}
               className="p-1.5 rounded transition-colors text-neutral-400 hover:text-teal-400 hover:bg-neutral-800"
               title="掃出 (Sweep Boss)"
@@ -1388,6 +1415,7 @@ export default function App() {
               <Route size={18} />
             </button>
             <button
+              id="btn-toolbar-loft"
               onClick={() => setSweepLoftModalConfig({ isOpen: true, mode: 'LOFT' })}
               className="p-1.5 rounded transition-colors text-neutral-400 hover:text-violet-400 hover:bg-neutral-800"
               title="疊層拉伸 (Loft Boss)"
@@ -1400,6 +1428,7 @@ export default function App() {
 
             {/* 陣列與鏡射群組 */}
             <button
+              id="btn-toolbar-linear-pattern"
               onClick={() => setPatternModalConfig({ isOpen: true, mode: 'LINEAR_PATTERN' })}
               className="p-1.5 rounded transition-colors text-neutral-400 hover:text-sky-400 hover:bg-neutral-800"
               title="線性陣列 (Linear Pattern)"
@@ -1407,6 +1436,7 @@ export default function App() {
               <LayoutGrid size={18} />
             </button>
             <button
+              id="btn-toolbar-circular-pattern"
               onClick={() => setPatternModalConfig({ isOpen: true, mode: 'CIRCULAR_PATTERN' })}
               className="p-1.5 rounded transition-colors text-neutral-400 hover:text-indigo-400 hover:bg-neutral-800"
               title="環狀陣列 (Circular Pattern)"
@@ -1414,6 +1444,7 @@ export default function App() {
               <Orbit size={18} />
             </button>
             <button
+              id="btn-toolbar-mirror-3d"
               onClick={() => setPatternModalConfig({ isOpen: true, mode: 'MIRROR_3D' })}
               className="p-1.5 rounded transition-colors text-neutral-400 hover:text-emerald-400 hover:bg-neutral-800"
               title="3D 鏡射 (3D Mirror)"
@@ -1462,7 +1493,38 @@ export default function App() {
                         selectedFaceInfo.point,
                         selectedFaceInfo.normal
                       );
-                      createSketchOnFacePlane(newPlane);
+
+                      let parentFeatId = (selectedFaceInfo.faceRef?.topoRef as any)?.featureId;
+                      const currentTree = useCADStore.getState().document.featureTree;
+                      const isValidFeature = parentFeatId && currentTree.some((f) => f.id === parentFeatId);
+
+                      if (!isValidFeature) {
+                        const lastSolidFeature = [...currentTree]
+                          .reverse()
+                          .find(
+                            (f) =>
+                              f.type === 'EXTRUDE' ||
+                              f.type === 'REVOLVE' ||
+                              f.type === 'LOFT' ||
+                              f.type === 'SWEEP' ||
+                              f.type === 'CUT_EXTRUDE' ||
+                              f.type === 'REVOLVE_CUT'
+                          );
+                        parentFeatId = lastSolidFeature ? lastSolidFeature.id : undefined;
+                      }
+
+                      console.log('[AttachedFace Debug] Bound Sketch to Parent Feature ID:', parentFeatId);
+
+                      const attachedFaceRef = selectedFaceInfo.faceRef
+                        ? {
+                            parentFeatureId: parentFeatId!,
+                            faceIndex: selectedFaceInfo.faceRef.faceIndex,
+                            persistentId: (selectedFaceInfo.faceRef.topoRef as any)?.persistentId || selectedFaceInfo.faceRef.runtimeId,
+                            faceNormal: selectedFaceInfo.normal,
+                            faceCenter: selectedFaceInfo.point,
+                          }
+                        : undefined;
+                      createSketchOnFacePlane(newPlane, attachedFaceRef);
                       setSelectedFaceInfo(null);
                     }}
                     className="flex items-center gap-1.5 px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded transition-colors shadow cursor-pointer active:scale-95"

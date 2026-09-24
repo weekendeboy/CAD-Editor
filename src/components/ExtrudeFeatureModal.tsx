@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useCADStore } from '../store/cadStore';
 import { findClosedProfiles } from '../core/2d/TopologyEngine';
 import { SketchFeature, ExtrudeFeature, CutExtrudeFeature } from '../types/cad';
@@ -45,6 +45,7 @@ const ExtrudeFeatureModalContent: React.FC<ExtrudeFeatureModalContentProps> = ({
   const viewMode = useCADStore((s) => s.viewMode);
   const setViewMode = useCADStore((s) => s.setViewMode);
   const setExtrudePreview = useCADStore((s) => s.setExtrudePreview);
+  const setRollbackIndex = useCADStore((s) => s.setRollbackIndex);
 
   const featureTree = document?.featureTree || [];
   const sketches = useMemo(
@@ -124,6 +125,49 @@ const ExtrudeFeatureModalContent: React.FC<ExtrudeFeatureModalContentProps> = ({
       setExtrudePreview(null);
     };
   }, [setExtrudePreview]);
+
+  const rollbackTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // 當進入特徵編輯模式時，自動將 3D 回退索引設定至目標特徵位置前，隔離編輯預覽
+  useEffect(() => {
+    if (!featureId) return;
+
+    if (rollbackTimerRef.current) {
+      clearTimeout(rollbackTimerRef.current);
+      rollbackTimerRef.current = null;
+    }
+
+    // 1. 組件掛載/進入編輯時，退回歷史
+    const currentState = useCADStore.getState();
+    const tree = currentState.document.featureTree;
+    const idx = tree.findIndex((f) => f.id === featureId);
+    if (idx >= 0) {
+      if (currentState.document.rollbackIndex !== idx) {
+        currentState.setRollbackIndex(idx);
+      }
+      console.log('[P03 TRACE] EditSession', {
+        editingFeatureId: featureId,
+        rollbackIndex: idx,
+        canonicalVisibleFeatures: tree.slice(0, idx).map((f) => f.id),
+        previewFeatureId: featureId,
+        allFeatureIdsInTree: tree.map((f) => f.id),
+      });
+    }
+
+    // 2. 只有在組件真正卸載 (Unmount) 或 featureId 改變時，才恢復到樹的末端
+    return () => {
+      if (rollbackTimerRef.current) {
+        clearTimeout(rollbackTimerRef.current);
+      }
+      rollbackTimerRef.current = setTimeout(() => {
+        const state = useCADStore.getState();
+        const treeLen = state.document.featureTree.length;
+        if (state.document.rollbackIndex !== treeLen) {
+          state.setRollbackIndex(treeLen);
+        }
+      }, 0);
+    };
+  }, [featureId]);
 
   // 即時同步拉伸預覽狀態至 3D 視圖
   useEffect(() => {

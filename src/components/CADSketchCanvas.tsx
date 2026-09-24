@@ -5,7 +5,7 @@ import { CADGrid } from './CADGrid';
 import { EntityRenderer } from './EntityRenderer';
 import { ProfileRenderer } from './ProfileRenderer';
 import { DimensionRenderer } from './DimensionRenderer';
-import { Point2D, SketchFeature, Dimension, CADEntity2D, LineEntity } from '../types/cad';
+import { Point2D, SketchFeature, Dimension, CADEntity2D, LineEntity, ORIGIN_ENTITY_ID } from '../types/cad';
 import { useDrawMachine } from '../hooks/useDrawMachine';
 import { findSnapPoint } from '../core/2d/SnapManager';
 
@@ -330,32 +330,46 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
         const store = useCADStore.getState();
-        const { selectedEntityIds, activeSketchId, document, removeDimension, removeEntity, clearSelection } = store;
+        const {
+          selectedEntityIds,
+          activeSketchId,
+          document,
+          sketchSession,
+          removeDimension,
+          removeEntity,
+          clearSelection,
+        } = store;
 
         if (selectedEntityIds.length > 0 && activeSketchId) {
+          const isSession =
+            sketchSession.isActive && sketchSession.sketchId === activeSketchId;
           const sketch = document.featureTree.find(
             (f) => f.id === activeSketchId && f.type === 'SKETCH'
           ) as SketchFeature | undefined;
 
-          if (sketch) {
-            const dims = sketch.dimensions || [];
-            const idsToRemove = [...selectedEntityIds];
-            let hasRemoved = false;
+          const dims = isSession
+            ? sketchSession.draftDimensions
+            : sketch?.dimensions || [];
+          const ents = isSession
+            ? sketchSession.draftEntities
+            : sketch?.entities || [];
 
-            idsToRemove.forEach((id) => {
-              if (dims.some((d) => d.id === id)) {
-                removeDimension(id);
-                hasRemoved = true;
-              } else if (sketch.entities.some((ent) => ent.id === id)) {
-                removeEntity(id);
-                hasRemoved = true;
-              }
-            });
+          const idsToRemove = [...selectedEntityIds];
+          let hasRemoved = false;
 
-            if (hasRemoved) {
-              e.preventDefault();
-              clearSelection();
+          idsToRemove.forEach((id) => {
+            if (dims.some((d) => d.id === id)) {
+              removeDimension(id);
+              hasRemoved = true;
+            } else if (ents.some((ent) => ent.id === id)) {
+              removeEntity(id);
+              hasRemoved = true;
             }
+          });
+
+          if (hasRemoved) {
+            e.preventDefault();
+            clearSelection();
           }
         }
       }
@@ -976,14 +990,16 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
           if (distToOrigin <= 12) {
             e.stopPropagation();
             const currentSelected = useCADStore.getState().selectedEntityIds;
+            const isOriginId = (id: string) => id === 'origin' || id === 'ORIGIN' || id === ORIGIN_ENTITY_ID;
+            const hasOrigin = currentSelected.some(isOriginId);
             if (e.shiftKey) {
-              if (currentSelected.includes('origin')) {
-                useCADStore.setState({ selectedEntityIds: currentSelected.filter(id => id !== 'origin') });
+              if (hasOrigin) {
+                useCADStore.setState({ selectedEntityIds: currentSelected.filter(id => !isOriginId(id)) });
               } else {
-                useCADStore.setState({ selectedEntityIds: [...currentSelected, 'origin'] });
+                useCADStore.setState({ selectedEntityIds: [...currentSelected, ORIGIN_ENTITY_ID] });
               }
             } else {
-              useCADStore.setState({ selectedEntityIds: ['origin'] });
+              useCADStore.setState({ selectedEntityIds: [ORIGIN_ENTITY_ID] });
             }
             return;
           }
@@ -1425,7 +1441,13 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
               worldToScreen={worldToScreen}
               onEditDimension={handleEditDimension}
               onStartDragDimensionText={handleStartDragDimensionText}
-              onSelectDimension={(id, e) => handleSelectEntity(id, e as any)}
+              onSelectDimension={(id, e) => {
+                e.stopPropagation();
+                if (!(e as React.MouseEvent).shiftKey) {
+                  clearSelection();
+                }
+                selectEntity(id);
+              }}
               selectedDimensionIds={selectedEntityIds}
             />
           </g>
@@ -1466,7 +1488,7 @@ export const CADSketchCanvas: React.FC<{ sketchId?: string }> = ({ sketchId }) =
           {/* 原點標記層 */}
           {(() => {
             const { x: ox, y: oy } = worldToScreen({ x: 0, y: 0 });
-            const isOriginSelected = selectedEntityIds.includes('origin');
+            const isOriginSelected = selectedEntityIds.some(id => id === 'origin' || id === 'ORIGIN' || id === ORIGIN_ENTITY_ID);
             return (
               <g className="cad-origin-node" transform={`translate(${ox}, ${oy})`}>
                 <line x1="-7" y1="0" x2="7" y2="0" stroke="#ef4444" strokeWidth="1.5" />
